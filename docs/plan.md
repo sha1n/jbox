@@ -29,7 +29,7 @@
 | 0     | Specification                         | `docs/` committed; spec is the agreed source of truth.                                | ✅ Done (`c327e63`) |
 | 1     | Foundation                            | `swift build` succeeds on an empty SPM skeleton. CI runs green.                       | ✅ Done (`59188ad`) |
 | 2     | Engine core primitives                | Ring buffer, RT log queue, atomic meter, drift tracker — unit-tested and RT-safe.     | ✅ Done (`48ea5cb`) |
-| 3     | First working route                   | Audio from V31 → Apollo Virtual outputs, end-to-end, with real devices.               | ⏳ Pending |
+| 3     | First working route                   | Audio from V31 → Apollo Virtual outputs, end-to-end, with real devices.               | ✅ Code done (`6b74c59`) — manual hardware test deferred |
 | 4     | Drift correction and resampling       | 30-minute soak test on real devices with zero dropouts.                                | ⏳ Pending |
 | 5     | Multi-route and shared devices        | Three simultaneous routes running, including one that shares a device with another.   | ⏳ Pending |
 | 6     | SwiftUI UI                            | User can add / edit / delete / start / stop routes through the GUI.                   | ⏳ Pending |
@@ -170,44 +170,63 @@ Deviations from the original Phase 2 plan worth noting:
 
 ## Phase 3 — First working route
 
+**Status:** ✅ Code complete, CI green (8 commits: `7b7064a`..`6b74c59`). **Manual hardware acceptance test deferred** until the owner connects a V31 + Apollo (or equivalents). See the deferred-task checklist at the bottom of this phase.
+
 **Goal.** Integrate Core Audio HAL into the engine. Prove the architecture end-to-end by making audio flow from V31 to Apollo Virtual outputs in real time. **Drift correction is deliberately out of scope for this phase** — over long runs the route may drift, which is acceptable here. The purpose is to validate Core Audio integration, IOProc registration, and the ring buffer bridge, not long-term stability.
 
 **Entry criteria.** Phase 2 complete. A Roland V31 and a UA Apollo available for testing (or equivalent devices).
 
 **Exit criteria.**
-- The engine enumerates connected Core Audio devices and exposes them via the bridge API.
-- Starting a route configured as V31 ch 1,2 → Apollo Virt 1,2 makes audio flow.
-- Audible verification by the project owner using UA Console.
-- ≤ 5 minutes of running without dropouts or glitches (longer soak deferred to Phase 4).
-- `scripts/rt_safety_scan.sh` clean.
+- [x] The engine enumerates connected Core Audio devices and exposes them via the bridge API.
+- [~] Starting a route configured as V31 ch 1,2 → Apollo Virt 1,2 makes audio flow. **Deferred to manual test** — verified in CI/tests against SimulatedBackend with byte-exact sample-flow assertions; real-hardware verification pending.
+- [~] Audible verification by the project owner using UA Console. **Deferred to manual test.**
+- [~] ≤ 5 minutes of running without dropouts or glitches. **Deferred to manual test** (Phase 4 will establish the long-soak acceptance criterion once drift correction is in place).
+- [x] `scripts/rt_safety_scan.sh` clean.
 
 **Tasks.**
 
 Engine — device layer:
-- [ ] `device_manager.cpp` — enumerate devices via `AudioObjectGetPropertyData(kAudioHardwarePropertyDevices)`. For each device, read UID, name, sample rate, buffer frame size, channel counts.
-- [ ] Register a listener for `kAudioHardwarePropertyDevices` changes; post events to the control thread for re-enumeration.
-- [ ] `DeviceHandle` construction, input/output IOProc registration / unregistration, `AudioDeviceStart` / `AudioDeviceStop`.
+- [x] Backend abstraction (`IDeviceBackend`) introduced so tests can drive the engine without real hardware.
+  - [x] `SimulatedBackend` (commit #2) — deterministic, zero threads, no sleeps.
+  - [x] `CoreAudioBackend` (commit #3) — real implementation via `AudioObjectGetPropertyData(kAudioHardwarePropertyDevices)`, `AudioDeviceCreateIOProcID`, `AudioDeviceStart` / `AudioDeviceStop`. Handles both interleaved and non-interleaved device formats.
+- [x] `DeviceManager` (commit #4) — UID-keyed registry + enumeration cache.
+- [ ] Register a listener for `kAudioHardwarePropertyDevices` changes; post events to the control thread for re-enumeration. **Deferred to Phase 5** (paired with multi-route device sharing).
 
 Engine — route layer:
-- [ ] `route_manager.cpp` — add / remove / start / stop route operations (control thread).
-- [ ] Route start sequence: resolve device handles, allocate ring buffer, register IOProcs, transition to `running`.
-- [ ] Route stop sequence: atomic removal from device active-route lists, RCU grace period, IOProc unregistration.
-- [ ] Input IOProc copies selected channels from device input buffer into the route's ring buffer.
-- [ ] Output IOProc reads from ring buffer into selected channels of device output buffer. **No resampling yet** — assume matching sample rates.
+- [x] `RouteManager` (commit #5) — add / remove / start / stop route operations (control thread).
+- [x] Route start sequence: resolve device handles, allocate `RingBuffer`, register IOProcs, transition to `running`.
+- [x] Route stop sequence: close IOProcs via backend, release ring buffer storage.
+- [x] Input IOProc copies selected channels from device input buffer into the route's ring buffer.
+- [x] Output IOProc reads from ring buffer into selected channels of device output buffer. **No resampling yet** — assume matching sample rates.
+- [ ] RCU-style active-route lists (IOProc multiplexing behind a single registered callback). **Deferred to Phase 5** — Phase 3 enforces one-route-per-direction-per-device via `JBOX_ERR_DEVICE_BUSY`.
 
 Bridge API:
-- [ ] Implement `jbox_engine_create`, `jbox_engine_destroy`.
-- [ ] Implement `jbox_engine_enumerate_devices` returning a snapshot.
-- [ ] Implement `jbox_engine_add_route`, `jbox_engine_remove_route`, `jbox_engine_start_route`, `jbox_engine_stop_route`.
-- [ ] Implement `jbox_engine_poll_route_status`.
+- [x] Implemented `jbox_engine_create`, `jbox_engine_destroy` (commit #6; Engine facade owns DeviceManager + RouteManager).
+- [x] Implemented `jbox_engine_enumerate_devices` with heap-allocated snapshot and `jbox_device_list_free`.
+- [x] Implemented `jbox_engine_add_route`, `jbox_engine_remove_route`, `jbox_engine_start_route`, `jbox_engine_stop_route`.
+- [x] Implemented `jbox_engine_poll_route_status`.
 
-CLI harness:
-- [ ] Extend `JboxEngineCLI/main.swift` to accept `--list-devices` and `--route <src-uid>:<src-channels>-><dst-uid>:<dst-channels>`.
-- [ ] `--route` command creates the engine, configures the route, starts it, runs until the user presses Ctrl-C.
+CLI harness (commit #7):
+- [x] `JboxEngineCLI --list-devices` — tabular device listing (direction / channel counts / sample rate / buffer / UID).
+- [x] `JboxEngineCLI --route <src-uid>@<src-chs>-><dst-uid>@<dst-chs>` — creates and starts a route, polls status every second until SIGINT. Channels are 1-indexed on the CLI (converted to 0-indexed for the engine).
 
 Tests:
-- [ ] Integration test using a simulation harness: stub device drivers (not Core Audio) that feed deterministic samples into the engine via the same IOProc pattern. Verify samples come out correctly.
-- [ ] **Real-device manual test** — documented in this file as the Phase 3 acceptance procedure: connect V31 and Apollo, run the CLI to list devices, start a route V31 ch 1,2 → Apollo Virt 1,2, play a note on the V31, confirm sound in UA Console.
+- [x] Integration tests via `SimulatedBackend`: `RouteManager` (commit #5) and `Engine` / bridge API (commit #6) with byte-exact sample-flow assertions. Covers mapping validation, waiting-for-device, underrun counting, stop / remove semantics, device-sharing constraint, non-contiguous channel selection.
+- [x] Swift wrapper tests against live Core Audio (commit #7 / #8): create, destroy, enumerate, error propagation.
+- [ ] **Manual hardware acceptance test — deferred.** Procedure (tick boxes as they pass):
+  - [ ] Connect a source device (ideally Roland V31) and a destination device (ideally UA Apollo).
+  - [ ] Run `./scripts/verify.sh` and confirm everything still passes locally.
+  - [ ] Run `swift run JboxEngineCLI --list-devices` and confirm both devices appear with the expected channel counts.
+  - [ ] Run `swift run JboxEngineCLI --route '<v31-uid>@1,2-><apollo-uid>@5,6'` (substituting real UIDs and the desired virtual channels).
+  - [ ] Play a note on the V31; verify UA Console shows signal on Virtual inputs 5/6 and that processed audio comes out of whatever bus you routed Virtual 5/6 to.
+  - [ ] Let the route run for at least 5 minutes; note any audible clicks, dropouts, or obvious drift (some drift is expected pre-Phase 4).
+  - [ ] Hit Ctrl-C; confirm the CLI shuts down cleanly, devices stop cleanly (no stuck "device in use" state on other apps), and the terminal returns promptly.
+
+Phase 3 summary of deviations:
+- **Backend abstraction introduced upfront** (not in the original spec). Pays for Phase 4's drift-tracking simulation needs in advance; exposes the engine cleanly for tests.
+- **Device hot-plug listener deferred** to Phase 5 (couples naturally with shared-device work).
+- **RCU multi-route lists deferred** to Phase 5; Phase 3 enforces one-route-per-direction-per-device.
+- **`jbox::internal::createEngineWithBackend`** helper added (not public) so integration tests can substitute `SimulatedBackend` through the C bridge.
 
 ---
 
