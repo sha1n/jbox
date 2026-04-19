@@ -171,8 +171,15 @@ TEST_CASE("RtLogQueue: slow consumer causes producer drops but never corruption"
     std::uint32_t consumed = 0;
     std::thread consumer([&]() {
         RtLogEvent out{};
-        while (!producer_done.load(std::memory_order_acquire) || q.tryPop(out)) {
-            // Drain everything currently queued.
+        while (true) {
+            // Snapshot producer's status BEFORE draining so we don't
+            // race against a final post-snapshot push.
+            const bool producer_finished =
+                producer_done.load(std::memory_order_acquire);
+
+            // Drain everything currently queued via the inner loop —
+            // consuming here (not in the outer condition) so every
+            // popped event is counted.
             while (q.tryPop(out)) {
                 if (!first) {
                     // Codes accepted by the producer are strictly
@@ -187,6 +194,22 @@ TEST_CASE("RtLogQueue: slow consumer causes producer drops but never corruption"
                 // Brief backoff so the producer can outrun us.
                 std::this_thread::yield();
             }
+
+            if (producer_finished) {
+                // One final drain to collect anything pushed between
+                // the snapshot and the now-empty inner loop exit.
+                while (q.tryPop(out)) {
+                    if (!first) {
+                        REQUIRE(out.code > last_seen);
+                    }
+                    first = false;
+                    last_seen = out.code;
+                    ++consumed;
+                }
+                break;
+            }
+
+            std::this_thread::yield();
         }
     });
 
