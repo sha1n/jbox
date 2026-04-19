@@ -61,8 +61,6 @@ public:
 
 private:
     void*         converter_{nullptr};  // AudioConverterRef (opaque here).
-    double        src_rate_;
-    double        dst_rate_;
     std::uint32_t channels_;
     double        current_input_rate_{0.0};  // last rate pushed to AudioConverter; ctor sets to src_rate
 };

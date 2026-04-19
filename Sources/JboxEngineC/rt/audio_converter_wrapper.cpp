@@ -36,8 +36,9 @@ struct TrampolineCtx {
     // converter asks for more in a single callback (uncommon at our
     // rates and buffer sizes), we return what we have and the outer
     // call loops.
-    static constexpr std::size_t kMaxChunkFrames = 4096;
-    float chunk[kMaxChunkFrames * 8];  // up to 8 channels
+    static constexpr std::size_t   kMaxChunkFrames = 4096;
+    static constexpr std::uint32_t kMaxChannels    = 8;
+    float chunk[kMaxChunkFrames * kMaxChannels];
     std::size_t chunk_valid_bytes = 0;
 };
 
@@ -66,10 +67,12 @@ OSStatus acInputCallback(AudioConverterRef /*inConverter*/,
 
 AudioConverterWrapper::AudioConverterWrapper(double src_rate, double dst_rate,
                                              std::uint32_t channels)
-    : src_rate_(src_rate),
-      dst_rate_(dst_rate),
-      channels_(channels),
+    : channels_(channels),
       current_input_rate_(src_rate) {
+    if (channels == 0 || channels > TrampolineCtx::kMaxChannels) {
+        throw std::runtime_error(
+            "AudioConverterWrapper: channels must be in [1, 8]");
+    }
     const auto in  = makeFloatASBD(src_rate, channels);
     const auto out = makeFloatASBD(dst_rate, channels);
     AudioConverterRef ac = nullptr;
@@ -98,8 +101,14 @@ AudioConverterWrapper::~AudioConverterWrapper() {
 void AudioConverterWrapper::setInputRate(double rate) noexcept {
     if (rate <= 0.0 || converter_ == nullptr) return;
     if (rate == current_input_rate_) return;
-    // Update the input stream description's sample rate so the converter
-    // resamples at the new ratio on the next convert() call.
+    // Apple AudioConverter's kAudioConverterSampleRate property (named
+    // in docs/spec.md § 2.5 and docs/phase4-plan.md) is not consistently
+    // writable on our float-interleaved SRC configuration. We instead
+    // re-set the full input stream description, which is documented to
+    // propagate as a variable-ratio SRC update. The no-op fast-path
+    // above means we pay the cost only when the rate actually changes;
+    // the drift controller is slow (PI response in seconds) so most
+    // 100 Hz ticks short-circuit.
     AudioStreamBasicDescription asbd = makeFloatASBD(rate, channels_);
     AudioConverterSetProperty(static_cast<AudioConverterRef>(converter_),
                               kAudioConverterCurrentInputStreamDescription,
@@ -118,10 +127,15 @@ std::size_t AudioConverterWrapper::convert(float* out,
                                            void* user) noexcept {
     if (converter_ == nullptr || pull_input == nullptr || out == nullptr) return 0;
 
-    TrampolineCtx ctx{};
-    ctx.pull     = pull_input;
-    ctx.user     = user;
-    ctx.channels = channels_;
+    // Not value-initialized: only the fields below are read by
+    // acInputCallback. The chunk[] array is written by pull_input and
+    // its valid byte count is set inside the callback, so leaving it
+    // uninitialized avoids zeroing 128 KiB per IOProc.
+    TrampolineCtx ctx;
+    ctx.pull              = pull_input;
+    ctx.user              = user;
+    ctx.channels          = channels_;
+    ctx.chunk_valid_bytes = 0;
 
     AudioBufferList out_list{};
     out_list.mNumberBuffers = 1;
