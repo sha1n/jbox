@@ -39,7 +39,7 @@ The motivating workflow is routing two output channels of a Roland V31 USB sound
 2. **Top-performance real-time engine.** The audio-processing path is written in C++ with strict real-time discipline: no allocations, no locks, no syscalls on the audio thread.
 3. **UI is replaceable.** The engine is an independent library with a stable public C API. The entire v1 SwiftUI UI could be replaced by a CLI, a web UI, an AppKit UI, or anything else, without touching the engine.
 4. **Do not step on other apps.** Jbox does not create aggregate devices, does not change device sample rates, and does not change device buffer sizes without explicit user opt-in. Other apps sharing the same hardware are unaffected by Jbox's presence.
-5. **Personal use first.** v1 does not require an Apple Developer Program subscription or Xcode IDE. The build works from Xcode Command Line Tools alone, produces an ad-hoc-signed `.app` that runs on the user's Mac, and optionally packages an unsigned `.zip` for sharing with a small audience (with right-click → Open Gatekeeper instructions).
+5. **Personal use first.** v1 does not require a paid Apple Developer Program subscription, does not require anyone to use the Xcode IDE, and does not require Mac App Store distribution. Xcode.app must be installed for its frameworks (see § 5.2 for details), but development can happen entirely from the command line in any editor. The build produces an ad-hoc-signed `.app` that runs on the user's Mac, and optionally packages an unsigned `.zip` for sharing with a small audience (with right-click → Open Gatekeeper instructions).
 
 ---
 
@@ -677,7 +677,11 @@ Standard macOS settings window (`SwiftUI.Settings` scene) with three tabs:
 - `JboxApp` — the main macOS GUI executable (SwiftUI `@main` App struct).
 - Test targets: `JboxEngineTests`, `JboxEngineIntegrationTests`, `JboxAppTests`.
 
-**Toolchain.** Only **Xcode Command Line Tools** are required (free download, Apple ID sufficient, no paid Developer Program). Xcode IDE is optional — the user may open `Package.swift` in Xcode later for SwiftUI previews without affecting anything else.
+**Toolchain.** **Xcode.app must be installed** (free — either via the App Store, or via a direct `.xip` download from [developer.apple.com/download/all](https://developer.apple.com/download/all/) using a free Apple Developer account). No paid Apple Developer Program membership is required.
+
+Xcode.app's presence is mandatory because Command Line Tools alone do not include the `XCTest` or `Testing` frameworks; SPM cannot run `swift test` without them. However, **using the Xcode IDE is optional** — once Xcode.app is installed, the Swift toolchain picks up its frameworks automatically and all development can happen from the command line in any editor (VS Code, Cursor, Nova, Vim, etc.). Opening `Package.swift` in Xcode is supported (SwiftUI previews work) but never required.
+
+After installing Xcode.app for the first time, the license must be accepted once — either by opening `Xcode.app` briefly and clicking "Agree", or via `sudo xcodebuild -license`.
 
 **App bundle production.** SPM produces a plain executable. A shell script `scripts/bundle_app.sh` wraps the executable into a valid `Jbox.app`:
 1. Create the bundle skeleton: `Jbox.app/Contents/{MacOS,Resources}`.

@@ -24,22 +24,24 @@
 
 ## Milestone overview
 
-| Phase | Title                                 | Demonstrable outcome                                                                 |
-|-------|---------------------------------------|--------------------------------------------------------------------------------------|
-| 0     | Specification                         | `docs/` committed; spec is the agreed source of truth.                                |
-| 1     | Foundation                            | `swift build` succeeds on an empty SPM skeleton. CI runs green.                       |
-| 2     | Engine core primitives                | Ring buffer, RT log queue, atomic meter, drift tracker — unit-tested and RT-safe.     |
-| 3     | First working route                   | Audio from V31 → Apollo Virtual outputs, end-to-end, with real devices.               |
-| 4     | Drift correction and resampling       | 30-minute soak test on real devices with zero dropouts.                                |
-| 5     | Multi-route and shared devices        | Three simultaneous routes running, including one that shares a device with another.   |
-| 6     | SwiftUI UI                            | User can add / edit / delete / start / stop routes through the GUI.                   |
-| 7     | Persistence, scenes, launch-at-login  | Relaunching the app restores configured routes and scenes.                             |
-| 8     | Packaging and installation            | `Jbox.app` runs from `/Applications` on a clean user account.                          |
-| 9     | Release hardening                     | v1.0.0 tagged and published to GitHub Releases.                                        |
+| Phase | Title                                 | Demonstrable outcome                                                                 | Status |
+|-------|---------------------------------------|--------------------------------------------------------------------------------------|--------|
+| 0     | Specification                         | `docs/` committed; spec is the agreed source of truth.                                | ✅ Done (`c327e63`) |
+| 1     | Foundation                            | `swift build` succeeds on an empty SPM skeleton. CI runs green.                       | ✅ Done (`59188ad`) |
+| 2     | Engine core primitives                | Ring buffer, RT log queue, atomic meter, drift tracker — unit-tested and RT-safe.     | ⏳ Pending |
+| 3     | First working route                   | Audio from V31 → Apollo Virtual outputs, end-to-end, with real devices.               | ⏳ Pending |
+| 4     | Drift correction and resampling       | 30-minute soak test on real devices with zero dropouts.                                | ⏳ Pending |
+| 5     | Multi-route and shared devices        | Three simultaneous routes running, including one that shares a device with another.   | ⏳ Pending |
+| 6     | SwiftUI UI                            | User can add / edit / delete / start / stop routes through the GUI.                   | ⏳ Pending |
+| 7     | Persistence, scenes, launch-at-login  | Relaunching the app restores configured routes and scenes.                             | ⏳ Pending |
+| 8     | Packaging and installation            | `Jbox.app` runs from `/Applications` on a clean user account.                          | ⏳ Pending |
+| 9     | Release hardening                     | v1.0.0 tagged and published to GitHub Releases.                                        | ⏳ Pending |
 
 ---
 
-## Phase 0 — Specification (current)
+## Phase 0 — Specification
+
+**Status:** ✅ Complete. Initial docs committed in `c327e63` and pushed to `origin/master`.
 
 **Goal.** Produce the three docs — `README.md` at the repo root, `docs/spec.md`, `docs/plan.md` — committed to the repo, and approved by the project owner.
 
@@ -56,52 +58,58 @@
 - [x] Write `docs/spec.md`.
 - [x] Write `README.md` (repo root).
 - [x] Write `docs/plan.md`.
-- [ ] Spec self-review pass (scan for "TBD", "TODO", placeholders, contradictions).
-- [ ] Project owner review of all three documents.
-- [ ] Initial commit on `master` with all three documents.
+- [x] Spec self-review pass (scan for "TBD", "TODO", placeholders, contradictions).
+- [x] Project owner review of all three documents.
+- [x] Initial commit on `master` with all three documents.
 
 ---
 
 ## Phase 1 — Foundation
+
+**Status:** ✅ Complete. Scaffolding committed in `59188ad` and pushed; CI run #24624922185 green in 40 seconds.
 
 **Goal.** Stand up the repository scaffolding so all subsequent work happens in a buildable, CI-checked project.
 
 **Entry criteria.** Phase 0 complete. Docs approved.
 
 **Exit criteria.**
-- `swift build` succeeds on the empty SPM skeleton.
-- `swift test` succeeds with the single placeholder test.
-- `scripts/rt_safety_scan.sh` runs and prints "clean" against the empty engine source tree.
-- GitHub Actions workflow runs on push to `master` and on pull requests; all checks green.
-- `.gitignore`, `LICENSE`, and the `scripts/` directory are in place. (`README.md` already exists from Phase 0.)
+- [x] `swift build` succeeds on the empty SPM skeleton.
+- [x] `swift test` succeeds with the placeholder tests (3 suites, 4 tests, all passing under Swift Testing).
+- [x] `scripts/rt_safety_scan.sh` runs and prints "clean" against the empty engine source tree.
+- [x] GitHub Actions workflow runs on push to `master` and on pull requests; all checks green.
+- [x] `.gitignore`, `LICENSE`, and the `scripts/` directory are in place. (`README.md` already exists from Phase 0.)
 
 **Tasks.**
 
 Repository scaffolding:
-- [ ] Create `Package.swift` at repo root declaring the target layout from [spec.md § 5.3](./spec.md#53-project-layout). Start with empty or minimal targets — enough to `swift build` successfully.
-- [ ] Create directory structure under `Sources/`: `JboxEngineC/include/`, `JboxEngineC/rt/`, `JboxEngineC/control/`, `JboxEngineSwift/`, `JboxEngineCLI/`, `JboxApp/`.
-- [ ] Add a stub `jbox_engine.h` in `Sources/JboxEngineC/include/` with just the ABI version macro and `jbox_engine_abi_version()` function declaration.
-- [ ] Add a stub `JboxApp.swift` with a minimal SwiftUI App struct that opens an empty window.
-- [ ] Add a stub `main.swift` in `JboxEngineCLI/` that prints the ABI version.
-- [ ] Add `.gitignore` covering `.build/`, `.swiftpm/`, `.DS_Store`, `*.xcodeproj` (in case Xcode generates one), `build/`.
-- [ ] Add `LICENSE` (or defer with a placeholder `LICENSE.md` noting the decision is pending).
+- [x] Create `Package.swift` at repo root declaring the target layout from [spec.md § 5.3](./spec.md#53-project-layout). Five targets plus three test targets; `cxxLanguageStandard: .cxx20`.
+- [x] Create directory structure under `Sources/`: `JboxEngineC/include/`, `JboxEngineC/rt/`, `JboxEngineC/control/`, `JboxEngineSwift/`, `JboxEngineCLI/`, `JboxApp/`.
+- [x] Add `jbox_engine.h` in `Sources/JboxEngineC/include/` with the ABI version macro and `jbox_engine_abi_version()` declaration.
+- [x] Add `JboxApp.swift` — minimal SwiftUI App struct, single window showing the engine ABI version.
+- [x] Add `main.swift` in `JboxEngineCLI/` that prints the ABI version.
+- [x] Add `.gitignore` covering `.build/`, `.swiftpm/`, `.DS_Store`, `*.xcodeproj` / `*.xcworkspace`, `build/`.
+- [x] Add `LICENSE` placeholder ("all rights reserved; license decision pending"). Per project owner decision, a permissive license will be chosen later; change is a single-file replacement.
 
 Scripts:
-- [ ] `scripts/rt_safety_scan.sh` — greps `Sources/JboxEngineC/rt/` for banned symbols (`new`, `malloc`, `free`, `std::mutex`, `std::lock_guard`, `dispatch_async`, `pthread_mutex_lock`, `os_log_info`, `os_log_debug`, `printf`, `fprintf`, `sprintf`). Exits non-zero on any match.
-- [ ] `scripts/bundle_app.sh` — skeleton that produces `build/Jbox.app` from the SPM-built executable. Full implementation in Phase 8; placeholder version here should at least run without error.
-- [ ] `scripts/build_release.sh` — placeholder.
-- [ ] `scripts/package_unsigned_release.sh` — placeholder.
-- [ ] `scripts/run_app.sh` — builds and launches the app locally.
+- [x] `scripts/rt_safety_scan.sh` — scans `Sources/JboxEngineC/rt/` for banned symbols (allocators, locks, dispatch calls, non-RT-safe logging, smart pointer construction). Bash-3.2 compatible (macOS default shell). Clean pass on an empty `rt/`.
+- [x] `scripts/bundle_app.sh` — **fully functional** (not a placeholder): creates `build/Jbox.app`, generates `Info.plist`, copies the executable, ad-hoc signs with Hardened Runtime. Overshot the original plan; good as-is.
+- [x] `scripts/build_release.sh` — wraps `swift build -c release` + `bundle_app.sh`. Works end-to-end.
+- [x] `scripts/package_unsigned_release.sh` — placeholder stub (exits zero with a notice). Full implementation in Phase 8.
+- [x] `scripts/run_app.sh` — builds, bundles, and launches the `.app` locally via `open`.
 
 CI:
-- [ ] `.github/workflows/ci.yml` configured for GitHub Actions `macos-15` runner.
-- [ ] CI runs: `swift build -c release`, `swift test`, `scripts/rt_safety_scan.sh`.
-- [ ] `clang-tidy` and `swiftlint` steps included but permitted to warn without failing on Phase 1 (tighten in later phases).
-- [ ] CI passes on an initial PR that touches only scaffolding.
+- [x] `.github/workflows/ci.yml` configured for GitHub Actions `macos-15` runner.
+- [x] CI runs: `swift build -c release`, `swift test`, `scripts/rt_safety_scan.sh`.
+- [ ] `clang-tidy` and `swiftlint` steps included but permitted to warn without failing on Phase 1 (tighten in later phases). **Deferred to Phase 2** (no engine code yet to lint).
+- [x] CI passes on `master` push. (Initial PR flow skipped for a solo repo; PR triggers are still wired up for future contributions.)
 
 Testing harness:
-- [ ] Placeholder test targets (`JboxEngineTests`, `JboxEngineIntegrationTests`, `JboxAppTests`) each with one stub test that passes.
-- [ ] `swift test` runs all three and passes.
+- [x] Placeholder test targets (`JboxEngineTests`, `JboxEngineIntegrationTests`, `JboxAppTests`), each with passing stub tests. `JboxEngineTests` additionally verifies runtime ABI matches the header constant.
+- [x] `swift test` runs all three and passes (3 suites / 4 tests under Swift Testing).
+
+Deviations from the original Phase 1 plan worth noting:
+- **Swift Testing instead of XCTest.** Original plan mentioned XCTest; discovered during verification that XCTest isn't shipped with Xcode Command Line Tools. Switched to Swift Testing (modern, bundled with Swift 6.x), which also surfaced that **Xcode.app must be installed** (for its frameworks) even though the IDE isn't used. Docs (`README.md`, `docs/spec.md`) updated in the same commit.
+- **`bundle_app.sh` and `build_release.sh` are real, not stubs.** Overshoot; kept as-is since they work and Phase 8 would have had to rewrite them anyway.
 
 ---
 

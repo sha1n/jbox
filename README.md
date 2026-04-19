@@ -42,7 +42,7 @@ A typical example: routing a hardware instrument or external sound module into s
 2. **Top-performance real-time engine.** The audio-processing path is written in C++ with strict real-time discipline: no allocations, no locks, no syscalls on the audio thread. Engineered for near-zero added latency.
 3. **UI is replaceable.** The engine is an independent C++ library exposed via a stable public C API. Today's SwiftUI UI is one implementation of that API; it can be rewritten or replaced without touching the engine.
 4. **Do not step on other apps.** Jbox does not create aggregate devices, does not change sample rates, and does not change buffer sizes without explicit user opt-in. Other apps sharing the same hardware are unaffected.
-5. **Personal use first.** v1 runs with only Xcode Command Line Tools (free) and ad-hoc code signing. No Apple Developer Program required. Distribution to others is possible via an unsigned `.zip` lane with clear Gatekeeper instructions.
+5. **Personal use first.** v1 runs with free Apple tooling and ad-hoc code signing. No paid Apple Developer Program required. Development works entirely from the command line — the Xcode IDE is never required (though Xcode.app must be installed for its frameworks; see Prerequisites). Distribution to others is possible via an unsigned `.zip` lane with clear Gatekeeper instructions.
 
 ---
 
@@ -59,14 +59,9 @@ A typical example: routing a hardware instrument or external sound module into s
 ### Prerequisites
 
 - macOS 15 (Sequoia) or later.
-- **Xcode Command Line Tools** installed:
-
-  ```sh
-  xcode-select --install
-  ```
-
-  Free, requires only an Apple ID, not the paid Developer Program.
-- An editor of your choice. Xcode IDE is optional — any editor with Swift LSP support (VS Code with the Swift extension, Cursor, Nova, Vim with `sourcekit-lsp`, etc.) works.
+- **Xcode.app** installed (free — via the App Store, or via a direct `.xip` download from [developer.apple.com/download/all](https://developer.apple.com/download/all/) using a free Apple Developer account — **not** the paid $99/yr Developer Program). Xcode.app provides the `XCTest` and `Testing` frameworks that `swift test` requires; Command Line Tools alone are not sufficient.
+- After first install, accept the Xcode license once: open `Xcode.app` and click "Agree," or run `sudo xcodebuild -license`.
+- An editor of your choice. **Using the Xcode IDE is never required** — all development happens at the command line via `swift build` / `swift test`. Any editor with Swift LSP support works (VS Code with the Swift extension, Cursor, Nova, Vim with `sourcekit-lsp`, etc.).
 
 ### Build
 
