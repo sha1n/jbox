@@ -2,50 +2,10 @@
 
 #include "route_manager.hpp"
 
-#include "ring_buffer.hpp"
-
 #include <algorithm>
-#include <atomic>
 #include <cstring>
 
 namespace jbox::control {
-
-// -----------------------------------------------------------------------------
-// RouteRecord — internal per-route state
-// -----------------------------------------------------------------------------
-
-struct RouteManager::RouteRecord {
-    // Immutable configuration.
-    jbox_route_id_t          id = JBOX_INVALID_ROUTE_ID;
-    std::string              name;
-    std::string              source_uid;
-    std::string              dest_uid;
-    std::vector<ChannelEdge> mapping;
-
-    // Lifecycle.
-    jbox_route_state_t state      = JBOX_ROUTE_STATE_STOPPED;
-    jbox_error_code_t  last_error = JBOX_OK;
-
-    // Runtime resources (populated on successful startRoute, cleared on stop).
-    std::vector<float>                ring_storage;
-    std::unique_ptr<jbox::rt::RingBuffer> ring;
-    IOProcId input_ioproc  = kInvalidIOProcId;
-    IOProcId output_ioproc = kInvalidIOProcId;
-    // Scratch buffers for interleaving selected channels into the
-    // ring format. Allocated at route start; sized conservatively.
-    std::vector<float> input_scratch;
-    std::vector<float> output_scratch;
-
-    std::uint32_t channels_count        = 0;  // mapping.size()
-    std::uint32_t source_total_channels = 0;  // device's input channel count
-    std::uint32_t dest_total_channels   = 0;  // device's output channel count
-
-    // Atomic counters updated from RT threads.
-    std::atomic<std::uint64_t> frames_produced{0};
-    std::atomic<std::uint64_t> frames_consumed{0};
-    std::atomic<std::uint64_t> underrun_count{0};
-    std::atomic<std::uint64_t> overrun_count{0};
-};
 
 // -----------------------------------------------------------------------------
 // RT trampolines
@@ -63,7 +23,7 @@ void inputIOProcCallback(const float* samples,
                          std::uint32_t frame_count,
                          std::uint32_t channel_count,
                          void* user_data) {
-    auto* r = static_cast<RouteManager::RouteRecord*>(user_data);
+    auto* r = static_cast<RouteRecord*>(user_data);
     if (r->ring == nullptr) return;
     if (channel_count != r->source_total_channels) return;  // unexpected
 
@@ -86,28 +46,41 @@ void inputIOProcCallback(const float* samples,
     r->frames_produced.fetch_add(written, std::memory_order_relaxed);
 }
 
+// Pull callback handed to AudioConverterWrapper::convert. Reads from
+// the route's ring buffer into the converter's scratch.
+std::size_t ringPullCallback(float* dst, std::size_t frames, void* user) {
+    auto* r = static_cast<RouteRecord*>(user);
+    if (r == nullptr || r->ring == nullptr) return 0;
+    return r->ring->readFrames(dst, frames);
+}
+
 void outputIOProcCallback(float* samples,
                           std::uint32_t frame_count,
                           std::uint32_t channel_count,
                           void* user_data) {
-    auto* r = static_cast<RouteManager::RouteRecord*>(user_data);
-    if (r->ring == nullptr) return;
+    auto* r = static_cast<RouteRecord*>(user_data);
+    if (r->ring == nullptr || r->converter == nullptr) return;
     if (channel_count != r->dest_total_channels) return;
+
+    // Apply any pending rate update from the control thread. RT-thread-
+    // local `last_applied_rate` suppresses redundant setProperty calls.
+    const double target = r->target_input_rate.load(std::memory_order_relaxed);
+    if (target > 0.0 && target != r->last_applied_rate) {
+        r->converter->setInputRate(target);
+        r->last_applied_rate = target;
+    }
 
     const std::uint32_t in_channels = r->channels_count;
     float* scratch = r->output_scratch.data();
 
-    const std::size_t read = r->ring->readFrames(scratch, frame_count);
-    if (read < frame_count) {
+    const std::size_t produced = r->converter->convert(
+        scratch, frame_count, &ringPullCallback, r);
+    if (produced < frame_count) {
         r->underrun_count.fetch_add(1, std::memory_order_relaxed);
-        // Zero-fill the remainder.
-        std::memset(scratch + read * in_channels,
-                    0,
-                    (frame_count - read) * in_channels * sizeof(float));
+        std::memset(scratch + produced * in_channels, 0,
+                    (frame_count - produced) * in_channels * sizeof(float));
     }
 
-    // The output buffer is already zero-filled by the backend; we
-    // only write the destination channels selected in the mapping.
     for (std::uint32_t f = 0; f < frame_count; ++f) {
         const float* src_frame = scratch + f * in_channels;
         float*       dst_frame = samples + f * channel_count;
@@ -116,7 +89,7 @@ void outputIOProcCallback(float* samples,
         }
     }
 
-    r->frames_consumed.fetch_add(read, std::memory_order_relaxed);
+    r->frames_consumed.fetch_add(produced, std::memory_order_relaxed);
 }
 
 }  // namespace
@@ -210,6 +183,15 @@ jbox_error_code_t RouteManager::pollStatus(jbox_route_id_t id,
     return JBOX_OK;
 }
 
+std::vector<RouteRecord*> RouteManager::runningRoutes() {
+    std::vector<RouteRecord*> out;
+    out.reserve(routes_.size());
+    for (auto& [id, rec] : routes_) {
+        if (rec->state == JBOX_ROUTE_STATE_RUNNING) out.push_back(rec.get());
+    }
+    return out;
+}
+
 // -----------------------------------------------------------------------------
 // Internal helpers
 // -----------------------------------------------------------------------------
@@ -268,6 +250,26 @@ jbox_error_code_t RouteManager::attemptStart(RouteRecord& r) {
         static_cast<std::size_t>(kRtScratchMaxFrames) * r.channels_count, 0.0f);
     r.output_scratch.assign(
         static_cast<std::size_t>(kRtScratchMaxFrames) * r.channels_count, 0.0f);
+
+    r.nominal_src_rate = src->nominal_sample_rate > 0.0
+                             ? src->nominal_sample_rate
+                             : 48000.0;
+    r.nominal_dst_rate = dst->nominal_sample_rate > 0.0
+                             ? dst->nominal_sample_rate
+                             : r.nominal_src_rate;
+
+    try {
+        r.converter = std::make_unique<jbox::rt::AudioConverterWrapper>(
+            r.nominal_src_rate, r.nominal_dst_rate, r.channels_count);
+    } catch (const std::exception&) {
+        r.state = JBOX_ROUTE_STATE_ERROR;
+        r.last_error = JBOX_ERR_INTERNAL;
+        return JBOX_ERR_INTERNAL;
+    }
+
+    r.target_input_rate.store(r.nominal_src_rate, std::memory_order_relaxed);
+    r.last_applied_rate = r.nominal_src_rate;
+    r.tracker.reset();
 
     // Register IOProcs.
     IDeviceBackend& be = dm_.backend();
@@ -332,6 +334,14 @@ void RouteManager::teardown(RouteRecord& r) {
     // Release runtime resources. AudioDeviceStop is synchronous on
     // Core Audio, so by the time closeCallback returns no IOProc
     // callback is in flight for this record.
+    if (r.converter) {
+        r.converter->reset();
+        r.converter.reset();
+    }
+    r.target_input_rate.store(0.0, std::memory_order_relaxed);
+    r.last_applied_rate = 0.0;
+    r.tracker.reset();
+
     r.ring.reset();
     r.ring_storage.clear();
     r.input_scratch.clear();

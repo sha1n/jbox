@@ -24,10 +24,14 @@
 #ifndef JBOX_CONTROL_ROUTE_MANAGER_HPP
 #define JBOX_CONTROL_ROUTE_MANAGER_HPP
 
+#include "audio_converter_wrapper.hpp"
 #include "channel_mapper.hpp"
 #include "device_manager.hpp"
+#include "drift_tracker.hpp"
 #include "jbox_engine.h"
+#include "ring_buffer.hpp"
 
+#include <atomic>
 #include <cstdint>
 #include <memory>
 #include <string>
@@ -35,6 +39,53 @@
 #include <vector>
 
 namespace jbox::control {
+
+// Internal per-route record. Lives in the header (not the .cpp) so the
+// drift sampler (control/drift_sampler.*) can iterate running routes
+// without being a friend of RouteManager. Not part of the public C API.
+struct RouteRecord {
+    // Immutable configuration.
+    jbox_route_id_t          id = JBOX_INVALID_ROUTE_ID;
+    std::string              name;
+    std::string              source_uid;
+    std::string              dest_uid;
+    std::vector<ChannelEdge> mapping;
+
+    // Lifecycle.
+    jbox_route_state_t state      = JBOX_ROUTE_STATE_STOPPED;
+    jbox_error_code_t  last_error = JBOX_OK;
+
+    // Runtime resources (populated on successful startRoute, cleared on stop).
+    std::vector<float>                               ring_storage;
+    std::unique_ptr<jbox::rt::RingBuffer>            ring;
+    std::unique_ptr<jbox::rt::AudioConverterWrapper> converter;
+    DriftTracker                                     tracker{1e-6, 1e-8, 100.0};
+    IOProcId input_ioproc  = kInvalidIOProcId;
+    IOProcId output_ioproc = kInvalidIOProcId;
+
+    std::vector<float> input_scratch;
+    std::vector<float> output_scratch;
+
+    std::uint32_t channels_count        = 0;
+    std::uint32_t source_total_channels = 0;
+    std::uint32_t dest_total_channels   = 0;
+
+    double nominal_src_rate = 0.0;
+    double nominal_dst_rate = 0.0;
+
+    // Control thread writes; RT thread reads and applies via
+    // converter.setInputRate(). 0.0 means "unset; use nominal".
+    std::atomic<double> target_input_rate{0.0};
+
+    // RT-thread-local: last rate we pushed to the converter.
+    double last_applied_rate = 0.0;
+
+    // Counters.
+    std::atomic<std::uint64_t> frames_produced{0};
+    std::atomic<std::uint64_t> frames_consumed{0};
+    std::atomic<std::uint64_t> underrun_count{0};
+    std::atomic<std::uint64_t> overrun_count{0};
+};
 
 class RouteManager {
 public:
@@ -80,10 +131,10 @@ public:
     // Access to the underlying device manager.
     DeviceManager& deviceManager() { return dm_; }
 
-    // Forward declaration kept public so the .cpp-local RT trampolines
-    // can accept RouteRecord* via user_data without friend-ing them.
-    // The full definition is a .cpp detail.
-    struct RouteRecord;
+    // Snapshot of currently-running routes, for the drift sampler.
+    // Control-thread only. Returns raw pointers into the owning map;
+    // the pointers are valid until the next add/remove/stop call.
+    std::vector<RouteRecord*> runningRoutes();
 
 private:
 
