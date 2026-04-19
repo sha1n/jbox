@@ -93,13 +93,31 @@ swift run JboxEngineCLI --route <src-uid>:<src-channels> -> <dst-uid>:<dst-chann
 
 See `Sources/JboxEngineCLI/main.swift` for full options.
 
-### Test
+### Make targets (recommended)
+
+Common commands are wrapped in a [`Makefile`](./Makefile) at the repo root:
 
 ```sh
-./scripts/verify.sh                 # runs the full pipeline (same as CI)
+make            # show all targets (default)
+make clean      # wipe .build/ build/ test-results/ .swiftpm/
+make build      # produce the distributable DMG (Jbox-<version>.dmg)
+make test       # run the full test pipeline (same as CI)
+make all        # clean + build + test
+
+# Fine-grained:
+make app        # build Jbox.app only (no DMG)
+make run        # build, bundle, and launch
+make cli        # build just JboxEngineCLI
+make swift-test # Swift tests only (fast iteration)
+make cxx-test   # C++ tests only (with per-test timings)
+make rt-scan    # RT-safety static scanner only
 ```
 
-`verify.sh` is the canonical "is my tree green?" command and mirrors exactly what CI runs on each push. It covers:
+The version used for `make build` defaults to `git describe`; override with `make VERSION=X.Y.Z build`. All output lands in git-ignored directories (`.build/`, `build/`, `test-results/`).
+
+### Direct commands
+
+Behind the Make targets, the canonical script is [`scripts/verify.sh`](./scripts/verify.sh) — the "is my tree green?" gate that mirrors CI exactly:
 
 1. RT-safety static scan on `Sources/JboxEngineC/rt/`
 2. Release build of all SPM targets
@@ -107,7 +125,7 @@ See `Sources/JboxEngineCLI/main.swift` for full options.
 4. C++ engine tests via Catch2, with per-test timings
 5. C++ engine tests under ThreadSanitizer
 
-For faster iteration, the individual steps can be run directly:
+For targeted runs:
 
 ```sh
 swift test                                       # Swift Testing tests
