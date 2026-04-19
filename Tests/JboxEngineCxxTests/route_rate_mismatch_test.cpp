@@ -44,7 +44,7 @@ TEST_CASE("Route carries 48k -> 44.1k end-to-end through AudioConverter",
     backend.addDevice(makeDevice("src48", 48000.0, 2, 0));
     backend.addDevice(makeDevice("dst44", 44100.0, 0, 2));
 
-    Engine engine(std::move(backend_ptr));
+    Engine engine(std::move(backend_ptr), /*spawn_sampler_thread=*/false);
     engine.enumerateDevices();
 
     RouteManager::RouteConfig cfg;

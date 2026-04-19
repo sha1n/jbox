@@ -32,10 +32,17 @@ namespace jbox::internal {
 // public header; tests declare it extern-cpp and call it directly.
 // Signature may change without a MAJOR bump.
 jbox_engine_t* createEngineWithBackend(
-    std::unique_ptr<jbox::control::IDeviceBackend> backend) {
+    std::unique_ptr<jbox::control::IDeviceBackend> backend,
+    bool spawn_sampler_thread) {
     auto* e = new jbox_engine{};
-    e->impl = std::make_unique<jbox::control::Engine>(std::move(backend));
+    e->impl = std::make_unique<jbox::control::Engine>(
+        std::move(backend), spawn_sampler_thread);
     return e;
+}
+
+void tickDriftOnce(jbox_engine_t* engine, double dt_seconds) {
+    if (engine == nullptr || engine->impl == nullptr) return;
+    engine->impl->driftSampler().tickAll(dt_seconds);
 }
 
 }  // namespace jbox::internal
@@ -131,7 +138,8 @@ jbox_engine_t* jbox_engine_create(const jbox_engine_config_t* /*config*/,
                                   jbox_error_t* err) {
     try {
         auto backend = std::make_unique<jbox::control::CoreAudioBackend>();
-        return jbox::internal::createEngineWithBackend(std::move(backend));
+        return jbox::internal::createEngineWithBackend(std::move(backend),
+                                                       /*spawn_sampler_thread=*/true);
     } catch (const std::bad_alloc&) {
         setError(err, JBOX_ERR_RESOURCE_EXHAUSTED, "out of memory");
         return nullptr;

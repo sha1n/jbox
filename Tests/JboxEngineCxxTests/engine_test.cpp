@@ -38,7 +38,7 @@ TEST_CASE("Engine: construction populates device snapshot", "[engine]") {
     backend->addDevice(makeDev("src", kBackendDirectionInput, 2, 0));
     backend->addDevice(makeDev("dst", kBackendDirectionOutput, 0, 2));
 
-    Engine e(std::move(backend));
+    Engine e(std::move(backend), /*spawn_sampler_thread=*/false);
     REQUIRE(e.deviceManager().devices().size() == 2);
 }
 
@@ -47,7 +47,7 @@ TEST_CASE("Engine: enumerateDevices re-polls the backend", "[engine]") {
     auto* backend = backend_holder.get();
     backend->addDevice(makeDev("src", kBackendDirectionInput, 2, 0));
 
-    Engine e(std::move(backend_holder));
+    Engine e(std::move(backend_holder), /*spawn_sampler_thread=*/false);
     REQUIRE(e.enumerateDevices().size() == 1);
 
     backend->addDevice(makeDev("dst", kBackendDirectionOutput, 0, 2));
@@ -60,7 +60,7 @@ TEST_CASE("Engine: full route lifecycle via facade", "[engine][integration]") {
     backend->addDevice(makeDev("src", kBackendDirectionInput,  2, 0));
     backend->addDevice(makeDev("dst", kBackendDirectionOutput, 0, 2));
 
-    Engine e(std::move(backend_holder));
+    Engine e(std::move(backend_holder), /*spawn_sampler_thread=*/false);
 
     RouteManager::RouteConfig cfg;
     cfg.source_uid = "src";

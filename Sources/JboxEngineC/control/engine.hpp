@@ -14,6 +14,7 @@
 
 #include "device_backend.hpp"
 #include "device_manager.hpp"
+#include "drift_sampler.hpp"
 #include "route_manager.hpp"
 #include "jbox_engine.h"
 
@@ -24,8 +25,9 @@ namespace jbox::control {
 
 class Engine {
 public:
-    explicit Engine(std::unique_ptr<IDeviceBackend> backend);
-    ~Engine() = default;
+    Engine(std::unique_ptr<IDeviceBackend> backend,
+           bool spawn_sampler_thread);
+    ~Engine();
 
     Engine(const Engine&) = delete;
     Engine& operator=(const Engine&) = delete;
@@ -44,10 +46,12 @@ public:
 
     DeviceManager&   deviceManager() { return dm_; }
     RouteManager&    routeManager()  { return rm_; }
+    DriftSampler&    driftSampler()  { return sampler_; }
 
 private:
     DeviceManager dm_;
     RouteManager  rm_;
+    DriftSampler  sampler_;
 };
 
 }  // namespace jbox::control

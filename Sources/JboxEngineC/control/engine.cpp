@@ -6,12 +6,16 @@
 
 namespace jbox::control {
 
-Engine::Engine(std::unique_ptr<IDeviceBackend> backend)
+Engine::Engine(std::unique_ptr<IDeviceBackend> backend,
+               bool spawn_sampler_thread)
     : dm_(std::move(backend)),
-      rm_(dm_) {
-    // Populate an initial device snapshot; callers can refresh later.
+      rm_(dm_),
+      sampler_(rm_) {
     dm_.refresh();
+    if (spawn_sampler_thread) sampler_.start();
 }
+
+Engine::~Engine() { sampler_.stop(); }
 
 const std::vector<BackendDeviceInfo>& Engine::enumerateDevices() {
     return dm_.refresh();

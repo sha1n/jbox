@@ -57,7 +57,7 @@ ConvergenceResult runScenario(double src_drift_ppm, double dst_drift_ppm,
     backend.addDevice(makeDevice("src", 48000.0, 2, 0));
     backend.addDevice(makeDevice("dst", 48000.0, 0, 2));
 
-    Engine engine(std::move(backend_ptr));
+    Engine engine(std::move(backend_ptr), /*spawn_sampler_thread=*/false);
     engine.enumerateDevices();
 
     RouteManager::RouteConfig cfg;

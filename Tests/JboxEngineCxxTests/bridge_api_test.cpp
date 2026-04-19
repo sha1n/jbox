@@ -17,10 +17,12 @@
 #include <string_view>
 #include <vector>
 
-// Forward-declare the test-only helper from bridge_api.cpp.
+// Forward-declare the test-only helpers from bridge_api.cpp.
 namespace jbox::internal {
 jbox_engine_t* createEngineWithBackend(
-    std::unique_ptr<jbox::control::IDeviceBackend> backend);
+    std::unique_ptr<jbox::control::IDeviceBackend> backend,
+    bool spawn_sampler_thread);
+void tickDriftOnce(jbox_engine_t* engine, double dt_seconds);
 }  // namespace jbox::internal
 
 using jbox::control::BackendDeviceInfo;
@@ -118,7 +120,8 @@ TEST_CASE("bridge: enumerate via SimulatedBackend returns our devices",
     backend->addDevice(makeDev("src", kBackendDirectionInput, 2, 0));
     backend->addDevice(makeDev("dst", kBackendDirectionOutput, 0, 2));
 
-    jbox_engine_t* e = jbox::internal::createEngineWithBackend(std::move(backend));
+    jbox_engine_t* e = jbox::internal::createEngineWithBackend(std::move(backend),
+                                                                /*spawn_sampler_thread=*/false);
     REQUIRE(e != nullptr);
 
     jbox_error_t err{};
@@ -145,7 +148,8 @@ TEST_CASE("bridge: add / start / poll / stop / remove route via C API",
     backend->addDevice(makeDev("src", kBackendDirectionInput,  2, 0));
     backend->addDevice(makeDev("dst", kBackendDirectionOutput, 0, 2));
 
-    jbox_engine_t* e = jbox::internal::createEngineWithBackend(std::move(backend_holder));
+    jbox_engine_t* e = jbox::internal::createEngineWithBackend(std::move(backend_holder),
+                                                                /*spawn_sampler_thread=*/false);
     REQUIRE(e != nullptr);
 
     // Enumerate — this populates DeviceManager's UID index via
@@ -202,7 +206,8 @@ TEST_CASE("bridge: add_route rejects NULL mapping with mapping_count>0",
     auto backend = std::make_unique<SimulatedBackend>();
     backend->addDevice(makeDev("src", kBackendDirectionInput,  2, 0));
     backend->addDevice(makeDev("dst", kBackendDirectionOutput, 0, 2));
-    jbox_engine_t* e = jbox::internal::createEngineWithBackend(std::move(backend));
+    jbox_engine_t* e = jbox::internal::createEngineWithBackend(std::move(backend),
+                                                                /*spawn_sampler_thread=*/false);
 
     jbox_route_config_t rcfg{
         .source_uid = "src",
