@@ -635,7 +635,7 @@ Standard macOS settings window (`SwiftUI.Settings` scene) with three tabs:
 
 ### 5.1 Testing strategy
 
-**Engine unit tests (C++).** GoogleTest or Catch2 — decision taken in Phase 2 based on SPM integration ergonomics.
+**Engine unit tests (C++).** [Catch2 v3](https://github.com/catchorg/Catch2), vendored in-tree as `ThirdParty/Catch2/catch_amalgamated.{hpp,cpp}`. Chosen at Phase 2 kickoff for clean SPM integration (single `.target` declaration, no submodules or external package registries). C++ tests live in `Tests/JboxEngineCxxTests/` as a SPM `.executableTarget`; run them with `swift run JboxEngineCxxTests` (debug config by default, enabling ThreadSanitizer).
 - `RingBuffer`: concurrent producer/consumer correctness under stress, wrap-around edges, fill-level tracking, overrun and underrun behavior.
 - `DriftTracker`: given synthetic fill-level time series, verify the PI controller converges within N seconds and holds within a target band; bounded under pathological inputs.
 - `AudioConverterWrapper`: ratio updates do not glitch; quality setting honored; correct samples-per-block computation.

@@ -117,6 +117,11 @@ Deviations from the original Phase 1 plan worth noting:
 
 **Goal.** Implement the RT-safe primitives the engine is built from, with full unit-test coverage, **before** introducing Core Audio. This phase is entirely synthetic — no real audio devices yet.
 
+**Phase 2 tooling decisions (locked in at Phase 2 kickoff):**
+- **C++ test framework: Catch2 v3**, vendored as source in `ThirdParty/Catch2/` (amalgamated `.hpp` + `.cpp`). Rationale: mature, well-documented, works cleanly with SPM as a regular `.target`; vendoring keeps the repo dependency-free (no submodules, no package registry). Catch2's own `main()` provides the test runner — C++ tests are invoked via `swift run JboxEngineCxxTests` (debug by default for ThreadSanitizer coverage). Swift-side tests continue to use Swift Testing.
+- **Execution style: per-primitive commits.** Order: `AtomicMeter` → `ChannelMapper` → `RtLogQueue` → `RingBuffer` (with concurrent stress) → `DriftTracker`. Each commit adds one primitive plus its unit tests, passes CI independently, and is individually revertible.
+- **ThreadSanitizer** enabled for the `JboxEngineCxxTests` target in debug configuration via `.unsafeFlags(["-fsanitize=thread"])`. Release builds unaffected. CI runs the C++ tests in debug mode.
+
 **Entry criteria.** Phase 1 complete.
 
 **Exit criteria.**
