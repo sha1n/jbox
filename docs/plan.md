@@ -28,7 +28,7 @@
 |-------|---------------------------------------|--------------------------------------------------------------------------------------|--------|
 | 0     | Specification                         | `docs/` committed; spec is the agreed source of truth.                                | ✅ Done (`c327e63`) |
 | 1     | Foundation                            | `swift build` succeeds on an empty SPM skeleton. CI runs green.                       | ✅ Done (`59188ad`) |
-| 2     | Engine core primitives                | Ring buffer, RT log queue, atomic meter, drift tracker — unit-tested and RT-safe.     | ⏳ Pending |
+| 2     | Engine core primitives                | Ring buffer, RT log queue, atomic meter, drift tracker — unit-tested and RT-safe.     | ✅ Done (`48ea5cb`) |
 | 3     | First working route                   | Audio from V31 → Apollo Virtual outputs, end-to-end, with real devices.               | ⏳ Pending |
 | 4     | Drift correction and resampling       | 30-minute soak test on real devices with zero dropouts.                                | ⏳ Pending |
 | 5     | Multi-route and shared devices        | Three simultaneous routes running, including one that shares a device with another.   | ⏳ Pending |
@@ -115,6 +115,8 @@ Deviations from the original Phase 1 plan worth noting:
 
 ## Phase 2 — Engine core primitives
 
+**Status:** ✅ Complete. Scaffolded in `de8c4c5`; five primitives landed across commits `d6f7d68` (AtomicMeter), `c706eeb` (ChannelMapper), `11ef83b` (RtLogQueue + scanner fix), `f1f4107` (RingBuffer), `48ea5cb` (DriftTracker). CI green on all. C++ suite: 66 test cases, ~598k assertions, passes under ThreadSanitizer.
+
 **Goal.** Implement the RT-safe primitives the engine is built from, with full unit-test coverage, **before** introducing Core Audio. This phase is entirely synthetic — no real audio devices yet.
 
 **Phase 2 tooling decisions (locked in at Phase 2 kickoff):**
@@ -125,37 +127,44 @@ Deviations from the original Phase 1 plan worth noting:
 **Entry criteria.** Phase 1 complete.
 
 **Exit criteria.**
-- `RingBuffer`, `AtomicMeter`, `RtLogQueue`, `DriftTracker`, `ChannelMapper` all implemented in `Sources/JboxEngineC/rt/` or `control/` as appropriate.
-- Each primitive has a dedicated unit-test file with concurrent stress tests where applicable.
-- ThreadSanitizer enabled for test builds; no data races detected.
-- `scripts/rt_safety_scan.sh` clean against `rt/`.
-- `clang-tidy` warnings in the engine sources cleared or explicitly suppressed with justification.
+- [x] `RingBuffer`, `AtomicMeter`, `RtLogQueue`, `DriftTracker`, `ChannelMapper` all implemented in `Sources/JboxEngineC/rt/` or `control/` as appropriate.
+- [x] Each primitive has a dedicated unit-test file with concurrent stress tests where applicable.
+- [x] ThreadSanitizer enabled for test builds; no data races detected.
+- [x] `scripts/rt_safety_scan.sh` clean against `rt/`.
+- [ ] `clang-tidy` warnings in the engine sources cleared or explicitly suppressed with justification. **Deferred to Phase 3** — set up a proper clang-tidy config once we have Core Audio integration code to lint against; lint value on the five synthetic primitives alone is low and would risk over-fitting rules.
 
 **Tasks.**
 
 Data structures:
-- [ ] `ring_buffer.hpp` / `.cpp` — lock-free SPSC ring buffer in `Sources/JboxEngineC/rt/`.
+- [x] `ring_buffer.hpp` — lock-free SPSC ring buffer in `Sources/JboxEngineC/rt/`.
   - Fixed-size at construction; no runtime resize.
   - Interleaved `float` samples.
-  - `write(const float*, size_t frames)` and `read(float*, size_t frames)`.
+  - `writeFrames(const float*, size_t frames)` and `readFrames(float*, size_t frames)`.
   - Returns count of frames actually written / read; underrun and overrun do **not** throw.
   - Atomic head / tail with appropriate memory ordering.
-- [ ] `atomic_meter.hpp` — `std::atomic<float>` per channel; update-max on write; atomic exchange-with-zero on read.
-- [ ] `rt_log_queue.hpp` / `.cpp` — SPSC queue of fixed-size log records (numeric code, timestamp, payload).
-- [ ] `drift_tracker.hpp` / `.cpp` — PI controller over ring buffer fill level. Lives in `control/`, not `rt/`, because it's driven from the control thread. Exposes `adjustment_ppm() -> double`.
-- [ ] `channel_mapper.hpp` / `.cpp` — validates edge lists against v1 invariants (unique sources, unique destinations, matching counts).
+  - Deviation: header-only; the caller owns the backing storage (allows the class itself to stay allocation-free and live in `rt/`).
+- [x] `atomic_meter.hpp` — `std::atomic<float>` per channel; update-max on write; atomic exchange-with-zero on read. Fixed 64-channel capacity (stack-allocated, no heap).
+- [x] `rt_log_queue.hpp` — SPSC queue of fixed-size log records (numeric code, timestamp, payload). Templated on capacity; `DefaultRtLogQueue = RtLogQueue<1024>`.
+- [x] `drift_tracker.hpp` — PI controller with anti-windup. Lives in `control/` (runs at ~100 Hz from the control thread). Deliberately decoupled from ring-buffer semantics: caller computes the error, tracker is a pure PI controller.
+- [x] `channel_mapper.hpp` / `.cpp` — validates edge lists against v1 invariants (non-empty, non-negative indices, unique sources, unique destinations).
 
 Tests:
-- [ ] `ring_buffer_test.cpp` — single-thread correctness, wrap-around, full-buffer behavior, empty-buffer behavior.
-- [ ] `ring_buffer_stress_test.cpp` — two-thread stress test running for ≥10 seconds with a producer and consumer at different speeds; verify totals balance and no corruption.
-- [ ] `drift_tracker_test.cpp` — given synthetic fill-level time series, verify convergence within a target band.
-- [ ] `channel_mapper_test.cpp` — accepts valid edge lists, rejects duplicates, rejects mismatched counts.
-- [ ] `atomic_meter_test.cpp` — update-max semantics, atomic-read-reset.
+- [x] `ring_buffer_test.cpp` — single-thread correctness, wrap-around, full- and empty-buffer behaviour; 200k-frame SPSC stress test (no separate `_stress_test.cpp` file — stress tests colocated for easier discovery).
+- [x] `drift_tracker_test.cpp` — fresh state, proportional-only, integral-only, combined PI with arithmetic verification, anti-windup on saturation, zero/negative dt edge cases, realistic ppm-scale run with Phase 4 starting gains.
+- [x] `channel_mapper_test.cpp` — accepts valid edge lists, rejects duplicates, rejects mismatched counts, precedence ordering between error conditions.
+- [x] `atomic_meter_test.cpp` — update-max semantics, atomic-read-reset, channel independence, out-of-range safety, 8-thread concurrent writers, SPSC producer/consumer interleaving.
+- [x] `rt_log_queue_test.cpp` — FIFO ordering, wrap-around, full/empty behaviour, 100k-message SPSC stress, slow-consumer drop test.
 
 Quality gates:
-- [ ] ThreadSanitizer enabled for engine tests (`.unsafeFlags(["-fsanitize=thread"])` in the test target in `Package.swift` when appropriate).
-- [ ] `rt_safety_scan.sh` still clean.
-- [ ] CI passes.
+- [x] ThreadSanitizer enabled via `swift run --sanitize=thread JboxEngineCxxTests`; all stress tests pass under race detection.
+- [x] `rt_safety_scan.sh` clean (now with C++ comment stripping to eliminate false positives on explanatory text).
+- [x] CI passes on every Phase 2 commit.
+
+Deviations from the original Phase 2 plan worth noting:
+- **Sanitizer flag delivery.** The original plan put `.unsafeFlags(["-fsanitize=thread"])` in Package.swift; that doesn't work because the flag is a clang-driver flag, not a linker flag. Resolution: sanitizer is invoked via SPM's `swift run --sanitize=thread` at the CLI (and in CI). Cleaner and the package stays configuration-agnostic.
+- **`rt_safety_scan.sh` comment awareness.** Legitimate comments containing words like "no printf" or "new head" were tripping the scanner. Fixed during the RtLogQueue commit by adding a C++-comment stripper in awk before the banned-symbol grep. Line numbers in reports still reference the original source.
+- **Ring buffer + log queue header-only.** Both live in `.hpp` only (no `.cpp`) because they are templated on capacity (log queue) or template-like in structure (ring buffer takes external storage). Simpler for callers and there was no implementation cost to paying.
+- **`clang-tidy` deferred.** See exit-criteria note above.
 
 ---
 
