@@ -31,5 +31,8 @@ jobs:
       - name: Build (release)
         run: swift build -c release
 
-      - name: Test (debug)
+      - name: Swift tests (debug)
         run: swift test
+
+      - name: C++ engine tests (debug, with ThreadSanitizer)
+        run: swift run --sanitize=thread JboxEngineCxxTests

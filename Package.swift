@@ -11,9 +11,20 @@ let package = Package(
     products: [
         .executable(name: "JboxApp", targets: ["JboxApp"]),
         .executable(name: "JboxEngineCLI", targets: ["JboxEngineCLI"]),
+        .executable(name: "JboxEngineCxxTests", targets: ["JboxEngineCxxTests"]),
         .library(name: "JboxEngineSwift", targets: ["JboxEngineSwift"]),
     ],
     targets: [
+        // Vendored Catch2 v3 amalgamated — provides the C++ test runner
+        // (including main()) and assertion macros. See ThirdParty/Catch2/README.md.
+        .target(
+            name: "Catch2",
+            path: "ThirdParty/Catch2",
+            exclude: ["README.md", "LICENSE.txt"],
+            sources: ["catch_amalgamated.cpp"],
+            publicHeadersPath: "include"
+        ),
+
         // C++ real-time audio engine.
         // Public C API in Sources/JboxEngineC/include/jbox_engine.h.
         // RT-safe code lives in rt/ (statically scanned).
@@ -45,7 +56,27 @@ let package = Package(
             path: "Sources/JboxApp"
         ),
 
-        // Tests.
+        // C++ test executable — Catch2-based unit and stress tests for
+        // the real-time engine internals (C++ classes not reachable
+        // through the C bridge).
+        //
+        // Run with:   swift run JboxEngineCxxTests
+        // Run with TSan for concurrent tests:
+        //             swift run --sanitize=thread JboxEngineCxxTests
+        //
+        // Sanitizer flags are applied via the SPM CLI (`--sanitize=...`)
+        // rather than baked into the target: the clang-driver flag
+        // `-fsanitize=thread` isn't a valid linker argument on its own,
+        // and SPM's `--sanitize=thread` wires in the runtime library
+        // correctly for us.
+        .executableTarget(
+            name: "JboxEngineCxxTests",
+            dependencies: ["JboxEngineC", "Catch2"],
+            path: "Tests/JboxEngineCxxTests"
+        ),
+
+        // Swift-side tests (Swift Testing). Verify the C bridge and
+        // Swift wrapper behavior.
         .testTarget(
             name: "JboxEngineTests",
             dependencies: ["JboxEngineC", "JboxEngineSwift"],
