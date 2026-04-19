@@ -36,6 +36,8 @@ void DriftSampler::threadLoop() {
     constexpr auto period = milliseconds(10);
     while (running_.load(std::memory_order_relaxed)) {
         next += period;
+        const auto now = steady_clock::now();
+        if (next < now) next = now;  // don't burst-catch-up after a stall
         std::this_thread::sleep_until(next);
         tickAll(0.010);
     }
@@ -49,12 +51,12 @@ void DriftSampler::tickAll(double dt_seconds) {
         const double target = ringTargetFill(*r);
         const double error  = fill - target;  // positive = too full
         const double ppm    = r->tracker.update(error, dt_seconds);
-        // Drift correction convention: if we're too full, slow the
-        // effective input rate down so the converter consumes at the
-        // nominal-dst rate but the source produces less -> fill falls.
-        // That means ppm with the same sign as error should *reduce*
-        // input rate (negate here).
-        const double eff_src = r->nominal_src_rate * (1.0 - ppm * 1e-6);
+        // Sign convention: when the ring is too full (error > 0 -> ppm > 0)
+        // we tell the converter the input is arriving FASTER than nominal.
+        // The converter then consumes more input frames per output frame,
+        // draining the ring back toward target. This matches
+        // docs/phase4-design.md § 5 (eff_src = nominal_src * (1 + ppm*1e-6)).
+        const double eff_src = r->nominal_src_rate * (1.0 + ppm * 1e-6);
         r->target_input_rate.store(eff_src, std::memory_order_relaxed);
     }
 }
