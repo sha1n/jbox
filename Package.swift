@@ -29,10 +29,16 @@ let package = Package(
         // Public C API in Sources/JboxEngineC/include/jbox_engine.h.
         // RT-safe code lives in rt/ (statically scanned).
         // Non-RT engine code lives in control/.
+        // Header search paths let translation units in control/ include
+        // headers from rt/ without relative `../` paths.
         .target(
             name: "JboxEngineC",
             path: "Sources/JboxEngineC",
             publicHeadersPath: "include",
+            cxxSettings: [
+                .headerSearchPath("rt"),
+                .headerSearchPath("control"),
+            ],
             linkerSettings: [
                 .linkedFramework("CoreAudio"),
                 .linkedFramework("CoreFoundation"),
