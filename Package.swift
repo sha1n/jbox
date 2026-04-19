@@ -69,10 +69,20 @@ let package = Package(
         // `-fsanitize=thread` isn't a valid linker argument on its own,
         // and SPM's `--sanitize=thread` wires in the runtime library
         // correctly for us.
+        //
+        // The header search paths reach into the engine's internal
+        // subdirectories so tests can instantiate C++ classes that are
+        // not exposed through the public C bridge. This is a deliberate
+        // test-only break of encapsulation; production code goes through
+        // the C API.
         .executableTarget(
             name: "JboxEngineCxxTests",
             dependencies: ["JboxEngineC", "Catch2"],
-            path: "Tests/JboxEngineCxxTests"
+            path: "Tests/JboxEngineCxxTests",
+            cxxSettings: [
+                .headerSearchPath("../../Sources/JboxEngineC/rt"),
+                .headerSearchPath("../../Sources/JboxEngineC/control"),
+            ]
         ),
 
         // Swift-side tests (Swift Testing). Verify the C bridge and
