@@ -76,15 +76,63 @@ BANNED_PATTERNS=(
 FOUND_VIOLATIONS=0
 FILES_SCANNED=0
 
+# AWK program that strips C++ comments while preserving line numbers.
+# Blanks out `//…` to end of line and `/*…*/` blocks (including
+# multi-line blocks). Does NOT try to understand raw string literals
+# or other exotic constructs — fine for our RT codebase convention.
+# Output has the same line count as input so `grep -n` line numbers
+# map back to the original source faithfully.
+STRIP_COMMENTS_AWK='
+BEGIN { in_block = 0 }
+{
+  line = $0
+  out = ""
+  i = 1
+  n = length(line)
+  while (i <= n) {
+    if (in_block) {
+      # Looking for closing "*/".
+      p = index(substr(line, i), "*/")
+      if (p == 0) {
+        i = n + 1   # whole remainder is inside a comment
+      } else {
+        i = i + p + 1  # skip past "*/"
+        in_block = 0
+      }
+    } else {
+      # Check for start of single-line or block comment at position i.
+      two = substr(line, i, 2)
+      if (two == "//") {
+        # Rest of line is a comment; stop.
+        break
+      } else if (two == "/*") {
+        in_block = 1
+        i = i + 2
+      } else {
+        out = out substr(line, i, 1)
+        i = i + 1
+      }
+    }
+  }
+  print out
+}
+'
+
 # Iterate source files using process substitution so that counters set
 # inside the loop persist in the parent shell. `mapfile` is bash 4+ only;
 # macOS ships bash 3.2 as /bin/bash, so we avoid it.
 while IFS= read -r -d '' file; do
   FILES_SCANNED=$((FILES_SCANNED + 1))
+  stripped=$(awk "${STRIP_COMMENTS_AWK}" "${file}")
   for pattern in "${BANNED_PATTERNS[@]}"; do
-    if matches=$(grep -nE "${pattern}" "${file}" 2>/dev/null); then
+    if matches=$(printf '%s\n' "${stripped}" | grep -nE "${pattern}" 2>/dev/null); then
       echo "RT-safety violation in ${file#"${ROOT_DIR}"/}:"
-      printf '%s\n' "${matches}" | sed 's/^/  /'
+      # For each matching line number, print the ORIGINAL source line
+      # so the user sees exactly what's in the file.
+      while IFS=: read -r lineno _ ; do
+        orig=$(sed -n "${lineno}p" "${file}")
+        printf '  %s: %s\n' "${lineno}" "${orig}"
+      done <<< "${matches}"
       FOUND_VIOLATIONS=1
     fi
   done
