@@ -9,6 +9,11 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+permissions:
+  contents: read
+  checks: write
+  pull-requests: write
+
 jobs:
   build-and-test:
     name: Build & Test (macOS)
@@ -31,8 +36,37 @@ jobs:
       - name: Build (release)
         run: swift build -c release
 
-      - name: Swift tests (debug)
-        run: swift test
+      - name: Swift tests (debug) — emit xunit XML
+        run: |
+          mkdir -p test-results
+          # --parallel is required for --xunit-output to take effect.
+          # Swift 6 emits two files: test-results/swift-junit.xml (empty
+          # unless XCTest targets exist) and
+          # test-results/swift-junit-swift-testing.xml (Swift Testing).
+          swift test --parallel --xunit-output test-results/swift-junit.xml
 
-      - name: C++ engine tests (debug, with ThreadSanitizer)
+      - name: C++ engine tests (debug) — emit JUnit XML
+        run: |
+          mkdir -p test-results
+          swift run JboxEngineCxxTests \
+            --reporter console \
+            --reporter 'junit::out=test-results/cxx-junit.xml'
+
+      - name: C++ engine tests under ThreadSanitizer
         run: swift run --sanitize=thread JboxEngineCxxTests
+
+      - name: Upload test results as artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results
+          path: test-results/
+          if-no-files-found: warn
+
+      - name: Publish test report
+        if: always()
+        uses: EnricoMi/publish-unit-test-result-action/macos@v2
+        with:
+          files: test-results/*.xml
+          check_name: Test report
+          comment_mode: always

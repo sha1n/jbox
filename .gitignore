@@ -8,6 +8,9 @@ build/
 *.app
 *.dSYM/
 
+# Test results (JUnit XML etc.)
+test-results/
+
 # Xcode (generated if someone opens Package.swift in Xcode)
 *.xcodeproj/
 *.xcworkspace/

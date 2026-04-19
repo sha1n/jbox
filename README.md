@@ -96,8 +96,32 @@ See `Sources/JboxEngineCLI/main.swift` for full options.
 ### Test
 
 ```sh
-swift test                          # unit + simulation integration tests
-./scripts/rt_safety_scan.sh         # static RT-safety check on engine/rt/
+./scripts/verify.sh                 # runs the full pipeline (same as CI)
+```
+
+`verify.sh` is the canonical "is my tree green?" command and mirrors exactly what CI runs on each push. It covers:
+
+1. RT-safety static scan on `Sources/JboxEngineC/rt/`
+2. Release build of all SPM targets
+3. Swift-side tests (Swift Testing)
+4. C++ engine tests via Catch2, with per-test timings
+5. C++ engine tests under ThreadSanitizer
+
+For faster iteration, the individual steps can be run directly:
+
+```sh
+swift test                                       # Swift Testing tests
+swift run JboxEngineCxxTests --durations yes     # C++ tests with timings
+swift run --sanitize=thread JboxEngineCxxTests   # C++ tests under TSan
+./scripts/rt_safety_scan.sh                      # static RT-safety check
+```
+
+Additional Catch2 flags for targeted runs:
+
+```sh
+swift run JboxEngineCxxTests --list-tests        # enumerate without running
+swift run JboxEngineCxxTests '[ring_buffer]'     # run one tag only
+swift run JboxEngineCxxTests --reporter compact  # one line per test
 ```
 
 Device-level integration tests (soak, latency measurement) require real hardware and are documented in [docs/plan.md § Phase 9](./docs/plan.md#phase-9--release-hardening-and-device-level-testing).
