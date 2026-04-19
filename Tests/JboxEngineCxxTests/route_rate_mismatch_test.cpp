@@ -58,10 +58,12 @@ TEST_CASE("Route carries 48k -> 44.1k end-to-end through AudioConverter",
     REQUIRE(id != JBOX_INVALID_ROUTE_ID);
     REQUIRE(engine.startRoute(id) == JBOX_OK);
 
-    // Drive buffers. Deliver 48k input in 256-frame chunks; pull 44.1k
-    // output in 256-frame chunks. Over N chunks the backend consumes
-    // ~48000/44100 as much input as it produces output — feed it.
-    constexpr std::uint32_t src_chunk = 256;
+    // Drive buffers. Deliver 48k input in 280-frame chunks; pull 44.1k
+    // output in 256-frame chunks.
+    // src:dst ratio = 48000:44100 ≈ 1.088. Over-feed the source slightly
+    // so the converter never runs dry late in the run; the ring absorbs
+    // the excess.
+    constexpr std::uint32_t src_chunk = 280;
     constexpr std::uint32_t dst_chunk = 256;
     constexpr std::size_t   chunks    = 100;  // ~0.58 s at 44.1k
 
@@ -94,8 +96,10 @@ TEST_CASE("Route carries 48k -> 44.1k end-to-end through AudioConverter",
         }
     }
 
-    // After priming, most output frames should carry signal.
-    REQUIRE(nonzero_frames > (chunks * dst_chunk) / 2);
+    // After priming, nearly every output frame carries signal. A small
+    // allowance covers the AudioConverter priming transient (at the
+    // Mastering SRC complexity, a few hundred frames at start).
+    REQUIRE(nonzero_frames > (chunks * dst_chunk) * 9 / 10);
     REQUIRE(peak_abs <= 1.05);  // no clipping beyond headroom
     REQUIRE(peak_abs >= 0.5);   // meaningful amplitude
     REQUIRE(engine.stopRoute(id) == JBOX_OK);
