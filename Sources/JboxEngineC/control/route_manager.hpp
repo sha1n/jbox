@@ -59,6 +59,8 @@ struct RouteRecord {
     std::vector<float>                               ring_storage;
     std::unique_ptr<jbox::rt::RingBuffer>            ring;
     std::unique_ptr<jbox::rt::AudioConverterWrapper> converter;
+    // Placeholder gains; Task 8 (docs/phase4-plan.md) replaces these with
+    // the tuned phase4Kp() / phase4Ki() / phase4MaxOutput() constants.
     DriftTracker                                     tracker{1e-6, 1e-8, 100.0};
     IOProcId input_ioproc  = kInvalidIOProcId;
     IOProcId output_ioproc = kInvalidIOProcId;
@@ -150,6 +152,11 @@ private:
     // Internal helpers.
     jbox_error_code_t attemptStart(RouteRecord& r);
     void              teardown(RouteRecord& r);
+    // Release all runtime allocations and backend registrations on r without
+    // touching r.state or r.last_error. Called by teardown (which then sets
+    // state = STOPPED / last_error = JBOX_OK) and by the ERROR-return paths
+    // in attemptStart (which set their own state / error afterward).
+    void              releaseRouteResources(RouteRecord& r);
 };
 
 }  // namespace jbox::control

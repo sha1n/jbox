@@ -262,6 +262,7 @@ jbox_error_code_t RouteManager::attemptStart(RouteRecord& r) {
         r.converter = std::make_unique<jbox::rt::AudioConverterWrapper>(
             r.nominal_src_rate, r.nominal_dst_rate, r.channels_count);
     } catch (const std::exception&) {
+        releaseRouteResources(r);
         r.state = JBOX_ROUTE_STATE_ERROR;
         r.last_error = JBOX_ERR_INTERNAL;
         return JBOX_ERR_INTERNAL;
@@ -275,14 +276,14 @@ jbox_error_code_t RouteManager::attemptStart(RouteRecord& r) {
     IDeviceBackend& be = dm_.backend();
     r.input_ioproc = be.openInputCallback(r.source_uid, &inputIOProcCallback, &r);
     if (r.input_ioproc == kInvalidIOProcId) {
+        releaseRouteResources(r);
         r.state = JBOX_ROUTE_STATE_ERROR;
         r.last_error = JBOX_ERR_DEVICE_BUSY;
         return JBOX_ERR_DEVICE_BUSY;
     }
     r.output_ioproc = be.openOutputCallback(r.dest_uid, &outputIOProcCallback, &r);
     if (r.output_ioproc == kInvalidIOProcId) {
-        be.closeCallback(r.input_ioproc);
-        r.input_ioproc = kInvalidIOProcId;
+        releaseRouteResources(r);
         r.state = JBOX_ROUTE_STATE_ERROR;
         r.last_error = JBOX_ERR_DEVICE_BUSY;
         return JBOX_ERR_DEVICE_BUSY;
@@ -308,7 +309,7 @@ jbox_error_code_t RouteManager::attemptStart(RouteRecord& r) {
     return JBOX_OK;
 }
 
-void RouteManager::teardown(RouteRecord& r) {
+void RouteManager::releaseRouteResources(RouteRecord& r) {
     IDeviceBackend& be = dm_.backend();
 
     // Stop devices (if this route holds them).
@@ -346,10 +347,15 @@ void RouteManager::teardown(RouteRecord& r) {
     r.ring_storage.clear();
     r.input_scratch.clear();
     r.output_scratch.clear();
+    // r.state and r.last_error are intentionally not touched here;
+    // callers set them to the appropriate value after this call.
+    // Counters are preserved across stop/start cycles for visibility.
+}
 
+void RouteManager::teardown(RouteRecord& r) {
+    releaseRouteResources(r);
     r.state      = JBOX_ROUTE_STATE_STOPPED;
     r.last_error = JBOX_OK;
-    // Counters are preserved across stop/start cycles for visibility.
 }
 
 }  // namespace jbox::control
