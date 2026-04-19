@@ -7,7 +7,6 @@
 
 #include <catch_amalgamated.hpp>
 
-#include <array>
 #include <cmath>
 #include <cstddef>
 #include <cstring>
@@ -70,27 +69,49 @@ TEST_CASE("AudioConverterWrapper passes unity-ratio sine with high fidelity",
     REQUIRE(r == Catch::Approx(1.0 / std::sqrt(2.0)).margin(0.02));
 }
 
-TEST_CASE("AudioConverterWrapper setInputRate changes output length",
+TEST_CASE("AudioConverterWrapper setInputRate increases input consumption",
           "[audio_converter_wrapper]") {
-    // src 44100 -> dst 48000 means dst produces more frames per unit time
-    // than src supplies. We feed src frames and observe fewer dst frames
-    // than asked when setInputRate boosts the ratio.
+    // For a fixed output request, a higher effective input rate means
+    // the converter has to consume more source frames to fill the same
+    // output buffer. We count input frames pulled; the second convert
+    // (post-setInputRate at +1%) must consume more than the first.
     jbox::rt::AudioConverterWrapper w(44100.0, 48000.0, 1);
-    SineSource src{.phase = 0.0, .freq_hz = 440.0, .rate_hz = 44100.0, .channels = 1};
 
-    std::vector<float> out(4800, 0.0f);  // ask for 100 ms at 48k
-    const std::size_t first = w.convert(out.data(), out.size(),
-                                        &SineSource::pull, &src);
-    REQUIRE(first == out.size());
+    struct CountingSource {
+        double phase = 0.0;
+        double freq_hz = 440.0;
+        double rate_hz = 44100.0;
+        std::size_t pulled = 0;
+        static std::size_t pull(float* dst, std::size_t frames, void* user) {
+            auto* s = static_cast<CountingSource*>(user);
+            const double step = 2.0 * std::numbers::pi * s->freq_hz / s->rate_hz;
+            for (std::size_t f = 0; f < frames; ++f) {
+                dst[f] = static_cast<float>(std::sin(s->phase));
+                s->phase += step;
+            }
+            s->pulled += frames;
+            return frames;
+        }
+    };
 
-    // Bump the effective input rate by 1 % (simulates +10,000 ppm drift).
+    CountingSource src;
+    std::vector<float> out(4800, 0.0f);
+
+    const std::size_t first_out = w.convert(out.data(), out.size(),
+                                            &CountingSource::pull, &src);
+    REQUIRE(first_out == out.size());
+    const std::size_t first_pulled = src.pulled;
+    REQUIRE(first_pulled > 0u);
+
+    // Bump effective input rate by 1%. For the same 4800-frame output
+    // request, the converter must pull more input now.
     w.setInputRate(44100.0 * 1.01);
-    const std::size_t second = w.convert(out.data(), out.size(),
-                                         &SineSource::pull, &src);
-    // Output count should still be fulfilled since src callback supplies
-    // all requested input; assert monotone input consumption, not a
-    // specific ratio value.
-    REQUIRE(second == out.size());
+    const std::size_t second_out = w.convert(out.data(), out.size(),
+                                             &CountingSource::pull, &src);
+    REQUIRE(second_out == out.size());
+    const std::size_t second_pulled = src.pulled - first_pulled;
+
+    REQUIRE(second_pulled > first_pulled);
 }
 
 TEST_CASE("AudioConverterWrapper handles partial input correctly",

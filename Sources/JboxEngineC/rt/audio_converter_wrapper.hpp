@@ -53,7 +53,8 @@ public:
     void setInputRate(double rate) noexcept;
     double inputRate() const noexcept { return current_input_rate_; }
 
-    // Discard any internal buffering. Call on route stop, control thread.
+    // Discard any internal buffering. NOT RT-safe — call from the
+    // control thread only (e.g., on route stop).
     void reset() noexcept;
 
     std::uint32_t channels() const noexcept { return channels_; }
@@ -63,7 +64,7 @@ private:
     double        src_rate_;
     double        dst_rate_;
     std::uint32_t channels_;
-    double        current_input_rate_;  // last rate pushed to AudioConverter
+    double        current_input_rate_{0.0};  // last rate pushed to AudioConverter; ctor sets to src_rate
 };
 
 }  // namespace jbox::rt
