@@ -17,16 +17,30 @@ BUILD_DIR="${ROOT_DIR}/build"
 APP_NAME="Jbox"
 APP_BUNDLE="${BUILD_DIR}/${APP_NAME}.app"
 EXECUTABLE_NAME="JboxApp"
+CLI_NAME="JboxEngineCLI"
 BUNDLE_ID="dev.sha1n.Jbox"
 
-# Locate the built executable. SPM places it under .build/release/ on
-# command-line builds, or under an arch-specific path on some configs.
-if [[ -x "${ROOT_DIR}/.build/release/${EXECUTABLE_NAME}" ]]; then
-  SRC_BINARY="${ROOT_DIR}/.build/release/${EXECUTABLE_NAME}"
-elif [[ -x "${ROOT_DIR}/.build/arm64-apple-macosx/release/${EXECUTABLE_NAME}" ]]; then
-  SRC_BINARY="${ROOT_DIR}/.build/arm64-apple-macosx/release/${EXECUTABLE_NAME}"
-else
+# Resolve a built binary from the release tree. SPM places binaries
+# under .build/release/ on command-line builds, or under an
+# arch-specific path on some configurations.
+find_release_binary() {
+  local name="$1"
+  if [[ -x "${ROOT_DIR}/.build/release/${name}" ]]; then
+    echo "${ROOT_DIR}/.build/release/${name}"
+  elif [[ -x "${ROOT_DIR}/.build/arm64-apple-macosx/release/${name}" ]]; then
+    echo "${ROOT_DIR}/.build/arm64-apple-macosx/release/${name}"
+  else
+    return 1
+  fi
+}
+
+if ! SRC_BINARY=$(find_release_binary "${EXECUTABLE_NAME}"); then
   echo "bundle_app: release binary ${EXECUTABLE_NAME} not found." >&2
+  echo "            Run 'swift build -c release' first." >&2
+  exit 1
+fi
+if ! SRC_CLI_BINARY=$(find_release_binary "${CLI_NAME}"); then
+  echo "bundle_app: release binary ${CLI_NAME} not found." >&2
   echo "            Run 'swift build -c release' first." >&2
   exit 1
 fi
@@ -43,9 +57,12 @@ rm -rf "${APP_BUNDLE}"
 mkdir -p "${APP_BUNDLE}/Contents/MacOS"
 mkdir -p "${APP_BUNDLE}/Contents/Resources"
 
-# Copy executable.
+# Copy executables. JboxEngineCLI is shipped inside the app bundle so
+# it travels with the app and is cleaned up by a single drag-to-Trash.
 cp "${SRC_BINARY}" "${APP_BUNDLE}/Contents/MacOS/${APP_NAME}"
 chmod +x "${APP_BUNDLE}/Contents/MacOS/${APP_NAME}"
+cp "${SRC_CLI_BINARY}" "${APP_BUNDLE}/Contents/MacOS/${CLI_NAME}"
+chmod +x "${APP_BUNDLE}/Contents/MacOS/${CLI_NAME}"
 
 # Generate Info.plist.
 cat > "${APP_BUNDLE}/Contents/Info.plist" <<PLIST

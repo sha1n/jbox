@@ -1,0 +1,75 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write   # needed to create / update releases
+
+jobs:
+  build-dmg:
+    name: Build DMG & draft release
+    runs-on: macos-15
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Derive version
+        id: version
+        run: |
+          # Strip leading 'v' from the tag (v0.0.1-alpha -> 0.0.1-alpha).
+          tag="${GITHUB_REF_NAME}"
+          version="${tag#v}"
+          echo "tag=${tag}"         >> "$GITHUB_OUTPUT"
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          echo "Tag:     ${tag}"
+          echo "Version: ${version}"
+
+      - name: Show toolchain versions
+        run: |
+          swift --version
+          clang --version
+          sw_vers
+
+      - name: Build release
+        env:
+          JBOX_VERSION: ${{ steps.version.outputs.version }}
+        run: ./scripts/build_release.sh
+
+      - name: Package DMG
+        env:
+          JBOX_VERSION: ${{ steps.version.outputs.version }}
+        run: ./scripts/package_unsigned_release.sh
+
+      - name: Verify DMG exists
+        run: |
+          ls -lh build/Jbox-${{ steps.version.outputs.version }}.dmg
+
+      - name: Create GitHub Release (draft, pre-release)
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.version.outputs.tag }}
+          name: Jbox ${{ steps.version.outputs.version }}
+          draft: true
+          prerelease: true
+          generate_release_notes: true
+          files: |
+            build/Jbox-${{ steps.version.outputs.version }}.dmg
+          body: |
+            Jbox ${{ steps.version.outputs.version }} — ad-hoc signed build.
+
+            **What's in the DMG:**
+
+            - `Jbox.app` (GUI placeholder until Phase 6)
+            - `JboxEngineCLI` bundled inside the `.app` at `Contents/MacOS/JboxEngineCLI`
+            - Drag-to-Applications symlink
+            - Double-click `Uninstall Jbox.command` to remove all files this install deploys
+            - `READ-THIS-FIRST.txt` with first-launch Gatekeeper steps and CLI usage
+
+            **First-run Gatekeeper note:** this build is not notarized. On first launch
+            macOS will block the app; right-click → Open once to approve. Details are in
+            `READ-THIS-FIRST.txt` inside the DMG.
