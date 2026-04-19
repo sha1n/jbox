@@ -94,6 +94,8 @@ cat > "${APP_BUNDLE}/Contents/Info.plist" <<PLIST
     <true/>
     <key>NSMicrophoneUsageDescription</key>
     <string>Jbox needs access to your audio devices to route audio between them.</string>
+    <key>NSHumanReadableCopyright</key>
+    <string>Copyright © 2026 Shai Nagar. All rights reserved.</string>
 </dict>
 </plist>
 PLIST

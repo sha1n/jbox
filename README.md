@@ -134,6 +134,8 @@ On first launch, macOS prompts for audio-device access. Grant it — Jbox needs 
 
 ## Releases
 
+For a complete walk-through — including every place the version number appears, how they stay in sync, and troubleshooting — see [docs/releases.md](./docs/releases.md).
+
 ### Cutting a release
 
 All releases are driven by pushing a Git tag. CI handles everything else.
