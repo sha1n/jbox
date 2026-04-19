@@ -132,17 +132,87 @@ On first launch, macOS prompts for audio-device access. Grant it — Jbox needs 
 
 ---
 
-## Sharing Jbox with someone else
+## Releases
 
-If you want to hand a build to a friend or colleague, run:
+### Cutting a release
+
+All releases are driven by pushing a Git tag. CI handles everything else.
+
+**One-time setup per tag:**
 
 ```sh
-./scripts/package_unsigned_release.sh
+# 1. Make sure master is green and you're up-to-date.
+git checkout master
+git pull
+./scripts/verify.sh            # optional but recommended
+
+# 2. Create an annotated tag. The tag name must start with 'v'.
+git tag -a v0.0.1-alpha -m "v0.0.1-alpha: engine + CLI pre-release"
+
+# 3. Push the tag.
+git push origin v0.0.1-alpha
 ```
 
-This produces `Jbox-<version>.zip` containing the app and a `READ-THIS-FIRST.txt` that explains the one-time Gatekeeper approval they'll need to do (right-click → Open). No Apple Developer Program required on your side.
+Pushing a `v*` tag triggers [`.github/workflows/release.yml`](.github/workflows/release.yml). On the macOS runner it:
 
-If the audience grows and that one-time Gatekeeper dance becomes painful, the next step is joining the Apple Developer Program ($99/year) and adding Developer ID signing + notarization to the release pipeline. This is a clean future flip — nothing in the code needs to change.
+1. Builds release mode (`swift build -c release`).
+2. Runs `scripts/bundle_app.sh` to produce `build/Jbox.app` (ad-hoc signed, Hardened Runtime on, CLI bundled inside at `Contents/MacOS/JboxEngineCLI`).
+3. Runs `scripts/package_unsigned_release.sh` to wrap everything into `build/Jbox-<version>.dmg` (drag-to-install `.app` + uninstaller `.command` + README).
+4. Creates or updates a GitHub Release for the tag **as a draft, pre-release**, attaching the DMG. Release notes are auto-generated from the commit history since the previous tag.
+
+### Publishing the draft
+
+The release is a draft by design — so you can sanity-check the DMG before it goes public.
+
+1. Go to <https://github.com/sha1n/jbox/releases>.
+2. Find the draft release for your tag and click it.
+3. Download the attached `Jbox-<version>.dmg`. Optionally mount it and run it through your usual pre-release checks.
+4. Edit the release notes if you want to add anything beyond the auto-generated list.
+5. Click **Publish release** (or **Save draft** to keep it unpublished).
+
+### If something goes wrong
+
+If the build fails or you want to redo a tag:
+
+```sh
+# Delete the local tag.
+git tag -d v0.0.1-alpha
+
+# Delete the remote tag.
+git push origin :refs/tags/v0.0.1-alpha
+
+# Also delete the draft release on GitHub (Releases page → Delete).
+
+# Fix the issue, then re-tag and re-push.
+git tag -a v0.0.1-alpha -m "v0.0.1-alpha: engine + CLI pre-release"
+git push origin v0.0.1-alpha
+```
+
+Be careful with retagging a tag that's already been published — consumers may have pulled it. Use new tags for public reruns.
+
+### Local dry-run
+
+You can produce the DMG exactly as CI would, locally:
+
+```sh
+JBOX_VERSION=0.0.1-alpha ./scripts/build_release.sh
+JBOX_VERSION=0.0.1-alpha ./scripts/package_unsigned_release.sh
+# → build/Jbox-0.0.1-alpha.dmg
+```
+
+No tag, no push, no GitHub Release — just the DMG on disk for you to inspect.
+
+### Versioning scheme
+
+- `v0.x.y[-label]` — development pre-releases. The GUI app is a placeholder; the CLI is the useful part. Label examples: `alpha`, `beta`.
+- `v1.0.0` — first stable release, post-Phase-6, with the real SwiftUI UI.
+- Patch tags like `v1.0.1` are plain bugfixes; minor like `v1.1.0` are feature additions.
+
+### Recipient experience
+
+The DMG is **ad-hoc signed, not notarized** (no paid Apple Developer Program yet). Recipients on other Macs will hit a one-time Gatekeeper warning and need to right-click → Open the `.app` on first launch. The bundled `READ-THIS-FIRST.txt` walks them through it.
+
+If that friction ever matters enough to solve, the next step is joining the paid Apple Developer Program ($99/year) and adding Developer ID signing + notarization to the release pipeline. No code changes required; just CI secrets and a `codesign` identity.
 
 ---
 
