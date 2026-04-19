@@ -32,7 +32,11 @@ let package = Package(
         .target(
             name: "JboxEngineC",
             path: "Sources/JboxEngineC",
-            publicHeadersPath: "include"
+            publicHeadersPath: "include",
+            linkerSettings: [
+                .linkedFramework("CoreAudio"),
+                .linkedFramework("CoreFoundation"),
+            ]
         ),
 
         // Thin Swift wrapper over the C bridge.
