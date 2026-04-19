@@ -125,10 +125,12 @@ ConvergenceResult runScenario(double src_drift_ppm, double dst_drift_ppm,
         out.max_fill = std::max(out.max_fill, fill);
 
         if (i == 0) {
-            // Use the first-tick fill as the operating point; the PI
-            // controller's integrator converges to whatever setpoint
-            // we're using inside RouteManager. We don't assume a
-            // specific target_fill here — we only assert bounded band.
+            // First-tick fill as the reference. NOTE: this only bounds
+            // *total excursion*, not steady-state error to the actual
+            // DriftTracker setpoint. A slowly-drifting under-damped
+            // controller could stay within the band and still be wrong.
+            // TODO(phase4-task7/8): expose the DriftTracker setpoint on
+            // RouteRecord and assert against it instead.
             target_fill = fill;
         }
 
@@ -161,11 +163,11 @@ TEST_CASE("Drift converges: destination +50 ppm, source nominal",
     REQUIRE(r.total_ticks > 0u);
 }
 
-TEST_CASE("Drift converges under step disturbance",
+TEST_CASE("Drift converges within 10s at +50 ppm (short horizon)",
           "[drift_integration]") {
-    // Approximate the step by running the scenario with the biased rate
-    // from t=0; the PI must converge within 10 s either way. A true
-    // step test is a nice-to-have left for Phase 4 commit 5 tuning.
+    // Short-horizon variant of scenario 1: same drift, shorter run.
+    // TODO(phase4-task8): convert to a real step test with a mid-run
+    // rate change once the tuning work lands.
     const auto r = runScenario(+50.0, 0.0, 60.0, 512.0, 10.0);
     REQUIRE(r.total_ticks > 0u);
 }
