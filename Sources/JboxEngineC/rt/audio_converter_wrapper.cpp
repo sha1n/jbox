@@ -102,8 +102,8 @@ void AudioConverterWrapper::setInputRate(double rate) noexcept {
     if (rate <= 0.0 || converter_ == nullptr) return;
     if (rate == current_input_rate_) return;
     // Apple AudioConverter's kAudioConverterSampleRate property (named
-    // in docs/spec.md § 2.5 and docs/phase4-plan.md) is not consistently
-    // writable on our float-interleaved SRC configuration. We instead
+    // in docs/spec.md § 2.5) is not consistently writable on our
+    // float-interleaved SRC configuration. We instead
     // re-set the full input stream description, which is documented to
     // propagate as a variable-ratio SRC update. The no-op fast-path
     // above means we pay the cost only when the rate actually changes;

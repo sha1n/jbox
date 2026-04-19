@@ -2,8 +2,7 @@
 //
 // These are the Phase 4 production gains used by RouteRecord's per-
 // route DriftTracker. They come from two sources:
-//   (1) the empirical starting values in docs/spec.md § 2.6 and
-//       docs/phase4-design.md § 5, and
+//   (1) the empirical starting values in docs/spec.md § 2.6, and
 //   (2) the tuning harness in
 //       Tests/JboxEngineCxxTests/drift_tuning_harness.cpp.
 //

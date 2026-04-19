@@ -14,8 +14,6 @@
 //
 // Quality: kAudioConverterSampleRateConverterComplexity_Mastering +
 // kAudioConverterQuality_Max, per docs/spec.md § 2.5.
-//
-// See docs/phase4-design.md § 4 and docs/spec.md § 2.5.
 
 #ifndef JBOX_RT_AUDIO_CONVERTER_WRAPPER_HPP
 #define JBOX_RT_AUDIO_CONVERTER_WRAPPER_HPP

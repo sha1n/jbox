@@ -15,8 +15,6 @@
 // the sampler); tests drive both serially, and production spawns the
 // sampler from the control thread so mutations and ticks interleave
 // only on that thread.
-//
-// See docs/phase4-design.md §§ 3, 5.
 
 #ifndef JBOX_CONTROL_DRIFT_SAMPLER_HPP
 #define JBOX_CONTROL_DRIFT_SAMPLER_HPP

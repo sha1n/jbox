@@ -54,8 +54,8 @@ void DriftSampler::tickAll(double dt_seconds) {
         // Sign convention: when the ring is too full (error > 0 -> ppm > 0)
         // we tell the converter the input is arriving FASTER than nominal.
         // The converter then consumes more input frames per output frame,
-        // draining the ring back toward target. This matches
-        // docs/phase4-design.md § 5 (eff_src = nominal_src * (1 + ppm*1e-6)).
+        // draining the ring back toward target.
+        //   eff_src = nominal_src * (1 + ppm * 1e-6)
         const double eff_src = r->nominal_src_rate * (1.0 + ppm * 1e-6);
         r->target_input_rate.store(eff_src, std::memory_order_relaxed);
     }
