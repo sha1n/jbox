@@ -30,7 +30,7 @@
 | 1     | Foundation                            | `swift build` succeeds on an empty SPM skeleton. CI runs green.                       | ✅ Done (`59188ad`) |
 | 2     | Engine core primitives                | Ring buffer, RT log queue, atomic meter, drift tracker — unit-tested and RT-safe.     | ✅ Done (`48ea5cb`) |
 | 3     | First working route                   | Audio from V31 → Apollo Virtual outputs, end-to-end, with real devices.               | ✅ Code done (`6b74c59`) — manual hardware test deferred |
-| 4     | Drift correction and resampling       | 30-minute soak test on real devices with zero dropouts.                                | ✅ Code done (`daa34e9`..`e6c10a2`) — hardware soak deferred |
+| 4     | Drift correction and resampling       | 30-minute soak test on real devices with zero dropouts.                                | ✅ Code done (13 commits from `6e42c74`) — hardware soak deferred |
 | 5     | Multi-route and shared devices        | Three simultaneous routes running, including one that shares a device with another.   | ⏳ Pending |
 | 6     | SwiftUI UI                            | User can add / edit / delete / start / stop routes through the GUI.                   | ⏳ Pending |
 | 7     | Persistence, scenes, launch-at-login  | Relaunching the app restores configured routes and scenes.                             | ⏳ Pending |
@@ -232,7 +232,7 @@ Phase 3 summary of deviations:
 
 ## Phase 4 — Drift correction and resampling
 
-**Status:** ✅ Code complete, CI green (12 commits: `daa34e9`..`e6c10a2`). **Manual hardware acceptance tests deferred** — real-hardware 30-minute soak and 48k/44.1k audible verification pending the owner's rig. See the deferred-task checklist at the bottom of this phase.
+**Status:** ✅ Code complete, CI green (13 commits starting at `6e42c74`). **Manual hardware acceptance tests deferred** — real-hardware 30-minute soak and 48k/44.1k audible verification pending the owner's rig. See the deferred-task checklist at the bottom of this phase.
 
 **Goal.** Add `AudioConverter` to every route (regardless of sample-rate match) and drive it from the drift tracker. Make the engine stable under long runs.
 
@@ -241,7 +241,7 @@ Phase 3 summary of deviations:
 **Exit criteria.**
 - [~] Any route runs for ≥ 30 minutes on real hardware (V31 + Apollo) with zero dropouts, zero overruns, zero underruns logged. **Deferred to manual hardware test** — real-hardware soak pending the owner's rig.
 - [~] A route configured with mismatched sample rates (e.g., source 48 k / destination 44.1 k) produces audibly correct audio. **Deferred to manual hardware test** — audible AMS verification pending the owner's rig.
-- [x] Integration tests with simulated clock drift (±50 ppm) converge within 10 seconds and hold within a target band for at least 5 simulated minutes.
+- [~] Integration tests with simulated clock drift (±50 ppm) hold within a 512-frame excursion band for 5 simulated minutes — note: the band is bounded by AudioConverter's ASBD-flush side-effect, not by the PI controller's corrective math (see Phase 4 deviations summary below).
 - [x] The drift tracker's PI gains are documented in `control/drift_tracker.cpp` and justified by test results.
 
 **Tasks.**
@@ -254,7 +254,7 @@ Engine:
 
 Tuning:
 - [x] Integration test that injects a controlled clock-drift error and measures time-to-converge.
-- [x] Tune `Kp` and `Ki` so convergence is within 10 seconds and steady-state error stays below a threshold (define numeric threshold). Caveat noted in `drift_tracker.cpp`: simulated-backend tests are dominated by the `setInputRate` buffer-flush side-effect, not the PI controller; real tuning deferred per exit criteria.
+- [~] Tune `Kp` and `Ki` — harness ran; grid flat under the simulated backend (setInputRate's ASBD flush dominates), so starting values (`Kp = 1e-6`, `Ki = 1e-8`, `max = 100 ppm`) retained as production gains pending real-hardware tuning. See deviations summary below.
 - [x] Document final gains and the reasoning in `control/drift_tracker.cpp`.
 
 Real-hardware verification:

@@ -1,7 +1,7 @@
 // Simulated-time drift integration tests. Feed the backend at a
 // producer rate that deviates from nominal by +/- 50 ppm; tick the
 // sampler at 100 Hz simulated; verify ring fill stays within a band
-// from t = 10s through t = 300s.
+// from t = 10s through t = 310s (full-horizon scenarios).
 
 #include "drift_sampler.hpp"
 #include "engine.hpp"
@@ -151,7 +151,7 @@ ConvergenceResult runScenario(double src_drift_ppm, double dst_drift_ppm,
 TEST_CASE("Drift converges: source +50 ppm, destination nominal",
           "[drift_integration]") {
     const auto r = runScenario(+50.0, 0.0,
-                               /*sim_seconds=*/300.0,
+                               /*sim_seconds=*/310.0,
                                /*band_frames=*/512.0,
                                /*assert_after_seconds=*/10.0);
     REQUIRE(r.total_ticks > 0u);
@@ -159,7 +159,7 @@ TEST_CASE("Drift converges: source +50 ppm, destination nominal",
 
 TEST_CASE("Drift converges: destination +50 ppm, source nominal",
           "[drift_integration]") {
-    const auto r = runScenario(0.0, +50.0, 300.0, 512.0, 10.0);
+    const auto r = runScenario(0.0, +50.0, 310.0, 512.0, 10.0);
     REQUIRE(r.total_ticks > 0u);
 }
 
