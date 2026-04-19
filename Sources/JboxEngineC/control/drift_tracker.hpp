@@ -100,6 +100,13 @@ private:
     double last_output_{0.0};
 };
 
+// Defined in drift_tracker.cpp. Source of truth for the Phase 4
+// production PI gains; tests may override per-route via the
+// DriftTracker ctor to exercise edge cases.
+double phase4Kp()        noexcept;
+double phase4Ki()        noexcept;
+double phase4MaxOutput() noexcept;
+
 }  // namespace jbox::control
 
 #endif  // JBOX_CONTROL_DRIFT_TRACKER_HPP
