@@ -35,7 +35,7 @@ struct RouteListView: View {
                     }
                 }
                 .sheet(isPresented: $showingAddSheet) {
-                    AddRouteStubView {
+                    AddRouteSheet(store: store) {
                         showingAddSheet = false
                     }
                 }
@@ -71,28 +71,6 @@ struct RouteListView: View {
             }
             .listStyle(.inset)
         }
-    }
-}
-
-/// Placeholder sheet. Phase 6 #3 replaces this with a real editor
-/// that picks devices, builds a mapping, and calls store.addRoute.
-private struct AddRouteStubView: View {
-    let onClose: () -> Void
-
-    var body: some View {
-        VStack(spacing: 16) {
-            Label("Route editor", systemImage: "wrench.and.screwdriver")
-                .font(.title2)
-            Text("The device pickers and mapping editor land in the next commit.")
-                .foregroundStyle(.secondary)
-                .multilineTextAlignment(.center)
-            HStack {
-                Button("Close", action: onClose)
-                    .keyboardShortcut(.cancelAction)
-            }
-        }
-        .padding(32)
-        .frame(minWidth: 380, minHeight: 200)
     }
 }
 
