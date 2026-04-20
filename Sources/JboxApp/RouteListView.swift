@@ -2,11 +2,16 @@ import SwiftUI
 import JboxEngineSwift
 
 /// Main window: sidebar + route list. Owns the "Add Route" toolbar
-/// button; the sheet it presents is a placeholder in this commit and
-/// gets a real editor in phase6 #3.
+/// button and drives a ~4 Hz polling loop that refreshes route state
+/// while the view is on screen.
 struct RouteListView: View {
     let store: EngineStore
     @State private var showingAddSheet = false
+
+    /// How often to re-poll route statuses while the view is visible.
+    /// 4 Hz is plenty for state transitions and counters; meters
+    /// (when they land) will likely want a separate 30 Hz timer.
+    private static let pollInterval: Duration = .milliseconds(250)
 
     var body: some View {
         NavigationSplitView {
@@ -16,6 +21,14 @@ struct RouteListView: View {
             .navigationTitle("Jbox")
         } detail: {
             detailContent
+                .task {
+                    while !Task.isCancelled {
+                        if !store.routes.isEmpty {
+                            store.pollStatuses()
+                        }
+                        try? await Task.sleep(for: Self.pollInterval)
+                    }
+                }
                 .toolbar {
                     ToolbarItem(placement: .primaryAction) {
                         Button {
