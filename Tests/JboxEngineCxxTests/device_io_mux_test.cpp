@@ -84,7 +84,7 @@ TEST_CASE("DeviceIOMux: single input attach / detach", "[device_io_mux]") {
     SimulatedBackend backend;
     backend.addDevice(makeInput("src", 2));
 
-    DeviceIOMux mux(backend, "src", /*in*/ 2, /*out*/ 0, /*grace*/ 0.0);
+    DeviceIOMux mux(backend, "src", /*in*/ 2, /*out*/ 0);
 
     InputSink sink;
     REQUIRE(mux.attachInput(&sink, &inputSinkCallback, &sink));
@@ -111,7 +111,7 @@ TEST_CASE("DeviceIOMux: two input callbacks share one IOProc",
     SimulatedBackend backend;
     backend.addDevice(makeInput("src", 2));
 
-    DeviceIOMux mux(backend, "src", /*in*/ 2, /*out*/ 0, /*grace*/ 0.0);
+    DeviceIOMux mux(backend, "src", /*in*/ 2, /*out*/ 0);
 
     InputSink a, b;
     REQUIRE(mux.attachInput(&a, &inputSinkCallback, &a));
@@ -139,7 +139,7 @@ TEST_CASE("DeviceIOMux: duplicate key is rejected", "[device_io_mux]") {
     SimulatedBackend backend;
     backend.addDevice(makeInput("src", 2));
 
-    DeviceIOMux mux(backend, "src", /*in*/ 2, /*out*/ 0, /*grace*/ 0.0);
+    DeviceIOMux mux(backend, "src", /*in*/ 2, /*out*/ 0);
     InputSink s;
     REQUIRE(mux.attachInput(&s, &inputSinkCallback, &s));
     REQUIRE_FALSE(mux.attachInput(&s, &inputSinkCallback, &s));
@@ -149,7 +149,7 @@ TEST_CASE("DeviceIOMux: attach is refused when the device lacks the direction",
           "[device_io_mux]") {
     SimulatedBackend backend;
     backend.addDevice(makeInput("src", 2));
-    DeviceIOMux mux(backend, "src", /*in*/ 2, /*out*/ 0, /*grace*/ 0.0);
+    DeviceIOMux mux(backend, "src", /*in*/ 2, /*out*/ 0);
 
     OutputSource src;
     REQUIRE_FALSE(mux.attachOutput(&src, &outputSourceCallback, &src));
@@ -160,7 +160,7 @@ TEST_CASE("DeviceIOMux: multiple output callbacks compose additively",
           "[device_io_mux]") {
     SimulatedBackend backend;
     backend.addDevice(makeOutput("dst", 2));
-    DeviceIOMux mux(backend, "dst", /*in*/ 0, /*out*/ 2, /*grace*/ 0.0);
+    DeviceIOMux mux(backend, "dst", /*in*/ 0, /*out*/ 2);
 
     // v1 channel-mapping rules disallow two routes targeting the same
     // destination channel, but the trampoline itself does not enforce
@@ -184,7 +184,7 @@ TEST_CASE("DeviceIOMux: destructor releases IOProcs and stops the device",
 
     InputSink sink;
     {
-        DeviceIOMux mux(backend, "src", /*in*/ 2, /*out*/ 0, /*grace*/ 0.0);
+        DeviceIOMux mux(backend, "src", /*in*/ 2, /*out*/ 0);
         REQUIRE(mux.attachInput(&sink, &inputSinkCallback, &sink));
 
         std::vector<float> buf(8 * 2, 0.125f);
@@ -212,7 +212,7 @@ TEST_CASE("DeviceIOMux: input and output coexist on the same device",
     info.buffer_frame_size = 64;
     backend.addDevice(info);
 
-    DeviceIOMux mux(backend, "duplex", /*in*/ 2, /*out*/ 2, /*grace*/ 0.0);
+    DeviceIOMux mux(backend, "duplex", /*in*/ 2, /*out*/ 2);
 
     InputSink in;
     OutputSource out{.calls = {}, .value = 0.5f};

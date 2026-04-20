@@ -15,11 +15,15 @@
 //     (Core Audio IOProc thread in production, whichever thread calls
 //     SimulatedBackend::deliverBuffer in tests).
 //
-// After every atomic list swap the mux sleeps one grace period on the
-// control thread (`grace_period_seconds`) so any callback still running
-// on the just-retired list has returned before the old list is freed.
-// This is the "lightweight RCU grace period" from docs/spec.md § 2.3;
-// 1.5 × device buffer period is a reasonable default.
+// Grace-period discipline: after each atomic list swap the control
+// thread waits until any RT callback already in flight on the
+// just-retired list has returned. This is done via a pair of
+// monotonically-increasing sequence counters (`*_rt_enter_seq_` and
+// `*_rt_exit_seq_`) that the trampolines bump on entry and exit. The
+// control thread snapshots the current enter-seq and spins on
+// `std::this_thread::yield()` until exit-seq catches up. This gives
+// TSan-visible release/acquire synchronisation between the RT thread's
+// last use of the old list and the control thread's subsequent delete.
 //
 // Lifecycle:
 //   * First attach in a direction: backend openInputCallback /
@@ -48,18 +52,10 @@ public:
     // the backend's enumeration for this device. Pass 0 for a
     // direction the device does not support — the corresponding
     // attach*() call will then refuse with `false`.
-    //
-    // `grace_period_seconds` is the sleep duration applied on the
-    // control thread after each atomic list swap and before the old
-    // list is released. Pick a value ≥ 1.5× the device's buffer period
-    // so that a callback already in flight on the retired list has
-    // time to return. Values ≤ 0 skip the sleep (useful for tests that
-    // drive the backend on the same thread as the control code).
     DeviceIOMux(IDeviceBackend& backend,
                 std::string uid,
                 std::uint32_t input_channel_count,
-                std::uint32_t output_channel_count,
-                double grace_period_seconds);
+                std::uint32_t output_channel_count);
 
     ~DeviceIOMux();
 
@@ -113,24 +109,35 @@ private:
                                  std::uint32_t channel_count,
                                  void* user_data);
 
-    void waitGrace() const;
+    void waitForInputQuiescence();
+    void waitForOutputQuiescence();
     void maybeStopDevice();
 
     IDeviceBackend&  backend_;
     std::string      uid_;
     std::uint32_t    input_channel_count_  = 0;
     std::uint32_t    output_channel_count_ = 0;
-    double           grace_period_seconds_ = 0.0;
 
     IOProcId         input_ioproc_id_  = kInvalidIOProcId;
     IOProcId         output_ioproc_id_ = kInvalidIOProcId;
 
     // Published lists. The RT trampoline loads these with
     // memory_order_acquire; control-thread mutations store the new
-    // pointer with memory_order_release and then wait one grace period
-    // before dropping the old list.
+    // pointer with memory_order_release, then wait for any in-flight
+    // RT iteration on the old list to exit before dropping it.
     std::atomic<const InputList*>  input_routes_{nullptr};
     std::atomic<const OutputList*> output_routes_{nullptr};
+
+    // Sequence counters for the RT-side grace period. The trampolines
+    // bump enter on entry and exit on exit; the control thread spins
+    // on a yield-loop until exit catches up with a prior enter
+    // snapshot. Acq/rel on the fetch_adds is what gives TSan a
+    // happens-before edge between the RT thread's last use of the old
+    // list and the control thread's subsequent delete.
+    std::atomic<std::uint64_t> input_rt_enter_seq_{0};
+    std::atomic<std::uint64_t> input_rt_exit_seq_{0};
+    std::atomic<std::uint64_t> output_rt_enter_seq_{0};
+    std::atomic<std::uint64_t> output_rt_exit_seq_{0};
 
     // Owning storage for the currently-published lists.
     std::unique_ptr<InputList>  input_list_;

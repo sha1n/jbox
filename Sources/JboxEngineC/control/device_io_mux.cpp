@@ -2,7 +2,6 @@
 
 #include "device_io_mux.hpp"
 
-#include <chrono>
 #include <thread>
 #include <utility>
 
@@ -11,25 +10,26 @@ namespace jbox::control {
 DeviceIOMux::DeviceIOMux(IDeviceBackend& backend,
                          std::string uid,
                          std::uint32_t input_channel_count,
-                         std::uint32_t output_channel_count,
-                         double grace_period_seconds)
+                         std::uint32_t output_channel_count)
     : backend_(backend),
       uid_(std::move(uid)),
       input_channel_count_(input_channel_count),
-      output_channel_count_(output_channel_count),
-      grace_period_seconds_(grace_period_seconds) {}
+      output_channel_count_(output_channel_count) {}
 
 DeviceIOMux::~DeviceIOMux() {
     // Null the atomic pointers so any future RT callback observes
-    // "no work" and returns immediately.
+    // "no work" and returns immediately. Then drain any in-flight
+    // iterations before we let the unique_ptr fields destroy the
+    // underlying vectors.
     input_routes_.store(nullptr, std::memory_order_release);
     output_routes_.store(nullptr, std::memory_order_release);
-    waitGrace();
+    waitForInputQuiescence();
+    waitForOutputQuiescence();
 
     // closeCallback is synchronous on CoreAudio (AudioDeviceStop waits
     // for the last IOProc execution before returning) and a plain
-    // pointer clear on SimulatedBackend, so no extra grace is needed
-    // after this point.
+    // pointer clear on SimulatedBackend; both are safe once the
+    // atomic pointers are null and the exit seqs have caught up.
     if (input_ioproc_id_ != kInvalidIOProcId) {
         backend_.closeCallback(input_ioproc_id_);
         input_ioproc_id_ = kInvalidIOProcId;
@@ -66,8 +66,8 @@ bool DeviceIOMux::attachInput(void* key,
     input_routes_.store(next.get(), std::memory_order_release);
     std::unique_ptr<InputList> old = std::move(input_list_);
     input_list_ = std::move(next);
-    waitGrace();
-    // `old` deleted here.
+    waitForInputQuiescence();
+    // `old` deleted here, after any in-flight RT iteration on it exits.
 
     if (first) {
         // startDevice returns false if the device was already started
@@ -98,7 +98,7 @@ void DeviceIOMux::detachInput(void* key) {
     } else {
         input_list_ = std::move(next);
     }
-    waitGrace();
+    waitForInputQuiescence();
     // `old` (and `next` if we didn't take it) deleted here.
 
     if (now_empty && input_ioproc_id_ != kInvalidIOProcId) {
@@ -133,7 +133,7 @@ bool DeviceIOMux::attachOutput(void* key,
     output_routes_.store(next.get(), std::memory_order_release);
     std::unique_ptr<OutputList> old = std::move(output_list_);
     output_list_ = std::move(next);
-    waitGrace();
+    waitForOutputQuiescence();
 
     if (first) {
         backend_.startDevice(uid_);
@@ -160,7 +160,7 @@ void DeviceIOMux::detachOutput(void* key) {
     } else {
         output_list_ = std::move(next);
     }
-    waitGrace();
+    waitForOutputQuiescence();
 
     if (now_empty && output_ioproc_id_ != kInvalidIOProcId) {
         backend_.closeCallback(output_ioproc_id_);
@@ -182,12 +182,15 @@ void DeviceIOMux::inputTrampoline(const float* samples,
                                   std::uint32_t channel_count,
                                   void* user_data) {
     auto* self = static_cast<DeviceIOMux*>(user_data);
+    self->input_rt_enter_seq_.fetch_add(1, std::memory_order_acq_rel);
     const InputList* list =
         self->input_routes_.load(std::memory_order_acquire);
-    if (list == nullptr) return;
-    for (const auto& e : *list) {
-        e.cb(samples, frame_count, channel_count, e.user_data);
+    if (list != nullptr) {
+        for (const auto& e : *list) {
+            e.cb(samples, frame_count, channel_count, e.user_data);
+        }
     }
+    self->input_rt_exit_seq_.fetch_add(1, std::memory_order_acq_rel);
 }
 
 void DeviceIOMux::outputTrampoline(float* samples,
@@ -195,22 +198,35 @@ void DeviceIOMux::outputTrampoline(float* samples,
                                    std::uint32_t channel_count,
                                    void* user_data) {
     auto* self = static_cast<DeviceIOMux*>(user_data);
+    self->output_rt_enter_seq_.fetch_add(1, std::memory_order_acq_rel);
     const OutputList* list =
         self->output_routes_.load(std::memory_order_acquire);
-    if (list == nullptr) return;
-    // v1 channel-mapping invariants forbid two routes writing to the
-    // same destination channel on the same device, so per-route writes
-    // are to disjoint channel subsets and order doesn't matter.
-    for (const auto& e : *list) {
-        e.cb(samples, frame_count, channel_count, e.user_data);
+    if (list != nullptr) {
+        // v1 channel-mapping rules disallow two routes writing to the
+        // same destination channel on the same device, so per-route
+        // writes are to disjoint channel subsets and order doesn't
+        // matter.
+        for (const auto& e : *list) {
+            e.cb(samples, frame_count, channel_count, e.user_data);
+        }
+    }
+    self->output_rt_exit_seq_.fetch_add(1, std::memory_order_acq_rel);
+}
+
+void DeviceIOMux::waitForInputQuiescence() {
+    const auto target =
+        input_rt_enter_seq_.load(std::memory_order_acquire);
+    while (input_rt_exit_seq_.load(std::memory_order_acquire) < target) {
+        std::this_thread::yield();
     }
 }
 
-void DeviceIOMux::waitGrace() const {
-    if (grace_period_seconds_ <= 0.0) return;
-    const auto ns =
-        static_cast<std::int64_t>(grace_period_seconds_ * 1e9);
-    std::this_thread::sleep_for(std::chrono::nanoseconds(ns));
+void DeviceIOMux::waitForOutputQuiescence() {
+    const auto target =
+        output_rt_enter_seq_.load(std::memory_order_acquire);
+    while (output_rt_exit_seq_.load(std::memory_order_acquire) < target) {
+        std::this_thread::yield();
+    }
 }
 
 void DeviceIOMux::maybeStopDevice() {

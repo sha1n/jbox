@@ -165,8 +165,7 @@ private:
     void              releaseRouteResources(RouteRecord& r);
     DeviceIOMux&      getOrCreateMux(const std::string& uid,
                                      std::uint32_t input_channel_count,
-                                     std::uint32_t output_channel_count,
-                                     double grace_period_seconds);
+                                     std::uint32_t output_channel_count);
     void              destroyMuxIfUnused(const std::string& uid);
 };
 

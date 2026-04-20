@@ -20,21 +20,6 @@ namespace {
 constexpr std::uint32_t kRingCapacityBase = 256;
 constexpr std::uint32_t kRtScratchMaxFrames = 8192;
 
-// Floor on the RCU grace period applied by DeviceIOMux after each
-// atomic dispatch-list swap. Derived from the larger of the two
-// devices' buffer periods, but never shorter than this.
-constexpr double kGracePeriodFloorSeconds = 0.002;
-
-double computeGracePeriod(const BackendDeviceInfo& info) {
-    const double rate = info.nominal_sample_rate > 0.0
-                            ? info.nominal_sample_rate
-                            : 48000.0;
-    const double frames = info.buffer_frame_size > 0
-                              ? static_cast<double>(info.buffer_frame_size)
-                              : 64.0;
-    const double buffer_period = frames / rate;
-    return std::max(kGracePeriodFloorSeconds, 1.5 * buffer_period);
-}
 
 void inputIOProcCallback(const float* samples,
                          std::uint32_t frame_count,
@@ -281,8 +266,7 @@ jbox_error_code_t RouteManager::attemptStart(RouteRecord& r) {
     DeviceIOMux& src_mux = getOrCreateMux(
         r.source_uid,
         src->input_channel_count,
-        src->output_channel_count,
-        computeGracePeriod(*src));
+        src->output_channel_count);
     if (!src_mux.attachInput(&r, &inputIOProcCallback, &r)) {
         destroyMuxIfUnused(r.source_uid);
         releaseRouteResources(r);
@@ -298,8 +282,7 @@ jbox_error_code_t RouteManager::attemptStart(RouteRecord& r) {
     DeviceIOMux& dst_mux = getOrCreateMux(
         r.dest_uid,
         dst->input_channel_count,
-        dst->output_channel_count,
-        computeGracePeriod(*dst));
+        dst->output_channel_count);
     if (!dst_mux.attachOutput(&r, &outputIOProcCallback, &r)) {
         // releaseRouteResources detaches the already-attached input
         // side and cleans up any mux we created.
@@ -349,13 +332,11 @@ void RouteManager::releaseRouteResources(RouteRecord& r) {
 
 DeviceIOMux& RouteManager::getOrCreateMux(const std::string& uid,
                                           std::uint32_t input_channel_count,
-                                          std::uint32_t output_channel_count,
-                                          double grace_period_seconds) {
+                                          std::uint32_t output_channel_count) {
     auto it = muxes_.find(uid);
     if (it != muxes_.end()) return *it->second;
     auto mux = std::make_unique<DeviceIOMux>(
-        dm_.backend(), uid, input_channel_count, output_channel_count,
-        grace_period_seconds);
+        dm_.backend(), uid, input_channel_count, output_channel_count);
     DeviceIOMux& ref = *mux;
     muxes_.emplace(uid, std::move(mux));
     return ref;
