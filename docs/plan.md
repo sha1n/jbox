@@ -33,6 +33,7 @@
 | 4     | Drift correction and resampling       | 30-minute soak test on real devices with zero dropouts.                                | ✅ Code done (13 commits from `6e42c74`) — hardware soak deferred |
 | 5     | Multi-route and shared devices        | Three simultaneous routes running, including one that shares a device with another.   | ✅ Code done (4 commits from `a83c4b5`) — real-hardware three-route sanity deferred |
 | 6     | SwiftUI UI                            | User can add / edit / delete / start / stop routes through the GUI.                   | 🚧 First slice landed (4 commits from `7e3e3f8`) — meters, MenuBarExtra, Preferences, scenes still pending |
+| 6+    | Logging pipeline                      | `os_log`-visible events for engine lifecycle, route mutations, and RT dropouts.       | 🚧 Option-B slice landed (drainer + Swift `Logger` wrappers + edge-triggered RT producers). Rotating file sink still pending (Phase 8). |
 | 7     | Persistence, scenes, launch-at-login  | Relaunching the app restores configured routes and scenes.                             | ⏳ Pending |
 | 8     | Packaging and installation            | `Jbox.app` runs from `/Applications` on a clean user account.                          | ⏳ Pending |
 | 9     | Release hardening                     | v1.0.0 tagged and published to GitHub Releases.                                        | ⏳ Pending |
@@ -308,6 +309,8 @@ Phase 5 summary of deviations:
 
 **Status:** 🚧 First slice landed (4 commits: `7e3e3f8`..`3704846`). The app now has a working main window, add-route sheet, row-level start/stop/remove actions, and live 4 Hz status polling — you can add → start → stop → remove routes entirely from the GUI, against the real Core Audio engine. Meters, MenuBarExtra, Preferences, scene editor, and the XCUITest flows are not implemented yet; scene editor is being pushed into Phase 7 next to persistence (a scene editor without durable state is a UX pothole). The bridge API has not changed.
 
+A **logging pipeline slice** also landed alongside the UI first-slice (unplanned but necessary for user-visible diagnostics): `LogDrainer` now drains `DefaultRtLogQueue` into `os_log` under subsystem `com.jbox.app`, RT callbacks push edge-triggered events on underrun / overrun / channel-mismatch, control-side code paths log route lifecycle and errors directly. Swift uses `Logger` wrappers (`JboxLog`) sharing the same subsystem. The rotating file sink in `~/Library/Logs/Jbox/` described in [spec.md § 2.9](./spec.md#29-rt-safe-logging) is **not yet implemented** — deferred to Phase 8 alongside packaging. See Phase 8 tasks below.
+
 **Goal.** Build the v1 SwiftUI UI against the stable bridge API. No engine changes should be required to make the UI work.
 
 **Entry criteria.** Phase 5 complete. Bridge API stable (no breaking changes planned during Phase 6).
@@ -350,6 +353,7 @@ UI tests (minimal):
 Phase 6 first-slice summary of deviations:
 - **Scene editor moved to Phase 7.** The original plan had scenes UI in Phase 6 and scene activation logic / persistence in Phase 7. A scene editor that cannot round-trip through disk is confusing to use and wastes test surface on a UI that would be rewritten once persistence lands. Consolidating into Phase 7 is cleaner.
 - **UI verification gap.** The first-slice commits were built and smoke-launched from the command line (`swift run JboxApp` stays up). The actual rendering — NavigationSplitView layout, sheet presentation, stepper clamping, toolbar buttons — has **not** been interactively verified. A human pass on the running app is needed; bugs surfaced there will be addressed in follow-up commits rather than retroactively edited into the first-slice commits.
+- **Logging pipeline landed unplanned.** The UI first slice surfaced that no `os_log` events were being emitted anywhere — only the `RtLogQueue` primitive (Phase 2) existed, with no producers and no drainer. An Option-B slice landed on top of Phase 6: `control::LogDrainer` owns the queue and a consumer thread, forwards events via a pluggable `Sink` (default `os_log`), `RouteManager` plumbs the queue pointer into each `RouteRecord`, RT callbacks push **edge-triggered** events on the first underrun / overrun / channel-mismatch after each (re)start (edge flags reset in `attemptStart`). Control-thread paths push `kLogRouteStarted` / `kLogRouteWaiting` / `kLogRouteStopped`. Bridge entry points (`jbox_engine_create`, `jbox_engine_destroy`, `jbox_engine_add_route`) call `os_log` directly for startup and accept/reject decisions. The Swift side adds `JboxLog` (`app` / `engine` / `ui` categories, subsystem `com.jbox.app`) and wires notices through `EngineStore` and `AppRootView`. Test hook: `jbox::internal::setLogSink` swaps the os_log sink for a capture sink; the test forward-decl defaults `spawn_log_drainer=false` so existing tests run unchanged. New test: `Tests/JboxEngineCxxTests/log_drainer_test.cpp` (5 cases, TSan-clean). The rotating-file sink piece of [spec.md § 2.9](./spec.md#29-rt-safe-logging) is **still pending** — scheduled for Phase 8 (see below).
 
 ---
 
@@ -422,6 +426,14 @@ Assets:
 Documentation:
 - [ ] Update `README.md` quick-start section if any install / build steps changed during implementation.
 - [ ] Add a `READ-THIS-FIRST.txt` template under `Sources/JboxApp/Resources/` used by `package_unsigned_release.sh`.
+
+Logging — rotating file sink (completes [spec.md § 2.9](./spec.md#29-rt-safe-logging)):
+- [ ] Extend `control::LogDrainer` with a second sink that writes to `~/Library/Logs/Jbox/jbox.log`, or wire a separate composite sink alongside the existing `os_log` sink. Either way, both destinations must receive every event.
+- [ ] Size- or date-based rotation (pick one; size-based with a small rotation count is simpler and matches the "sparse events" workload). Default cap ~5 MB per file, keep last 3.
+- [ ] Handle log-directory creation on first write; handle permission / disk-full failures by falling back to os_log-only rather than dropping the whole pipeline.
+- [ ] Decide the on-disk line format — plain text matching the `defaultOsLogSink` format is the natural choice (human-greppable, no parser needed).
+- [ ] Add unit tests that exercise rotation without real filesystem access — the sink should be injectable with a filesystem abstraction, or the test should use a temp directory.
+- [ ] Decide whether `.app`'s `Contents/MacOS/Jbox` and the CLI share the same log file (likely yes) or separate by process (noisier but clearer).
 
 Testing:
 - [ ] Fresh-user smoke test: create a new macOS user account, download the `.zip`, follow the `READ-THIS-FIRST.txt`, verify the app runs and a test route works.

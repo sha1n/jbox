@@ -35,12 +35,15 @@ struct AppRootView: View {
         }
         .frame(minWidth: 820, minHeight: 520)
         .task {
+            JboxLog.app.notice("JboxApp starting")
             do {
                 let s = try EngineStore()
                 s.refreshDevices()
                 store = s
+                JboxLog.app.notice("store ready devices=\(s.devices.count)")
             } catch {
                 initError = String(describing: error)
+                JboxLog.app.error("engine init failed: \(String(describing: error), privacy: .public)")
             }
         }
     }

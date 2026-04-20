@@ -98,7 +98,13 @@ public final class EngineStore {
 
     /// Convenience: create a production engine backed by Core Audio.
     public convenience init() throws {
-        self.init(engine: try Engine())
+        do {
+            self.init(engine: try Engine())
+            JboxLog.engine.notice("engine ready abi=\(JboxEngine.abiVersion, privacy: .public)")
+        } catch {
+            JboxLog.engine.error("engine create failed: \(String(describing: error), privacy: .public)")
+            throw error
+        }
     }
 
     // MARK: Devices
@@ -109,8 +115,10 @@ public final class EngineStore {
         do {
             devices = try engine.enumerateDevices()
             lastError = nil
+            JboxLog.engine.info("enumerated devices: count=\(self.devices.count)")
         } catch {
             lastError = String(describing: error)
+            JboxLog.engine.error("enumerateDevices failed: \(String(describing: error), privacy: .public)")
         }
     }
 
@@ -136,9 +144,11 @@ public final class EngineStore {
             let route = Route(id: id, config: config, status: status)
             routes.append(route)
             lastError = nil
+            JboxLog.engine.notice("route added: id=\(id) src=\(config.source.lastKnownName, privacy: .public) dst=\(config.destination.lastKnownName, privacy: .public) channels=\(config.mapping.count)")
             return route
         } catch {
             lastError = String(describing: error)
+            JboxLog.engine.error("addRoute failed src=\(config.source.uid, privacy: .public) dst=\(config.destination.uid, privacy: .public) err=\(String(describing: error), privacy: .public)")
             throw error
         }
     }
@@ -148,9 +158,11 @@ public final class EngineStore {
             try engine.startRoute(id)
             refreshStatus(id)
             lastError = nil
+            JboxLog.engine.notice("startRoute id=\(id) ok")
         } catch {
             lastError = String(describing: error)
             refreshStatus(id)
+            JboxLog.engine.error("startRoute id=\(id) failed: \(String(describing: error), privacy: .public)")
         }
     }
 
@@ -159,9 +171,11 @@ public final class EngineStore {
             try engine.stopRoute(id)
             refreshStatus(id)
             lastError = nil
+            JboxLog.engine.notice("stopRoute id=\(id) ok")
         } catch {
             lastError = String(describing: error)
             refreshStatus(id)
+            JboxLog.engine.error("stopRoute id=\(id) failed: \(String(describing: error), privacy: .public)")
         }
     }
 
@@ -170,8 +184,10 @@ public final class EngineStore {
             try engine.removeRoute(id)
             routes.removeAll(where: { $0.id == id })
             lastError = nil
+            JboxLog.engine.notice("removeRoute id=\(id) ok")
         } catch {
             lastError = String(describing: error)
+            JboxLog.engine.error("removeRoute id=\(id) failed: \(String(describing: error), privacy: .public)")
         }
     }
 

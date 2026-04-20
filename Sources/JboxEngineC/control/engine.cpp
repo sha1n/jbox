@@ -7,15 +7,23 @@
 namespace jbox::control {
 
 Engine::Engine(std::unique_ptr<IDeviceBackend> backend,
-               bool spawn_sampler_thread)
-    : dm_(std::move(backend)),
-      rm_(dm_),
+               bool spawn_sampler_thread,
+               bool spawn_log_drainer)
+    : drainer_(spawn_log_drainer ? std::make_unique<LogDrainer>() : nullptr),
+      dm_(std::move(backend)),
+      rm_(dm_, drainer_ ? drainer_->queue() : nullptr),
       sampler_(rm_) {
     dm_.refresh();
     if (spawn_sampler_thread) sampler_.start();
 }
 
-Engine::~Engine() { sampler_.stop(); }
+Engine::~Engine() {
+    sampler_.stop();
+    // Stop the drainer explicitly before the member destructors run,
+    // so any control-thread events queued during rm_ teardown are
+    // drained to the sink.
+    if (drainer_) drainer_->stop();
+}
 
 const std::vector<BackendDeviceInfo>& Engine::enumerateDevices() {
     return dm_.refresh();

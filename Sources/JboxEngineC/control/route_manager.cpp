@@ -2,11 +2,40 @@
 
 #include "route_manager.hpp"
 
+#include "rt_log_codes.hpp"
+
 #include <algorithm>
+#include <chrono>
 #include <cstring>
 #include <utility>
 
 namespace jbox::control {
+
+// Monotonic counter we stamp into RtLogEvent::timestamp. A pure counter
+// is cheaper than reading a clock and is enough for the drainer to
+// order events as observed.
+namespace {
+std::atomic<std::uint64_t> g_log_seq{0};
+
+inline std::uint64_t nextLogSeq() {
+    return g_log_seq.fetch_add(1, std::memory_order_relaxed) + 1;
+}
+
+inline void tryPushLog(jbox::rt::DefaultRtLogQueue* q,
+                       jbox::rt::RtLogCode code,
+                       std::uint32_t route_id,
+                       std::uint64_t a = 0,
+                       std::uint64_t b = 0) {
+    if (q == nullptr) return;
+    jbox::rt::RtLogEvent ev{};
+    ev.timestamp = nextLogSeq();
+    ev.code = code;
+    ev.route_id = route_id;
+    ev.value_a = a;
+    ev.value_b = b;
+    (void)q->tryPush(ev);  // drop on full; drainer is best-effort.
+}
+}  // namespace
 
 // -----------------------------------------------------------------------------
 // RT trampolines
@@ -27,7 +56,14 @@ void inputIOProcCallback(const float* samples,
                          void* user_data) {
     auto* r = static_cast<RouteRecord*>(user_data);
     if (r->ring == nullptr) return;
-    if (channel_count != r->source_total_channels) return;  // unexpected
+    if (channel_count != r->source_total_channels) {
+        if (!r->reported_channel_mismatch.exchange(true, std::memory_order_relaxed)) {
+            tryPushLog(r->log_queue, jbox::rt::kLogChannelMismatch, r->id,
+                       static_cast<std::uint64_t>(r->source_total_channels),
+                       static_cast<std::uint64_t>(channel_count));
+        }
+        return;
+    }
 
     const std::uint32_t out_channels = r->channels_count;
     float* scratch = r->input_scratch.data();
@@ -43,7 +79,11 @@ void inputIOProcCallback(const float* samples,
 
     const std::size_t written = r->ring->writeFrames(scratch, frame_count);
     if (written < frame_count) {
-        r->overrun_count.fetch_add(1, std::memory_order_relaxed);
+        const auto total = r->overrun_count.fetch_add(1, std::memory_order_relaxed) + 1;
+        if (!r->reported_overrun.exchange(true, std::memory_order_relaxed)) {
+            tryPushLog(r->log_queue, jbox::rt::kLogOverrun, r->id,
+                       static_cast<std::uint64_t>(total));
+        }
     }
     r->frames_produced.fetch_add(written, std::memory_order_relaxed);
 }
@@ -62,7 +102,14 @@ void outputIOProcCallback(float* samples,
                           void* user_data) {
     auto* r = static_cast<RouteRecord*>(user_data);
     if (r->ring == nullptr || r->converter == nullptr) return;
-    if (channel_count != r->dest_total_channels) return;
+    if (channel_count != r->dest_total_channels) {
+        if (!r->reported_channel_mismatch.exchange(true, std::memory_order_relaxed)) {
+            tryPushLog(r->log_queue, jbox::rt::kLogChannelMismatch, r->id,
+                       static_cast<std::uint64_t>(r->dest_total_channels),
+                       static_cast<std::uint64_t>(channel_count));
+        }
+        return;
+    }
 
     // Apply any pending rate update from the control thread. RT-thread-
     // local `last_applied_rate` suppresses redundant setProperty calls.
@@ -78,7 +125,11 @@ void outputIOProcCallback(float* samples,
     const std::size_t produced = r->converter->convert(
         scratch, frame_count, &ringPullCallback, r);
     if (produced < frame_count) {
-        r->underrun_count.fetch_add(1, std::memory_order_relaxed);
+        const auto total = r->underrun_count.fetch_add(1, std::memory_order_relaxed) + 1;
+        if (!r->reported_underrun.exchange(true, std::memory_order_relaxed)) {
+            tryPushLog(r->log_queue, jbox::rt::kLogUnderrun, r->id,
+                       static_cast<std::uint64_t>(total));
+        }
         std::memset(scratch + produced * in_channels, 0,
                     (frame_count - produced) * in_channels * sizeof(float));
     }
@@ -100,7 +151,9 @@ void outputIOProcCallback(float* samples,
 // Lifecycle
 // -----------------------------------------------------------------------------
 
-RouteManager::RouteManager(DeviceManager& dm) : dm_(dm) {}
+RouteManager::RouteManager(DeviceManager& dm,
+                           jbox::rt::DefaultRtLogQueue* log_queue)
+    : dm_(dm), log_queue_(log_queue) {}
 
 RouteManager::~RouteManager() {
     for (auto& [id, rec] : routes_) {
@@ -136,6 +189,7 @@ jbox_route_id_t RouteManager::addRoute(const RouteConfig& cfg, jbox_error_t* err
     rec->mapping        = cfg.mapping;
     rec->channels_count = static_cast<std::uint32_t>(cfg.mapping.size());
     rec->state          = JBOX_ROUTE_STATE_STOPPED;
+    rec->log_queue      = log_queue_;
 
     const jbox_route_id_t id = rec->id;
     routes_[id] = std::move(rec);
@@ -199,11 +253,20 @@ std::vector<RouteRecord*> RouteManager::runningRoutes() {
 // -----------------------------------------------------------------------------
 
 jbox_error_code_t RouteManager::attemptStart(RouteRecord& r) {
+    // Fresh (re)start — reset edge-triggered RT log flags so any
+    // first-of-kind event after this start gets reported again.
+    r.reported_underrun.store(false, std::memory_order_relaxed);
+    r.reported_overrun.store(false, std::memory_order_relaxed);
+    r.reported_channel_mismatch.store(false, std::memory_order_relaxed);
+
     // Resolve devices.
     const BackendDeviceInfo* src = dm_.findByUid(r.source_uid);
     const BackendDeviceInfo* dst = dm_.findByUid(r.dest_uid);
     if (src == nullptr || dst == nullptr) {
         r.state = JBOX_ROUTE_STATE_WAITING;
+        tryPushLog(log_queue_, jbox::rt::kLogRouteWaiting, r.id,
+                   src == nullptr ? 1u : 0u,
+                   dst == nullptr ? 1u : 0u);
         return JBOX_OK;  // not an error; user will retry once devices appear
     }
 
@@ -295,6 +358,9 @@ jbox_error_code_t RouteManager::attemptStart(RouteRecord& r) {
 
     r.state      = JBOX_ROUTE_STATE_RUNNING;
     r.last_error = JBOX_OK;
+    tryPushLog(log_queue_, jbox::rt::kLogRouteStarted, r.id,
+               static_cast<std::uint64_t>(r.source_total_channels),
+               static_cast<std::uint64_t>(r.dest_total_channels));
     return JBOX_OK;
 }
 
@@ -351,9 +417,15 @@ void RouteManager::destroyMuxIfUnused(const std::string& uid) {
 }
 
 void RouteManager::teardown(RouteRecord& r) {
+    const bool was_active = (r.state == JBOX_ROUTE_STATE_RUNNING ||
+                             r.state == JBOX_ROUTE_STATE_STARTING ||
+                             r.state == JBOX_ROUTE_STATE_WAITING);
     releaseRouteResources(r);
     r.state      = JBOX_ROUTE_STATE_STOPPED;
     r.last_error = JBOX_OK;
+    if (was_active) {
+        tryPushLog(log_queue_, jbox::rt::kLogRouteStopped, r.id);
+    }
 }
 
 }  // namespace jbox::control

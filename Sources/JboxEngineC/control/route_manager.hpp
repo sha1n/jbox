@@ -31,6 +31,7 @@
 #include "drift_tracker.hpp"
 #include "jbox_engine.h"
 #include "ring_buffer.hpp"
+#include "rt_log_queue.hpp"
 
 #include <atomic>
 #include <cstdint>
@@ -51,6 +52,20 @@ struct RouteRecord {
     std::string              source_uid;
     std::string              dest_uid;
     std::vector<ChannelEdge> mapping;
+
+    // Borrowed pointer to the engine's RT log queue (may be null when
+    // the engine is configured without a drainer, e.g. in some tests).
+    // Lifetime is tied to the Engine that owns both this record and
+    // the LogDrainer holding the queue.
+    jbox::rt::DefaultRtLogQueue* log_queue = nullptr;
+
+    // Edge-triggered flags for RT logging. RT callbacks set these to
+    // `true` on the first qualifying event after a (re)start so the
+    // queue doesn't get spammed during sustained trouble. Reset on
+    // startRoute / stopRoute via the control thread.
+    std::atomic<bool> reported_underrun{false};
+    std::atomic<bool> reported_overrun{false};
+    std::atomic<bool> reported_channel_mismatch{false};
 
     // Lifecycle.
     jbox_route_state_t state      = JBOX_ROUTE_STATE_STOPPED;
@@ -96,8 +111,12 @@ struct RouteRecord {
 
 class RouteManager {
 public:
-    // Takes a reference to a DeviceManager that outlives this RouteManager.
-    explicit RouteManager(DeviceManager& dm);
+    // Takes a reference to a DeviceManager that outlives this RouteManager,
+    // plus an optional RT log queue pointer (borrowed from the Engine's
+    // LogDrainer). A null queue disables logging for this manager — RT
+    // producers check it before calling `tryPush`.
+    explicit RouteManager(DeviceManager& dm,
+                          jbox::rt::DefaultRtLogQueue* log_queue = nullptr);
     ~RouteManager();
 
     RouteManager(const RouteManager&) = delete;
@@ -146,6 +165,7 @@ public:
 private:
 
     DeviceManager& dm_;
+    jbox::rt::DefaultRtLogQueue* log_queue_ = nullptr;
     std::unordered_map<jbox_route_id_t, std::unique_ptr<RouteRecord>> routes_;
     jbox_route_id_t next_id_ = 1;
 

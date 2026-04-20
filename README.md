@@ -150,6 +150,92 @@ On first launch, macOS prompts for audio-device access. Grant it — Jbox needs 
 
 ---
 
+## Debugging and logs
+
+Jbox emits structured log events through the unified logging system (`os_log`). There is no separate log file yet — rotating-file output to `~/Library/Logs/Jbox/` is scheduled for Phase 8 (see [docs/plan.md § Phase 8](./docs/plan.md#phase-8--packaging-and-installation)). In the meantime, everything is visible through the standard `log` command and Console.app.
+
+### Subsystem and categories
+
+All Jbox logging lives under a single subsystem so you can filter with one predicate:
+
+```
+subsystem: com.jbox.app
+categories: app | engine | ui | bridge
+```
+
+- `app` — Swift app entry point (startup, engine init failures).
+- `engine` — Swift side of the C bridge (device enumeration, route add / start / stop / remove + errors), and the real-time drainer output (underruns, overruns, channel mismatches, route lifecycle).
+- `ui` — reserved for SwiftUI view-layer events (not heavily used yet).
+- `bridge` — direct C-side calls around engine lifecycle and `add_route` accept / reject decisions.
+
+### Live stream
+
+Run Jbox in one terminal, then tail its output in another:
+
+```sh
+# Everything Jbox emits, live
+log stream --predicate 'subsystem == "com.jbox.app"'
+
+# Just the RT / engine channel
+log stream --predicate 'subsystem == "com.jbox.app" AND category == "engine"'
+
+# Include info-level messages too (default: notice and above)
+log stream --level info --predicate 'subsystem == "com.jbox.app"'
+
+# Include debug-level as well
+log stream --level debug --predicate 'subsystem == "com.jbox.app"'
+```
+
+### Post-hoc queries
+
+```sh
+# Last five minutes of Jbox activity
+log show --predicate 'subsystem == "com.jbox.app"' --last 5m
+
+# Same, but include info + debug (defaults hide these)
+log show --predicate 'subsystem == "com.jbox.app"' --last 5m --info --debug
+```
+
+### Enabling info- and debug-level persistence
+
+By default, `info` and `debug` messages are discarded almost immediately even if you request them in `log show`. To make them stick for live investigation:
+
+```sh
+# Turn persistence on for Jbox
+sudo log config --subsystem com.jbox.app --mode "level:debug,persist:debug"
+
+# Verify
+sudo log config --status --subsystem com.jbox.app
+
+# Turn it back off when you're done (recommended — debug-level is chatty)
+sudo log config --subsystem com.jbox.app --reset
+```
+
+### Event taxonomy
+
+Real-time events produced by the engine carry a compact numeric payload:
+
+| Event              | Payload (`value_a`, `value_b`)                              |
+|--------------------|-------------------------------------------------------------|
+| `underrun`         | `(total_underruns, 0)`                                      |
+| `overrun`          | `(total_overruns, 0)`                                       |
+| `channel_mismatch` | `(expected_channels, actual_channels)`                      |
+| `route_started`    | `(source_channel_count, dest_channel_count)`                |
+| `route_waiting`    | `(source_missing_flag, dest_missing_flag)`                  |
+| `route_stopped`    | `(0, 0)`                                                    |
+| `route_error`      | `(jbox_error_code, 0)`                                      |
+
+Underrun / overrun / channel-mismatch events are **edge-triggered** — only the first occurrence after each (re)start is logged, to keep the queue sparse under sustained trouble. The running totals remain visible through `jbox_engine_poll_route_status`.
+
+### Troubleshooting
+
+- **App appears to start but no routes work:** check the log for `engine` events. Startup logs `engine created abi=<N>` from the `bridge` category; absence means the bundle is failing to load or crashing before engine-create.
+- **Route stays in `waiting`:** look for `evt=route_waiting` — `value_a=1` means the source device UID was not found at start time, `value_b=1` means the destination was missing. Refresh devices (or reconnect) and retry.
+- **Route goes silent intermittently:** look for `evt=underrun` or `evt=overrun`. The first occurrence after a start will log; stop and re-start the route to re-arm the edge trigger if you want to confirm the problem is still occurring.
+- **Device shows up in one picker but not the other:** Jbox's source list is Core Audio devices with **input streams** (audio flowing hardware → Mac). A device that only appears in the Mac's output direction — because the Mac *sends* to it but cannot *read* from it — is correctly excluded from the source picker. If you expected a device to be a source but don't see it, verify in **Audio MIDI Setup** that it exposes input streams.
+
+---
+
 ## Releases
 
 For a complete walk-through — including every place the version number appears, how they stay in sync, and troubleshooting — see [docs/releases.md](./docs/releases.md).

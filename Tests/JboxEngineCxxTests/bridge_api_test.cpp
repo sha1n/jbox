@@ -17,11 +17,14 @@
 #include <string_view>
 #include <vector>
 
-// Forward-declare the test-only helpers from bridge_api.cpp.
+// Forward-declare the test-only helpers from bridge_api.cpp. The
+// drainer defaults to false in tests to avoid spawning a consumer
+// thread (and os_log noise) unless a test specifically exercises it.
 namespace jbox::internal {
 jbox_engine_t* createEngineWithBackend(
     std::unique_ptr<jbox::control::IDeviceBackend> backend,
-    bool spawn_sampler_thread);
+    bool spawn_sampler_thread,
+    bool spawn_log_drainer = false);
 void tickDriftOnce(jbox_engine_t* engine, double dt_seconds);
 }  // namespace jbox::internal
 

@@ -9,6 +9,9 @@
 #include "core_audio_backend.hpp"
 #include "engine.hpp"
 #include "jbox_engine.h"
+#include "log_drainer.hpp"
+
+#include <os/log.h>
 
 #include <cstdlib>
 #include <cstring>
@@ -16,6 +19,13 @@
 #include <new>
 #include <utility>
 #include <vector>
+
+namespace {
+os_log_t bridgeLog() {
+    static os_log_t log = os_log_create("com.jbox.app", "bridge");
+    return log;
+}
+}  // namespace
 
 // -----------------------------------------------------------------------------
 // Opaque handle
@@ -33,11 +43,24 @@ namespace jbox::internal {
 // Signature may change without a MAJOR bump.
 jbox_engine_t* createEngineWithBackend(
     std::unique_ptr<jbox::control::IDeviceBackend> backend,
-    bool spawn_sampler_thread) {
+    bool spawn_sampler_thread,
+    bool spawn_log_drainer) {
     auto* e = new jbox_engine{};
     e->impl = std::make_unique<jbox::control::Engine>(
-        std::move(backend), spawn_sampler_thread);
+        std::move(backend), spawn_sampler_thread, spawn_log_drainer);
     return e;
+}
+
+// Test hook: swap in a custom sink for the engine's log drainer.
+// Returns false if the engine has no drainer (e.g., constructed with
+// spawn_log_drainer=false).
+bool setLogSink(jbox_engine_t* engine,
+                jbox::control::LogDrainer::Sink sink) {
+    if (engine == nullptr || engine->impl == nullptr) return false;
+    auto* d = engine->impl->logDrainer();
+    if (d == nullptr) return false;
+    d->setSink(std::move(sink));
+    return true;
 }
 
 void tickDriftOnce(jbox_engine_t* engine, double dt_seconds) {
@@ -138,18 +161,27 @@ jbox_engine_t* jbox_engine_create(const jbox_engine_config_t* /*config*/,
                                   jbox_error_t* err) {
     try {
         auto backend = std::make_unique<jbox::control::CoreAudioBackend>();
-        return jbox::internal::createEngineWithBackend(std::move(backend),
-                                                       /*spawn_sampler_thread=*/true);
+        auto* e = jbox::internal::createEngineWithBackend(
+            std::move(backend),
+            /*spawn_sampler_thread=*/true,
+            /*spawn_log_drainer=*/true);
+        os_log(bridgeLog(), "engine created abi=%u", JBOX_ENGINE_ABI_VERSION);
+        return e;
     } catch (const std::bad_alloc&) {
+        os_log_error(bridgeLog(), "engine create failed: out of memory");
         setError(err, JBOX_ERR_RESOURCE_EXHAUSTED, "out of memory");
         return nullptr;
     } catch (...) {
+        os_log_error(bridgeLog(), "engine create failed: unknown exception");
         setError(err, JBOX_ERR_INTERNAL, "engine construction failed");
         return nullptr;
     }
 }
 
 void jbox_engine_destroy(jbox_engine_t* engine) {
+    if (engine != nullptr) {
+        os_log(bridgeLog(), "engine destroy");
+    }
     delete engine;
 }
 
@@ -215,7 +247,20 @@ jbox_route_id_t jbox_engine_add_route(jbox_engine_t* engine,
     }
     try {
         auto cpp_cfg = convertRouteConfig(*config);
-        return engine->impl->addRoute(cpp_cfg, err);
+        auto id = engine->impl->addRoute(cpp_cfg, err);
+        if (id == JBOX_INVALID_ROUTE_ID) {
+            os_log_error(bridgeLog(),
+                         "add_route rejected: src=%{public}s dst=%{public}s code=%d",
+                         cpp_cfg.source_uid.c_str(),
+                         cpp_cfg.dest_uid.c_str(),
+                         err != nullptr ? static_cast<int>(err->code) : -1);
+        } else {
+            os_log(bridgeLog(),
+                   "add_route ok: id=%u src=%{public}s dst=%{public}s channels=%zu",
+                   id, cpp_cfg.source_uid.c_str(), cpp_cfg.dest_uid.c_str(),
+                   cpp_cfg.mapping.size());
+        }
+        return id;
     } catch (const std::bad_alloc&) {
         setError(err, JBOX_ERR_RESOURCE_EXHAUSTED, "out of memory");
         return JBOX_INVALID_ROUTE_ID;

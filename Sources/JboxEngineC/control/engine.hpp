@@ -15,6 +15,7 @@
 #include "device_backend.hpp"
 #include "device_manager.hpp"
 #include "drift_sampler.hpp"
+#include "log_drainer.hpp"
 #include "route_manager.hpp"
 #include "jbox_engine.h"
 
@@ -26,7 +27,8 @@ namespace jbox::control {
 class Engine {
 public:
     Engine(std::unique_ptr<IDeviceBackend> backend,
-           bool spawn_sampler_thread);
+           bool spawn_sampler_thread,
+           bool spawn_log_drainer = true);
     ~Engine();
 
     Engine(const Engine&) = delete;
@@ -47,8 +49,12 @@ public:
     DeviceManager&   deviceManager() { return dm_; }
     RouteManager&    routeManager()  { return rm_; }
     DriftSampler&    driftSampler()  { return sampler_; }
+    LogDrainer*      logDrainer()    { return drainer_.get(); }
 
 private:
+    // The drainer is owned here so both the queue pointer (handed to
+    // RouteManager) and the consumer thread share one lifetime.
+    std::unique_ptr<LogDrainer> drainer_;
     DeviceManager dm_;
     RouteManager  rm_;
     DriftSampler  sampler_;
