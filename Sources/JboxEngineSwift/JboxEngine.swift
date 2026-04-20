@@ -38,7 +38,7 @@ public struct JboxError: Error, CustomStringConvertible {
 
 // MARK: - Device / route value types
 
-public struct Device {
+public struct Device: Equatable, Hashable, Sendable {
     public let uid: String
     public let name: String
     public let directionInput: Bool
@@ -47,9 +47,27 @@ public struct Device {
     public let outputChannelCount: UInt32
     public let nominalSampleRate: Double
     public let bufferFrameSize: UInt32
+
+    public init(uid: String,
+                name: String,
+                directionInput: Bool,
+                directionOutput: Bool,
+                inputChannelCount: UInt32,
+                outputChannelCount: UInt32,
+                nominalSampleRate: Double,
+                bufferFrameSize: UInt32) {
+        self.uid = uid
+        self.name = name
+        self.directionInput = directionInput
+        self.directionOutput = directionOutput
+        self.inputChannelCount = inputChannelCount
+        self.outputChannelCount = outputChannelCount
+        self.nominalSampleRate = nominalSampleRate
+        self.bufferFrameSize = bufferFrameSize
+    }
 }
 
-public struct ChannelEdge {
+public struct ChannelEdge: Equatable, Hashable, Sendable {
     public let src: UInt32
     public let dst: UInt32
     public init(src: UInt32, dst: UInt32) {
@@ -58,7 +76,7 @@ public struct ChannelEdge {
     }
 }
 
-public enum RouteState {
+public enum RouteState: Equatable, Hashable, Sendable {
     case stopped, waiting, starting, running, error
 
     init(_ c: jbox_route_state_t) {
@@ -73,13 +91,27 @@ public enum RouteState {
     }
 }
 
-public struct RouteStatus {
+public struct RouteStatus: Equatable, Hashable, Sendable {
     public let state: RouteState
     public let lastError: jbox_error_code_t
     public let framesProduced: UInt64
     public let framesConsumed: UInt64
     public let underrunCount: UInt64
     public let overrunCount: UInt64
+
+    public init(state: RouteState,
+                lastError: jbox_error_code_t,
+                framesProduced: UInt64,
+                framesConsumed: UInt64,
+                underrunCount: UInt64,
+                overrunCount: UInt64) {
+        self.state = state
+        self.lastError = lastError
+        self.framesProduced = framesProduced
+        self.framesConsumed = framesConsumed
+        self.underrunCount = underrunCount
+        self.overrunCount = overrunCount
+    }
 }
 
 // MARK: - Engine
