@@ -7,17 +7,17 @@
 //   stopped → waiting  → starting → running            (start before device present)
 //   running → error                                    (future: disconnect handling)
 //
-// For Phase 3, auto-recovery from WAITING / ERROR when a device
-// re-appears is deferred (see docs/plan.md § Phase 5 for the multi-
-// route / shared-device work). For now: a route that can't find its
-// devices at start time stays in WAITING; the user calls start again
-// (typically after refreshing the DeviceManager) to retry.
+// Auto-recovery from WAITING / ERROR when a device re-appears is still
+// deferred (pairs with the hot-plug listener). For now: a route that
+// can't find its devices at start time stays in WAITING; the user
+// calls start again (typically after refreshing the DeviceManager) to
+// retry.
 //
-// Phase 3 device-sharing constraint: a device can be used as source
-// by at most one route and as destination by at most one route
-// simultaneously. Attempting a second concurrent registration fails
-// with JBOX_ERR_DEVICE_BUSY. Phase 5 relaxes this via multi-route
-// dispatch behind a single shared IOProc.
+// Phase 5: multiple routes may share a source device or a destination
+// device. Each physical device backs a single DeviceIOMux which owns
+// one backend input IOProc and one output IOProc, multiplexing per-
+// route work behind an atomic dispatch list (see device_io_mux.hpp and
+// docs/spec.md § 2.7).
 //
 // See docs/spec.md §§ 2.3, 2.7.
 
@@ -26,6 +26,7 @@
 
 #include "audio_converter_wrapper.hpp"
 #include "channel_mapper.hpp"
+#include "device_io_mux.hpp"
 #include "device_manager.hpp"
 #include "drift_tracker.hpp"
 #include "jbox_engine.h"
@@ -61,8 +62,13 @@ struct RouteRecord {
     std::unique_ptr<jbox::rt::AudioConverterWrapper> converter;
     // Phase 4 production gains; definitions in drift_tracker.cpp.
     DriftTracker                                     tracker{phase4Kp(), phase4Ki(), phase4MaxOutput()};
-    IOProcId input_ioproc  = kInvalidIOProcId;
-    IOProcId output_ioproc = kInvalidIOProcId;
+
+    // Muxes we are currently attached to. Non-null means the route has
+    // a live per-route dispatch entry on that mux and will keep doing
+    // RT work there until detach*. The pointers are borrowed from
+    // RouteManager::muxes_ and remain valid until this route detaches.
+    DeviceIOMux* attached_src_mux = nullptr;
+    DeviceIOMux* attached_dst_mux = nullptr;
 
     std::vector<float> input_scratch;
     std::vector<float> output_scratch;
@@ -143,19 +149,25 @@ private:
     std::unordered_map<jbox_route_id_t, std::unique_ptr<RouteRecord>> routes_;
     jbox_route_id_t next_id_ = 1;
 
-    // Track which devices are currently in use as source or destination
-    // by running routes; Phase 3 enforces one-per-direction.
-    std::unordered_map<std::string, jbox_route_id_t> source_in_use_;
-    std::unordered_map<std::string, jbox_route_id_t> dest_in_use_;
+    // One mux per physical device UID currently referenced by at least
+    // one running route. Lazily created on first attach, destroyed once
+    // both directions go idle (the destructor closes any remaining
+    // backend IOProc IDs and stops the device).
+    std::unordered_map<std::string, std::unique_ptr<DeviceIOMux>> muxes_;
 
     // Internal helpers.
     jbox_error_code_t attemptStart(RouteRecord& r);
     void              teardown(RouteRecord& r);
-    // Release all runtime allocations and backend registrations on r without
+    // Release all runtime allocations and mux attachments on r without
     // touching r.state or r.last_error. Called by teardown (which then sets
     // state = STOPPED / last_error = JBOX_OK) and by the ERROR-return paths
     // in attemptStart (which set their own state / error afterward).
     void              releaseRouteResources(RouteRecord& r);
+    DeviceIOMux&      getOrCreateMux(const std::string& uid,
+                                     std::uint32_t input_channel_count,
+                                     std::uint32_t output_channel_count,
+                                     double grace_period_seconds);
+    void              destroyMuxIfUnused(const std::string& uid);
 };
 
 }  // namespace jbox::control

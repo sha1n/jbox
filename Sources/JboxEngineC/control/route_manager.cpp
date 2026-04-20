@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <cstring>
+#include <utility>
 
 namespace jbox::control {
 
@@ -18,6 +19,22 @@ namespace {
 // Per docs/spec.md § 2.3; yields ~5–10 ms headroom at 48k/64-frame buffers.
 constexpr std::uint32_t kRingCapacityBase = 256;
 constexpr std::uint32_t kRtScratchMaxFrames = 8192;
+
+// Floor on the RCU grace period applied by DeviceIOMux after each
+// atomic dispatch-list swap. Derived from the larger of the two
+// devices' buffer periods, but never shorter than this.
+constexpr double kGracePeriodFloorSeconds = 0.002;
+
+double computeGracePeriod(const BackendDeviceInfo& info) {
+    const double rate = info.nominal_sample_rate > 0.0
+                            ? info.nominal_sample_rate
+                            : 48000.0;
+    const double frames = info.buffer_frame_size > 0
+                              ? static_cast<double>(info.buffer_frame_size)
+                              : 64.0;
+    const double buffer_period = frames / rate;
+    return std::max(kGracePeriodFloorSeconds, 1.5 * buffer_period);
+}
 
 void inputIOProcCallback(const float* samples,
                          std::uint32_t frame_count,
@@ -205,19 +222,6 @@ jbox_error_code_t RouteManager::attemptStart(RouteRecord& r) {
         return JBOX_OK;  // not an error; user will retry once devices appear
     }
 
-    // Phase 3: device-sharing constraint. No two routes can register
-    // the same direction on the same device.
-    if (source_in_use_.count(r.source_uid) && source_in_use_[r.source_uid] != r.id) {
-        r.state = JBOX_ROUTE_STATE_ERROR;
-        r.last_error = JBOX_ERR_DEVICE_BUSY;
-        return JBOX_ERR_DEVICE_BUSY;
-    }
-    if (dest_in_use_.count(r.dest_uid) && dest_in_use_[r.dest_uid] != r.id) {
-        r.state = JBOX_ROUTE_STATE_ERROR;
-        r.last_error = JBOX_ERR_DEVICE_BUSY;
-        return JBOX_ERR_DEVICE_BUSY;
-    }
-
     r.state = JBOX_ROUTE_STATE_STARTING;
 
     r.source_total_channels = src->input_channel_count;
@@ -272,37 +276,39 @@ jbox_error_code_t RouteManager::attemptStart(RouteRecord& r) {
     r.last_applied_rate = r.nominal_src_rate;
     r.tracker.reset();
 
-    // Register IOProcs.
-    IDeviceBackend& be = dm_.backend();
-    r.input_ioproc = be.openInputCallback(r.source_uid, &inputIOProcCallback, &r);
-    if (r.input_ioproc == kInvalidIOProcId) {
+    // Attach to the source device's mux (input side). Creates the mux
+    // on demand; subsequent routes using this device will share it.
+    DeviceIOMux& src_mux = getOrCreateMux(
+        r.source_uid,
+        src->input_channel_count,
+        src->output_channel_count,
+        computeGracePeriod(*src));
+    if (!src_mux.attachInput(&r, &inputIOProcCallback, &r)) {
+        destroyMuxIfUnused(r.source_uid);
         releaseRouteResources(r);
         r.state = JBOX_ROUTE_STATE_ERROR;
         r.last_error = JBOX_ERR_DEVICE_BUSY;
         return JBOX_ERR_DEVICE_BUSY;
     }
-    r.output_ioproc = be.openOutputCallback(r.dest_uid, &outputIOProcCallback, &r);
-    if (r.output_ioproc == kInvalidIOProcId) {
+    r.attached_src_mux = &src_mux;
+
+    // Attach to the destination device's mux (output side). If the
+    // destination UID happens to equal the source UID, this is the
+    // same mux — attaching the output direction is still valid.
+    DeviceIOMux& dst_mux = getOrCreateMux(
+        r.dest_uid,
+        dst->input_channel_count,
+        dst->output_channel_count,
+        computeGracePeriod(*dst));
+    if (!dst_mux.attachOutput(&r, &outputIOProcCallback, &r)) {
+        // releaseRouteResources detaches the already-attached input
+        // side and cleans up any mux we created.
         releaseRouteResources(r);
         r.state = JBOX_ROUTE_STATE_ERROR;
         r.last_error = JBOX_ERR_DEVICE_BUSY;
         return JBOX_ERR_DEVICE_BUSY;
     }
-
-    // Mark in-use. Must happen before startDevice so device accounting
-    // is consistent if teardown is needed mid-start.
-    source_in_use_[r.source_uid] = r.id;
-    dest_in_use_[r.dest_uid]     = r.id;
-
-    // Start devices.
-    if (!be.startDevice(r.source_uid)) {
-        // startDevice returns false if already started; tolerate that
-        // (another route may have started it under Phase 5, or a test
-        // may have done it). Treat as success unless an open failed.
-    }
-    if (!be.startDevice(r.dest_uid)) {
-        // same tolerance
-    }
+    r.attached_dst_mux = &dst_mux;
 
     r.state      = JBOX_ROUTE_STATE_RUNNING;
     r.last_error = JBOX_OK;
@@ -310,31 +316,20 @@ jbox_error_code_t RouteManager::attemptStart(RouteRecord& r) {
 }
 
 void RouteManager::releaseRouteResources(RouteRecord& r) {
-    IDeviceBackend& be = dm_.backend();
-
-    // Stop devices (if this route holds them).
-    if (source_in_use_.count(r.source_uid) && source_in_use_[r.source_uid] == r.id) {
-        be.stopDevice(r.source_uid);
-        source_in_use_.erase(r.source_uid);
+    // Detach from muxes first. Each detach blocks for one grace period
+    // after the atomic swap, after which no RT callback can still be
+    // referencing r's RT resources and it is safe to release them.
+    if (r.attached_src_mux != nullptr) {
+        r.attached_src_mux->detachInput(&r);
+        r.attached_src_mux = nullptr;
+        destroyMuxIfUnused(r.source_uid);
     }
-    if (dest_in_use_.count(r.dest_uid) && dest_in_use_[r.dest_uid] == r.id) {
-        be.stopDevice(r.dest_uid);
-        dest_in_use_.erase(r.dest_uid);
-    }
-
-    // Close IOProcs.
-    if (r.input_ioproc != kInvalidIOProcId) {
-        be.closeCallback(r.input_ioproc);
-        r.input_ioproc = kInvalidIOProcId;
-    }
-    if (r.output_ioproc != kInvalidIOProcId) {
-        be.closeCallback(r.output_ioproc);
-        r.output_ioproc = kInvalidIOProcId;
+    if (r.attached_dst_mux != nullptr) {
+        r.attached_dst_mux->detachOutput(&r);
+        r.attached_dst_mux = nullptr;
+        destroyMuxIfUnused(r.dest_uid);
     }
 
-    // Release runtime resources. AudioDeviceStop is synchronous on
-    // Core Audio, so by the time closeCallback returns no IOProc
-    // callback is in flight for this record.
     if (r.converter) {
         r.converter->reset();
         r.converter.reset();
@@ -350,6 +345,28 @@ void RouteManager::releaseRouteResources(RouteRecord& r) {
     // r.state and r.last_error are intentionally not touched here;
     // callers set them to the appropriate value after this call.
     // Counters are preserved across stop/start cycles for visibility.
+}
+
+DeviceIOMux& RouteManager::getOrCreateMux(const std::string& uid,
+                                          std::uint32_t input_channel_count,
+                                          std::uint32_t output_channel_count,
+                                          double grace_period_seconds) {
+    auto it = muxes_.find(uid);
+    if (it != muxes_.end()) return *it->second;
+    auto mux = std::make_unique<DeviceIOMux>(
+        dm_.backend(), uid, input_channel_count, output_channel_count,
+        grace_period_seconds);
+    DeviceIOMux& ref = *mux;
+    muxes_.emplace(uid, std::move(mux));
+    return ref;
+}
+
+void RouteManager::destroyMuxIfUnused(const std::string& uid) {
+    auto it = muxes_.find(uid);
+    if (it == muxes_.end()) return;
+    if (!it->second->hasAnyInput() && !it->second->hasAnyOutput()) {
+        muxes_.erase(it);
+    }
 }
 
 void RouteManager::teardown(RouteRecord& r) {

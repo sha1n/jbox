@@ -239,27 +239,27 @@ TEST_CASE("RouteManager: stopRoute returns to STOPPED and releases resources",
     REQUIRE(f.rm->stopRoute(id) == JBOX_OK);
 }
 
-TEST_CASE("RouteManager: Phase 3 device-sharing constraint enforced",
+TEST_CASE("RouteManager: Phase 5 lets two routes share a device",
           "[route_manager]") {
-    // Two routes trying to share the same source or destination device
-    // as source/dest respectively — Phase 3 disallows this with
-    // JBOX_ERR_DEVICE_BUSY.
-    Fixture f(2, 2);
-    std::vector<ChannelEdge> m{{0, 0}, {1, 1}};
+    // Two routes on the same {src, dst} pair — Phase 3 rejected this
+    // with JBOX_ERR_DEVICE_BUSY, Phase 5 allows it via DeviceIOMux.
+    // Channel sets are disjoint per the v1 uniqueness invariants.
+    Fixture f(4, 4);
+    std::vector<ChannelEdge> m1{{0, 0}, {1, 1}};
+    std::vector<ChannelEdge> m2{{2, 2}, {3, 3}};
 
     jbox_error_t err{};
-    auto id1 = f.rm->addRoute({"src", "dst", m, "r1"}, &err);
+    const auto id1 = f.rm->addRoute({"src", "dst", m1, "r1"}, &err);
     REQUIRE(f.rm->startRoute(id1) == JBOX_OK);
 
-    // Second route tries to open input on same src; SimulatedBackend's
-    // open*Callback refuses duplicate registration, which surfaces to
-    // RouteManager as JBOX_ERR_DEVICE_BUSY.
-    auto id2 = f.rm->addRoute({"src", "dst", m, "r2"}, &err);
-    REQUIRE(f.rm->startRoute(id2) == JBOX_ERR_DEVICE_BUSY);
+    const auto id2 = f.rm->addRoute({"src", "dst", m2, "r2"}, &err);
+    REQUIRE(f.rm->startRoute(id2) == JBOX_OK);
 
     jbox_route_status_t status{};
+    f.rm->pollStatus(id1, &status);
+    REQUIRE(status.state == JBOX_ROUTE_STATE_RUNNING);
     f.rm->pollStatus(id2, &status);
-    REQUIRE(status.state == JBOX_ROUTE_STATE_ERROR);
+    REQUIRE(status.state == JBOX_ROUTE_STATE_RUNNING);
 }
 
 TEST_CASE("RouteManager: removeRoute stops running routes and frees slots",
