@@ -31,7 +31,7 @@
 | 2     | Engine core primitives                | Ring buffer, RT log queue, atomic meter, drift tracker — unit-tested and RT-safe.     | ✅ Done (`48ea5cb`) |
 | 3     | First working route                   | Audio from V31 → Apollo Virtual outputs, end-to-end, with real devices.               | ✅ Code done (`6b74c59`) — manual hardware test deferred |
 | 4     | Drift correction and resampling       | 30-minute soak test on real devices with zero dropouts.                                | ✅ Code done (13 commits from `6e42c74`) — hardware soak deferred |
-| 5     | Multi-route and shared devices        | Three simultaneous routes running, including one that shares a device with another.   | ⏳ Pending |
+| 5     | Multi-route and shared devices        | Three simultaneous routes running, including one that shares a device with another.   | ✅ Code done (4 commits from `a83c4b5`) — real-hardware three-route sanity deferred |
 | 6     | SwiftUI UI                            | User can add / edit / delete / start / stop routes through the GUI.                   | ⏳ Pending |
 | 7     | Persistence, scenes, launch-at-login  | Relaunching the app restores configured routes and scenes.                             | ⏳ Pending |
 | 8     | Packaging and installation            | `Jbox.app` runs from `/Applications` on a clean user account.                          | ⏳ Pending |
@@ -274,27 +274,33 @@ Phase 4 summary of deviations:
 
 ## Phase 5 — Multi-route and shared devices
 
+**Status:** ✅ Code complete, CI green (4 commits: `a83c4b5`..`d418562`). **Real-hardware three-route sanity test deferred** — same rig-availability pattern as Phases 3/4. Hot-plug listener for `kAudioHardwarePropertyDevices` is still deferred (see deviation note at the end of this phase).
+
 **Goal.** Support multiple simultaneous routes, including routes that share a source device or destination device. Prove the RCU-style active-route list pattern under load.
 
 **Entry criteria.** Phase 4 complete.
 
 **Exit criteria.**
-- At least three concurrent routes run without interference.
-- At least one test scenario has two routes sharing a source device, one route sharing a destination with one of those. All three run cleanly; adding / removing any one does not disturb the others.
-- Integration tests under ThreadSanitizer do not flag races on the active-route lists.
-- Real-hardware sanity test: start three routes, run for 10 minutes, no dropouts.
+- [x] At least three concurrent routes run without interference.
+- [x] At least one test scenario has two routes sharing a source device, one route sharing a destination with one of those. All three run cleanly; adding / removing any one does not disturb the others. (`multi_route_test.cpp` "three routes, shared source and shared destination" case.)
+- [x] Integration tests under ThreadSanitizer do not flag races on the active-route lists. (`swift run --sanitize=thread JboxEngineCxxTests` — 145 cases, 667 713 assertions, zero TSan warnings.)
+- [~] Real-hardware sanity test: start three routes, run for 10 minutes, no dropouts. **Deferred to manual hardware test** — rig not connected.
 
 **Tasks.**
 
 Engine:
-- [ ] Implement RCU-style active-route list in `DeviceHandle` (`std::atomic<RouteList*>`), with deferred-free of old lists on the control thread.
-- [ ] Modify input / output IOProcs to iterate the active-route list and dispatch per-route work.
-- [ ] Safe route-add and route-remove: allocate new list, copy + modify, atomic pointer swap, schedule old list for deferred reclamation.
+- [x] Implement RCU-style active-route list in `DeviceIOMux` (`std::atomic<const RouteList*>`) with sequence-counter-based quiescence on the control thread. Landed in commit #1 (`a83c4b5`) with the list types living in `device_io_mux.{hpp,cpp}`.
+- [x] Modify input / output IOProcs to iterate the active-route list and dispatch per-route work. The mux registers a single input and single output trampoline per device; per-route callbacks are stored in the published list and invoked in sequence.
+- [x] Safe route-add and route-remove: allocate new list, copy + modify, atomic pointer swap, wait for RT quiescence (seq counters), drop old list. Replaced the initial sleep-based grace period with acq/rel sequence counters in commit #4 so ThreadSanitizer sees the synchronisation (sleeps are not HB-visible to TSan).
 
 Tests:
-- [ ] Integration tests for add-while-running, remove-while-running scenarios.
-- [ ] Concurrent-route stress test: rapid start / stop of many routes on the same devices; verify no crashes, no leaks, no corrupted output.
-- [ ] Real-hardware sanity test: three concurrent routes across V31 and Apollo.
+- [x] Integration tests for add-while-running, remove-while-running scenarios. (`multi_route_test.cpp` "add-while-running keeps the first route flowing" and "remove-while-running stops one without disturbing peers".)
+- [x] Concurrent-route stress test: rapid start / stop of many routes on the same devices; verify no crashes, no leaks, no corrupted output. (`multi_route_stress_test.cpp` — two scenarios exercising both the mux directly and the RouteManager path, both TSan-clean.)
+- [ ] Real-hardware sanity test: three concurrent routes across two or more devices. **Deferred** until the owner's rig is connected.
+
+Phase 5 summary of deviations:
+- **Quiescence vs. sleep-based grace period.** The initial Phase 5 design used `std::this_thread::sleep_for(1.5 × buffer_period)` to wait for in-flight RT iterations to exit before dropping the old list (as suggested in docs/spec.md § 2.3). That is correct in production but ThreadSanitizer flagged the subsequent delete as racing with the RT trampoline's iterator — TSan does not model time-based synchronisation. Replaced with a pair of `std::atomic<std::uint64_t>` enter/exit sequence counters per direction; the control thread snapshots enter-seq after the atomic store and yield-spins until exit-seq catches up. Same semantics, TSan-visible happens-before, no knob to tune. The `grace_period_seconds` constructor parameter was dropped.
+- **Hot-plug listener still deferred.** docs/plan.md Phase 3 flagged `kAudioHardwarePropertyDevices` change listeners as "deferred to Phase 5 (paired with multi-route device sharing)". The Phase 5 task list itself did not re-list it; the multi-route work did not require it, and adding it now would mix concerns. Tracked as the next deferred item on the Phase 5 follow-up list above. Routes that lose a device still sit in `WAITING`/`ERROR` until the user re-issues `startRoute` after a manual `enumerateDevices()` refresh, as in Phase 3.
 
 ---
 
