@@ -44,16 +44,6 @@ struct AddRouteSheet: View {
         dstDevice.map { store.channelNames(uid: $0.uid, direction: .output) } ?? []
     }
 
-    /// Render `"Ch N · <name>"` when the driver published a label;
-    /// `"Ch N"` otherwise. `index` is 0-indexed (as in ChannelEdge);
-    /// we add 1 for the user-facing 1-indexed label per spec § 2.3.
-    private func channelLabel(index: Int, names: [String]) -> String {
-        let base = "Ch \(index + 1)"
-        guard index >= 0, index < names.count else { return base }
-        let trimmed = names[index].trimmingCharacters(in: .whitespacesAndNewlines)
-        return trimmed.isEmpty ? base : "\(base) · \(trimmed)"
-    }
-
     private var validationIssue: String? {
         if sourceUID.isEmpty { return "Pick a source device." }
         if destUID.isEmpty   { return "Pick a destination device." }
@@ -143,7 +133,7 @@ struct AddRouteSheet: View {
         HStack(spacing: 12) {
             Picker("Source", selection: $pairs[idx].src) {
                 ForEach(0..<max(srcChannels, 0), id: \.self) { ch in
-                    Text(channelLabel(index: ch, names: srcChannelNames)).tag(ch)
+                    Text(ChannelLabel.format(index: ch, names: srcChannelNames)).tag(ch)
                 }
             }
             .labelsHidden()
@@ -155,7 +145,7 @@ struct AddRouteSheet: View {
 
             Picker("Destination", selection: $pairs[idx].dst) {
                 ForEach(0..<max(dstChannels, 0), id: \.self) { ch in
-                    Text(channelLabel(index: ch, names: dstChannelNames)).tag(ch)
+                    Text(ChannelLabel.format(index: ch, names: dstChannelNames)).tag(ch)
                 }
             }
             .labelsHidden()

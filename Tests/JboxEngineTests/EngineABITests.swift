@@ -84,4 +84,46 @@ struct EngineWrapperTests {
             #expect(e.code == JBOX_ERR_INVALID_ARGUMENT)
         }
     }
+
+    @Test("enumerateChannels returns one entry per channel in the requested direction")
+    func enumerateChannelsMatchesChannelCount() throws {
+        let engine = try Engine()
+        let devices = try engine.enumerateDevices()
+        guard let d = devices.first(where: { $0.inputChannelCount >= 1 }) else {
+            Issue.record("expected at least one input-capable device on the CI runner")
+            return
+        }
+        let names = try engine.enumerateChannels(uid: d.uid, direction: .input)
+        #expect(names.count == Int(d.inputChannelCount))
+        // Every element is a valid String (could be empty — some
+        // drivers don't publish names). The fact that we got here
+        // without throwing or crashing already validates the
+        // CFString → std::string → C buffer → Swift String path.
+    }
+
+    @Test("enumerateChannels on an unknown UID returns an empty array")
+    func enumerateChannelsUnknownUidReturnsEmpty() throws {
+        let engine = try Engine()
+        // Force the DeviceManager to refresh so the empty-uid lookup
+        // takes the normal path (not a fresh-engine early-out).
+        _ = try engine.enumerateDevices()
+        let names = try engine.enumerateChannels(
+            uid: "com.jbox.test.no-such-device",
+            direction: .input)
+        #expect(names.isEmpty)
+    }
+
+    @Test("enumerateChannels for input and output sides both work")
+    func enumerateChannelsBothDirections() throws {
+        let engine = try Engine()
+        let devices = try engine.enumerateDevices()
+        if let input = devices.first(where: { $0.inputChannelCount >= 1 }) {
+            let names = try engine.enumerateChannels(uid: input.uid, direction: .input)
+            #expect(names.count == Int(input.inputChannelCount))
+        }
+        if let output = devices.first(where: { $0.outputChannelCount >= 1 }) {
+            let names = try engine.enumerateChannels(uid: output.uid, direction: .output)
+            #expect(names.count == Int(output.outputChannelCount))
+        }
+    }
 }

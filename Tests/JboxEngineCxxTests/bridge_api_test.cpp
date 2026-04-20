@@ -10,11 +10,17 @@
 
 #include "device_backend.hpp"
 #include "jbox_engine.h"
+#include "rt_log_codes.hpp"
+#include "rt_log_queue.hpp"
 #include "simulated_backend.hpp"
 
+#include <chrono>
 #include <cstring>
+#include <functional>
 #include <memory>
+#include <mutex>
 #include <string_view>
+#include <thread>
 #include <vector>
 
 // Forward-declare the test-only helpers from bridge_api.cpp. The
@@ -26,6 +32,8 @@ jbox_engine_t* createEngineWithBackend(
     bool spawn_sampler_thread,
     bool spawn_log_drainer = false);
 void tickDriftOnce(jbox_engine_t* engine, double dt_seconds);
+bool setLogSink(jbox_engine_t* engine,
+                std::function<void(const jbox::rt::RtLogEvent&)> sink);
 }  // namespace jbox::internal
 
 using jbox::control::BackendDeviceInfo;
@@ -310,4 +318,114 @@ TEST_CASE("bridge: create/destroy via default backend", "[bridge_api][integratio
 TEST_CASE("bridge: struct sizes document the ABI shape", "[bridge_api]") {
     REQUIRE(sizeof(jbox_channel_edge_t) == 8);
     REQUIRE(sizeof(jbox_device_info_t) >= 256 + 256 + 4 + 4 + 4 + 8 + 4);
+}
+
+// -----------------------------------------------------------------------------
+// End-to-end: drainer + setLogSink through the public C API
+// -----------------------------------------------------------------------------
+//
+// Unlike logging_pipeline_test.cpp (which pops directly from a
+// test-owned RtLogQueue), this test exercises the full production
+// path: RouteManager pushes → DefaultRtLogQueue owned by LogDrainer →
+// background consumer thread → custom Sink installed via setLogSink.
+//
+// The drainer's default poll interval is 100 ms, so assertions poll
+// for up to ~1 s before giving up. Kept generous to stay robust on a
+// busy CI runner.
+
+namespace {
+
+struct CaptureSink {
+    std::mutex              mu;
+    std::vector<jbox::rt::RtLogEvent> events;
+
+    void operator()(const jbox::rt::RtLogEvent& ev) {
+        std::lock_guard<std::mutex> g(mu);
+        events.push_back(ev);
+    }
+
+    std::size_t count() {
+        std::lock_guard<std::mutex> g(mu);
+        return events.size();
+    }
+
+    // Wait for at least `n` events to land, or timeout. Returns the
+    // actual count observed when the wait exits.
+    std::size_t waitFor(std::size_t n, std::chrono::milliseconds timeout) {
+        const auto deadline = std::chrono::steady_clock::now() + timeout;
+        for (;;) {
+            if (count() >= n) return count();
+            if (std::chrono::steady_clock::now() >= deadline) return count();
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+    }
+
+    bool containsCode(jbox::rt::RtLogCode code) {
+        std::lock_guard<std::mutex> g(mu);
+        for (const auto& e : events) if (e.code == code) return true;
+        return false;
+    }
+};
+
+}  // namespace
+
+TEST_CASE("bridge: setLogSink captures events through the full drainer path",
+          "[bridge_api][integration][logging]") {
+    auto backend_holder = std::make_unique<SimulatedBackend>();
+    auto* backend = backend_holder.get();
+    backend->addDevice(makeDev("src", kBackendDirectionInput,  2, 0));
+    backend->addDevice(makeDev("dst", kBackendDirectionOutput, 0, 2));
+
+    jbox_engine_t* e = jbox::internal::createEngineWithBackend(
+        std::move(backend_holder),
+        /*spawn_sampler_thread=*/false,
+        /*spawn_log_drainer=*/true);
+    REQUIRE(e != nullptr);
+
+    auto capture = std::make_shared<CaptureSink>();
+    REQUIRE(jbox::internal::setLogSink(e,
+        [capture](const jbox::rt::RtLogEvent& ev) { (*capture)(ev); }));
+
+    jbox_error_t err{};
+    if (auto* l = jbox_engine_enumerate_devices(e, &err)) jbox_device_list_free(l);
+
+    const jbox_channel_edge_t m[] = {{0, 0}, {1, 1}};
+    jbox_route_config_t rcfg{};
+    rcfg.source_uid    = "src";
+    rcfg.dest_uid      = "dst";
+    rcfg.mapping       = m;
+    rcfg.mapping_count = 2;
+    rcfg.name          = "drainer-test";
+
+    const auto id = jbox_engine_add_route(e, &rcfg, &err);
+    REQUIRE(id != JBOX_INVALID_ROUTE_ID);
+    REQUIRE(jbox_engine_start_route(e, id) == JBOX_OK);
+
+    // Wait for the start event to come out the other side of the drainer.
+    capture->waitFor(1, std::chrono::seconds(2));
+    REQUIRE(capture->containsCode(jbox::rt::kLogRouteStarted));
+
+    REQUIRE(jbox_engine_stop_route(e, id) == JBOX_OK);
+    capture->waitFor(2, std::chrono::seconds(2));
+    REQUIRE(capture->containsCode(jbox::rt::kLogRouteStopped));
+
+    jbox_engine_destroy(e);
+}
+
+TEST_CASE("bridge: setLogSink on a drainer-less engine returns false",
+          "[bridge_api][integration][logging]") {
+    auto backend = std::make_unique<SimulatedBackend>();
+    backend->addDevice(makeDev("src", kBackendDirectionInput, 2, 0));
+
+    jbox_engine_t* e = jbox::internal::createEngineWithBackend(
+        std::move(backend),
+        /*spawn_sampler_thread=*/false,
+        /*spawn_log_drainer=*/false);
+    REQUIRE(e != nullptr);
+
+    const bool ok = jbox::internal::setLogSink(e,
+        [](const jbox::rt::RtLogEvent&) {});
+    REQUIRE_FALSE(ok);
+
+    jbox_engine_destroy(e);
 }
