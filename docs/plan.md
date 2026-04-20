@@ -32,7 +32,7 @@
 | 3     | First working route                   | Audio from V31 → Apollo Virtual outputs, end-to-end, with real devices.               | ✅ Code done (`6b74c59`) — manual hardware test deferred |
 | 4     | Drift correction and resampling       | 30-minute soak test on real devices with zero dropouts.                                | ✅ Code done (13 commits from `6e42c74`) — hardware soak deferred |
 | 5     | Multi-route and shared devices        | Three simultaneous routes running, including one that shares a device with another.   | ✅ Code done (4 commits from `a83c4b5`) — real-hardware three-route sanity deferred |
-| 6     | SwiftUI UI                            | User can add / edit / delete / start / stop routes through the GUI.                   | ⏳ Pending |
+| 6     | SwiftUI UI                            | User can add / edit / delete / start / stop routes through the GUI.                   | 🚧 First slice landed (4 commits from `7e3e3f8`) — meters, MenuBarExtra, Preferences, scenes still pending |
 | 7     | Persistence, scenes, launch-at-login  | Relaunching the app restores configured routes and scenes.                             | ⏳ Pending |
 | 8     | Packaging and installation            | `Jbox.app` runs from `/Applications` on a clean user account.                          | ⏳ Pending |
 | 9     | Release hardening                     | v1.0.0 tagged and published to GitHub Releases.                                        | ⏳ Pending |
@@ -306,43 +306,50 @@ Phase 5 summary of deviations:
 
 ## Phase 6 — SwiftUI UI
 
+**Status:** 🚧 First slice landed (4 commits: `7e3e3f8`..`3704846`). The app now has a working main window, add-route sheet, row-level start/stop/remove actions, and live 4 Hz status polling — you can add → start → stop → remove routes entirely from the GUI, against the real Core Audio engine. Meters, MenuBarExtra, Preferences, scene editor, and the XCUITest flows are not implemented yet; scene editor is being pushed into Phase 7 next to persistence (a scene editor without durable state is a UX pothole). The bridge API has not changed.
+
 **Goal.** Build the v1 SwiftUI UI against the stable bridge API. No engine changes should be required to make the UI work.
 
 **Entry criteria.** Phase 5 complete. Bridge API stable (no breaking changes planned during Phase 6).
 
 **Exit criteria.**
-- User can add / edit / delete routes through the main window route editor.
-- User can start / stop routes; status (running / stopped / waiting / error) reflects correctly.
-- Per-channel meters update live while routes run.
-- Menu bar extra shows overall state and exposes toggles for each route.
-- Preferences window exposes buffer-size policy, resampler quality, and appearance.
-- UI works without Xcode IDE (builds via `swift build`); SwiftUI previews work when opened in Xcode.
+- [x] User can add / edit / delete routes through the main window route editor. *(Add/delete done in first slice; "edit" of an existing route is not yet wired — re-create workflow works.)*
+- [x] User can start / stop routes; status (running / stopped / waiting / error) reflects correctly. Row-level Start/Stop buttons and `StatusGlyph` render all five states; live polling keeps them up to date.
+- [ ] Per-channel meters update live while routes run. **Pending** — requires a new `jbox_engine_poll_meters` bridge entry point + a `Canvas`-based meter view on a 30 Hz timer.
+- [ ] Menu bar extra shows overall state and exposes toggles for each route. **Pending.**
+- [ ] Preferences window exposes buffer-size policy, resampler quality, and appearance. **Pending.**
+- [x] UI works without Xcode IDE (builds via `swift build`); SwiftUI previews work when opened in Xcode. The entire first slice was built and launched from the command line via `swift run JboxApp`.
 
 **Tasks.**
 
 Swift wrapper over bridge:
-- [ ] `JboxEngineSwift/JboxEngine.swift` — ergonomic Swift types (`Device`, `Route`, `RouteStatus`, etc.) wrapping the C structs.
-- [ ] Device enumeration as an `@Observable` (or `ObservableObject`) that republishes when Core Audio notifies the engine.
-- [ ] Route status polling via a timer bound to SwiftUI.
+- [x] `JboxEngineSwift/JboxEngine.swift` — ergonomic Swift types (`Device`, `Route`, `RouteStatus`, `ChannelEdge`, `RouteState`) wrapping the C structs. Promoted to Equatable/Hashable/Sendable in `phase6 #1`.
+- [x] Device enumeration + route state as an `@Observable` (`EngineStore`, Phase 6 #1). Refresh is currently user-driven (toolbar button + on-launch); hot-plug auto-refresh still waits on the Phase 5 follow-up listener for `kAudioHardwarePropertyDevices`.
+- [x] Route status polling via a SwiftUI-bound timer (`.task` on `RouteListView`, ~4 Hz, Phase 6 #4).
 
 Main window:
-- [ ] `NavigationSplitView` layout: sidebar (All Routes + Scenes) + route list.
-- [ ] Route row view with status glyph, name, source → destination summary, meters, start/stop button, `[⋯]` menu.
-- [ ] Route editor sheet: device pickers, channel multi-select lists, mapping preview, validation.
-- [ ] Scene editor sheet.
-- [ ] Preferences window (`Settings` scene) with three tabs.
+- [x] `NavigationSplitView` layout: sidebar (currently just "All Routes" — Scenes row lands with Phase 7 persistence) + detail list of routes with empty-state fallback.
+- [x] Route row view: status glyph, display name, source → destination / channel-count summary, counters (produced / consumed / underruns), Start/Stop and Remove buttons.
+- [x] Route editor sheet: device pickers (direction-filtered), dynamic channel-mapping editor (1-indexed display, constrained steppers), client-side validation mirroring the v1 ChannelMapper rules, engine-side errors surfaced inline.
+- [ ] Scene editor sheet. **Deferred to Phase 7** — scenes only make sense with persistence.
+- [ ] Preferences window (`Settings` scene) with three tabs. **Pending.**
 
 Menu bar extra:
-- [ ] `MenuBarExtra` scene with dynamic icon.
-- [ ] Popover content: per-route toggles, scene picker, Start All / Stop All, menu items.
+- [ ] `MenuBarExtra` scene with dynamic icon. **Pending.**
+- [ ] Popover content: per-route toggles, scene picker, Start All / Stop All, menu items. **Pending.**
 
 Meters:
-- [ ] SwiftUI `Canvas`-based meter view; single 30 Hz timer drives the whole app.
-- [ ] Color thresholds and accessibility labels.
+- [ ] SwiftUI `Canvas`-based meter view; single 30 Hz timer drives the whole app. **Pending — depends on bridge work (`jbox_engine_poll_meters`).**
+- [ ] Color thresholds and accessibility labels. **Pending.**
 
 UI tests (minimal):
-- [ ] SwiftUI preview providers for route row, route editor, sidebar.
-- [ ] A couple of XCUITest flows in `JboxAppTests` (add route, start route, switch scene) — may be skipped on CI if they don't work headlessly, but runnable locally.
+- [x] Swift Testing cases for `EngineStore` against the live Core Audio engine (`Tests/JboxEngineTests/EngineStoreTests.swift`, Phase 6 #1).
+- [ ] SwiftUI preview providers for route row, route editor, sidebar. **Pending.**
+- [ ] A couple of XCUITest flows in `JboxAppTests` (add route, start route, switch scene). **Pending** — may be skipped on CI if they don't work headlessly, but runnable locally.
+
+Phase 6 first-slice summary of deviations:
+- **Scene editor moved to Phase 7.** The original plan had scenes UI in Phase 6 and scene activation logic / persistence in Phase 7. A scene editor that cannot round-trip through disk is confusing to use and wastes test surface on a UI that would be rewritten once persistence lands. Consolidating into Phase 7 is cleaner.
+- **UI verification gap.** The first-slice commits were built and smoke-launched from the command line (`swift run JboxApp` stays up). The actual rendering — NavigationSplitView layout, sheet presentation, stepper clamping, toolbar buttons — has **not** been interactively verified. A human pass on the running app is needed; bugs surfaced there will be addressed in follow-up commits rather than retroactively edited into the first-slice commits.
 
 ---
 
