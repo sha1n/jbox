@@ -5,24 +5,43 @@ import JboxEngineSwift
 struct JboxApp: App {
     var body: some Scene {
         WindowGroup("Jbox") {
-            ContentView()
+            AppRootView()
         }
         .windowResizability(.contentMinSize)
     }
 }
 
-struct ContentView: View {
+/// Top-level view that owns the `EngineStore`. Handles the three
+/// startup states: loading the engine, engine-create failure, and
+/// ready. SwiftUI previews bypass this by instantiating
+/// `RouteListView` with a test store directly.
+struct AppRootView: View {
+    @State private var store: EngineStore?
+    @State private var initError: String?
+
     var body: some View {
-        VStack(spacing: 16) {
-            Text("Jbox")
-                .font(.largeTitle)
-            Text("Phase 1 scaffolding — UI lands in Phase 6")
-                .foregroundStyle(.secondary)
-            Text("Engine ABI version: \(JboxEngine.abiVersion)")
-                .font(.footnote)
-                .foregroundStyle(.tertiary)
+        Group {
+            if let store {
+                RouteListView(store: store)
+            } else if let initError {
+                ContentUnavailableView {
+                    Label("Engine failed to start", systemImage: "exclamationmark.triangle")
+                } description: {
+                    Text(initError)
+                }
+            } else {
+                ProgressView("Starting engine…")
+            }
         }
-        .frame(minWidth: 800, minHeight: 500)
-        .padding()
+        .frame(minWidth: 820, minHeight: 520)
+        .task {
+            do {
+                let s = try EngineStore()
+                s.refreshDevices()
+                store = s
+            } catch {
+                initError = String(describing: error)
+            }
+        }
     }
 }
