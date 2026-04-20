@@ -334,6 +334,15 @@ Main window:
 - [x] `NavigationSplitView` layout: sidebar (currently just "All Routes" — Scenes row lands with Phase 7 persistence) + detail list of routes with empty-state fallback.
 - [x] Route row view: status glyph, display name, source → destination / channel-count summary, counters (produced / consumed / underruns), Start/Stop and Remove buttons.
 - [x] Route editor sheet: device pickers (direction-filtered), dynamic channel-mapping editor (1-indexed display, constrained steppers), client-side validation mirroring the v1 ChannelMapper rules, engine-side errors surfaced inline.
+- [ ] **Human-readable channel labels in the mapping editor.** Core Audio exposes per-channel names via `kAudioObjectPropertyElementName` (scope = input / output, element = 1..N). Devices that bother to populate it (UA Apollo, MOTU, etc.) return labels like `Monitor L`, `Virtual 1`, `ADAT 3`; simpler devices return empty, in which case the UI falls back to numeric labels. Tasks:
+  - [ ] Extend `IDeviceBackend` with `channelNames(uid, direction)` returning `std::vector<std::string>` (one entry per channel, possibly empty strings).
+  - [ ] `CoreAudioBackend::channelNames`: query `kAudioObjectPropertyElementName` per element, convert `CFStringRef` → `std::string`, trim empties.
+  - [ ] `SimulatedBackend::channelNames`: test seam — returns either a test-provided map or empty vectors.
+  - [ ] Bridge: `jbox_engine_enumerate_device_channels(engine, uid, direction, err)` returning a heap-allocated `jbox_channel_list_t` (paired `jbox_channel_list_free`). New symbol; appending is MINOR ABI.
+  - [ ] Swift wrapper: `Engine.enumerateChannels(uid:direction:) throws -> [String]`.
+  - [ ] `EngineStore`: per-(uid, direction) cache, invalidated on `refreshDevices()`.
+  - [ ] `AddRouteSheet`: replace the channel steppers with `Picker`s rendering `"Ch N · <name>"` when a name is present, `"Ch N"` when not.
+  - [ ] Tests: bridge-level round-trip through `SimulatedBackend`; Swift-side test that the Store cache invalidates on refresh.
 - [ ] Scene editor sheet. **Deferred to Phase 7** — scenes only make sense with persistence.
 - [ ] Preferences window (`Settings` scene) with three tabs. **Pending.**
 

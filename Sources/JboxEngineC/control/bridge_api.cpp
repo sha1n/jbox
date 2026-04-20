@@ -155,6 +155,14 @@ void jbox_device_list_free(jbox_device_list_t* list) {
     std::free(list);
 }
 
+void jbox_channel_list_free(jbox_channel_list_t* list) {
+    if (list == nullptr) return;
+    std::free(list->channels);
+    list->channels = nullptr;
+    list->count = 0;
+    std::free(list);
+}
+
 // ---- Engine lifecycle -------------------------------------------------------
 
 jbox_engine_t* jbox_engine_create(const jbox_engine_config_t* /*config*/,
@@ -230,6 +238,55 @@ jbox_device_list_t* jbox_engine_enumerate_devices(jbox_engine_t* engine,
         return nullptr;
     } catch (...) {
         setError(err, JBOX_ERR_INTERNAL, "enumerate failed");
+        return nullptr;
+    }
+}
+
+jbox_channel_list_t* jbox_engine_enumerate_device_channels(
+    jbox_engine_t*          engine,
+    const char*             uid,
+    jbox_device_direction_t direction,
+    jbox_error_t*           err) {
+    if (engine == nullptr || uid == nullptr) {
+        setError(err, JBOX_ERR_INVALID_ARGUMENT, "null argument");
+        return nullptr;
+    }
+    if (direction != JBOX_DEVICE_DIRECTION_INPUT &&
+        direction != JBOX_DEVICE_DIRECTION_OUTPUT) {
+        setError(err, JBOX_ERR_INVALID_ARGUMENT,
+                 "direction must be exactly INPUT or OUTPUT");
+        return nullptr;
+    }
+    try {
+        const auto names = engine->impl->channelNames(
+            std::string(uid), static_cast<std::uint32_t>(direction));
+
+        auto* list = static_cast<jbox_channel_list_t*>(
+            std::malloc(sizeof(jbox_channel_list_t)));
+        if (list == nullptr) {
+            setError(err, JBOX_ERR_RESOURCE_EXHAUSTED, "out of memory");
+            return nullptr;
+        }
+        list->count = names.size();
+        list->channels = nullptr;
+        if (!names.empty()) {
+            list->channels = static_cast<jbox_channel_info_t*>(
+                std::calloc(names.size(), sizeof(jbox_channel_info_t)));
+            if (list->channels == nullptr) {
+                std::free(list);
+                setError(err, JBOX_ERR_RESOURCE_EXHAUSTED, "out of memory");
+                return nullptr;
+            }
+        }
+        for (std::size_t i = 0; i < names.size(); ++i) {
+            copyFixed(list->channels[i].name, JBOX_NAME_MAX_LEN, names[i]);
+        }
+        return list;
+    } catch (const std::bad_alloc&) {
+        setError(err, JBOX_ERR_RESOURCE_EXHAUSTED, "out of memory");
+        return nullptr;
+    } catch (...) {
+        setError(err, JBOX_ERR_INTERNAL, "enumerate_device_channels failed");
         return nullptr;
     }
 }

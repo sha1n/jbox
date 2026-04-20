@@ -88,6 +88,18 @@ public final class EngineStore {
     /// nil when the last action succeeded. Cleared by successful calls.
     public private(set) var lastError: String?
 
+    /// Cache of per-channel names keyed by device UID and direction.
+    /// Populated lazily on demand and invalidated wholesale whenever
+    /// `refreshDevices()` runs (channel counts or labels may have
+    /// changed on the hardware side). Empty array means "we asked the
+    /// engine and got nothing"; missing key means "we haven't asked".
+    private var channelNameCache: [ChannelCacheKey: [String]] = [:]
+
+    private struct ChannelCacheKey: Hashable {
+        let uid: String
+        let direction: Engine.ChannelDirection
+    }
+
     // MARK: Construction
 
     private let engine: Engine
@@ -115,6 +127,7 @@ public final class EngineStore {
         do {
             devices = try engine.enumerateDevices()
             lastError = nil
+            channelNameCache.removeAll(keepingCapacity: true)
             JboxLog.engine.info("enumerated devices: count=\(self.devices.count)")
         } catch {
             lastError = String(describing: error)
@@ -125,6 +138,26 @@ public final class EngineStore {
     /// Look up a device by UID in the cached snapshot.
     public func device(uid: String) -> Device? {
         devices.first(where: { $0.uid == uid })
+    }
+
+    /// Per-channel names for the given device and direction, cached on
+    /// first access. Returned array length matches the device's
+    /// channel count in that direction; entries may be empty strings.
+    /// On engine failure the UI gets an empty array and the error is
+    /// logged (no throw — channel labels are a UX nicety, not critical).
+    public func channelNames(uid: String,
+                             direction: Engine.ChannelDirection) -> [String] {
+        let key = ChannelCacheKey(uid: uid, direction: direction)
+        if let cached = channelNameCache[key] { return cached }
+        do {
+            let names = try engine.enumerateChannels(uid: uid, direction: direction)
+            channelNameCache[key] = names
+            return names
+        } catch {
+            JboxLog.engine.error("enumerateChannels uid=\(uid, privacy: .public) dir=\(String(describing: direction), privacy: .public) failed: \(String(describing: error), privacy: .public)")
+            channelNameCache[key] = []
+            return []
+        }
     }
 
     // MARK: Routes

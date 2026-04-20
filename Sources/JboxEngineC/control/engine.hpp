@@ -37,6 +37,14 @@ public:
     // Refreshes the backend's device list and returns a snapshot.
     const std::vector<BackendDeviceInfo>& enumerateDevices();
 
+    // Per-channel names for the given device + direction. Direction
+    // must be exactly one of kBackendDirectionInput or
+    // kBackendDirectionOutput (a bitmask with both bits set would
+    // be ambiguous). Returns an empty vector on unknown device or
+    // invalid direction.
+    std::vector<std::string> channelNames(const std::string& uid,
+                                          std::uint32_t direction);
+
     // Forwards to RouteManager.
     jbox_route_id_t  addRoute(const RouteManager::RouteConfig& cfg,
                               jbox_error_t* err);

@@ -117,6 +117,69 @@ BackendDeviceInfo makeDev(const std::string& uid, std::uint32_t dir,
 
 }  // namespace
 
+TEST_CASE("bridge: enumerate_device_channels returns per-channel labels",
+          "[bridge_api][integration]") {
+    auto backend_holder = std::make_unique<SimulatedBackend>();
+    auto* backend = backend_holder.get();
+    backend->addDevice(makeDev("src", kBackendDirectionInput, 3, 0));
+    backend->addDevice(makeDev("dst", kBackendDirectionOutput, 0, 2));
+    backend->setChannelNames("src", kBackendDirectionInput,
+                             {"Line 1", "Line 2", ""});           // third blank by design
+    backend->setChannelNames("dst", kBackendDirectionOutput,
+                             {"Monitor L", "Monitor R"});
+
+    jbox_engine_t* e = jbox::internal::createEngineWithBackend(std::move(backend_holder),
+                                                               /*spawn_sampler_thread=*/false);
+    REQUIRE(e != nullptr);
+
+    jbox_error_t err{};
+    // Populate the DeviceManager UID index.
+    if (auto* l = jbox_engine_enumerate_devices(e, &err)) {
+        jbox_device_list_free(l);
+    }
+
+    SECTION("input direction") {
+        auto* list = jbox_engine_enumerate_device_channels(
+            e, "src", JBOX_DEVICE_DIRECTION_INPUT, &err);
+        REQUIRE(list != nullptr);
+        REQUIRE(list->count == 3);
+        REQUIRE(std::string_view{list->channels[0].name} == "Line 1");
+        REQUIRE(std::string_view{list->channels[1].name} == "Line 2");
+        REQUIRE(std::string_view{list->channels[2].name}.empty());
+        jbox_channel_list_free(list);
+    }
+
+    SECTION("output direction") {
+        auto* list = jbox_engine_enumerate_device_channels(
+            e, "dst", JBOX_DEVICE_DIRECTION_OUTPUT, &err);
+        REQUIRE(list != nullptr);
+        REQUIRE(list->count == 2);
+        REQUIRE(std::string_view{list->channels[0].name} == "Monitor L");
+        REQUIRE(std::string_view{list->channels[1].name} == "Monitor R");
+        jbox_channel_list_free(list);
+    }
+
+    SECTION("invalid direction (INPUT|OUTPUT bitmask) is rejected") {
+        auto* list = jbox_engine_enumerate_device_channels(
+            e, "src",
+            static_cast<jbox_device_direction_t>(
+                JBOX_DEVICE_DIRECTION_INPUT | JBOX_DEVICE_DIRECTION_OUTPUT),
+            &err);
+        REQUIRE(list == nullptr);
+        REQUIRE(err.code == JBOX_ERR_INVALID_ARGUMENT);
+    }
+
+    SECTION("unknown uid returns an empty list, not null") {
+        auto* list = jbox_engine_enumerate_device_channels(
+            e, "no-such-device", JBOX_DEVICE_DIRECTION_INPUT, &err);
+        REQUIRE(list != nullptr);
+        REQUIRE(list->count == 0);
+        jbox_channel_list_free(list);
+    }
+
+    jbox_engine_destroy(e);
+}
+
 TEST_CASE("bridge: enumerate via SimulatedBackend returns our devices",
           "[bridge_api][integration]") {
     auto backend = std::make_unique<SimulatedBackend>();

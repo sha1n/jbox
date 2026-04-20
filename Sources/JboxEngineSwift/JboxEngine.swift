@@ -136,6 +136,55 @@ public final class Engine {
         }
     }
 
+    /// Direction selector for per-channel name queries. Mirrors the C
+    /// bitmask but the wrapper accepts exactly one direction per call.
+    public enum ChannelDirection: Sendable, Hashable {
+        case input, output
+
+        fileprivate var cValue: jbox_device_direction_t {
+            switch self {
+            case .input:  return JBOX_DEVICE_DIRECTION_INPUT
+            case .output: return JBOX_DEVICE_DIRECTION_OUTPUT
+            }
+        }
+    }
+
+    /// Per-channel names for a device. The returned array has one
+    /// entry per channel in the requested direction; entries are empty
+    /// strings when the driver does not publish a label. Callers
+    /// typically render `"Ch N · <name>"` when present and `"Ch N"`
+    /// when empty.
+    public func enumerateChannels(uid: String,
+                                  direction: ChannelDirection) throws -> [String] {
+        guard let h = handle else {
+            throw JboxError(code: JBOX_ERR_INTERNAL, message: "engine not initialised")
+        }
+        var err = jbox_error_t(code: JBOX_OK, message: nil)
+        let listPtr = uid.withCString { uidPtr in
+            jbox_engine_enumerate_device_channels(h, uidPtr, direction.cValue, &err)
+        }
+        guard let list = listPtr else {
+            throw JboxError(code: err.code,
+                            message: err.message.map { String(cString: $0) } ?? "")
+        }
+        defer { jbox_channel_list_free(list) }
+
+        let count = Int(list.pointee.count)
+        var out: [String] = []
+        out.reserveCapacity(count)
+        for i in 0..<count {
+            let info = list.pointee.channels.advanced(by: i).pointee
+            let name = withUnsafePointer(to: info.name) {
+                $0.withMemoryRebound(to: CChar.self,
+                                     capacity: Int(JBOX_NAME_MAX_LEN)) {
+                    String(cString: $0)
+                }
+            }
+            out.append(name)
+        }
+        return out
+    }
+
     public func enumerateDevices() throws -> [Device] {
         guard let h = handle else {
             throw JboxError(code: JBOX_ERR_INTERNAL, message: "engine not initialised")

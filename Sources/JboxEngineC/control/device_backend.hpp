@@ -82,6 +82,20 @@ public:
     // Snapshot of currently-available devices. No ownership transfer.
     virtual std::vector<BackendDeviceInfo> enumerate() = 0;
 
+    // Per-channel names for the given device + direction, as macOS /
+    // the device driver exposes them via Core Audio's
+    // `kAudioObjectPropertyElementName`. The returned vector has one
+    // entry per channel (index 0 = channel 1). Entries may be empty
+    // strings when the driver does not provide a label — callers
+    // should fall back to numeric labels in that case.
+    //
+    // `direction` must be exactly one of kBackendDirectionInput or
+    // kBackendDirectionOutput; any other value returns an empty vector.
+    // An unknown `uid` also returns an empty vector.
+    virtual std::vector<std::string> channelNames(
+        const std::string& uid,
+        std::uint32_t direction) = 0;
+
     // Register an input IOProc on the device identified by `uid`.
     // Returns kInvalidIOProcId on failure (unknown device, no input
     // channels, or an input IOProc is already registered).

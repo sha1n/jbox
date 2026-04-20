@@ -45,6 +45,8 @@ public:
 
     // IDeviceBackend.
     std::vector<BackendDeviceInfo> enumerate() override;
+    std::vector<std::string> channelNames(const std::string& uid,
+                                          std::uint32_t direction) override;
     IOProcId openInputCallback(const std::string& uid,
                                InputIOProcCallback callback,
                                void* user_data) override;

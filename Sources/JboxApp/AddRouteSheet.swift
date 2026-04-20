@@ -37,6 +37,23 @@ struct AddRouteSheet: View {
     private var srcChannels: Int { Int(srcDevice?.inputChannelCount ?? 0) }
     private var dstChannels: Int { Int(dstDevice?.outputChannelCount ?? 0) }
 
+    private var srcChannelNames: [String] {
+        srcDevice.map { store.channelNames(uid: $0.uid, direction: .input) } ?? []
+    }
+    private var dstChannelNames: [String] {
+        dstDevice.map { store.channelNames(uid: $0.uid, direction: .output) } ?? []
+    }
+
+    /// Render `"Ch N · <name>"` when the driver published a label;
+    /// `"Ch N"` otherwise. `index` is 0-indexed (as in ChannelEdge);
+    /// we add 1 for the user-facing 1-indexed label per spec § 2.3.
+    private func channelLabel(index: Int, names: [String]) -> String {
+        let base = "Ch \(index + 1)"
+        guard index >= 0, index < names.count else { return base }
+        let trimmed = names[index].trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? base : "\(base) · \(trimmed)"
+    }
+
     private var validationIssue: String? {
         if sourceUID.isEmpty { return "Pick a source device." }
         if destUID.isEmpty   { return "Pick a destination device." }
@@ -124,20 +141,24 @@ struct AddRouteSheet: View {
     @ViewBuilder
     private func mappingRow(idx: Int) -> some View {
         HStack(spacing: 12) {
-            Stepper(value: $pairs[idx].src,
-                    in: 0...(max(srcChannels, 1) - 1)) {
-                Text("Source ch \(pairs[idx].src + 1)")
+            Picker("Source", selection: $pairs[idx].src) {
+                ForEach(0..<max(srcChannels, 0), id: \.self) { ch in
+                    Text(channelLabel(index: ch, names: srcChannelNames)).tag(ch)
+                }
             }
+            .labelsHidden()
             .disabled(srcChannels == 0)
             .frame(maxWidth: .infinity, alignment: .leading)
 
             Image(systemName: "arrow.right")
                 .foregroundStyle(.secondary)
 
-            Stepper(value: $pairs[idx].dst,
-                    in: 0...(max(dstChannels, 1) - 1)) {
-                Text("Dest ch \(pairs[idx].dst + 1)")
+            Picker("Destination", selection: $pairs[idx].dst) {
+                ForEach(0..<max(dstChannels, 0), id: \.self) { ch in
+                    Text(channelLabel(index: ch, names: dstChannelNames)).tag(ch)
+                }
             }
+            .labelsHidden()
             .disabled(dstChannels == 0)
             .frame(maxWidth: .infinity, alignment: .leading)
 

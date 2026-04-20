@@ -102,6 +102,29 @@ typedef struct {
 /* Release a list returned by jbox_engine_enumerate_devices. Safe with NULL. */
 void jbox_device_list_free(jbox_device_list_t* list);
 
+/*
+ * Per-channel label for a device in a given direction. Some Core Audio
+ * devices (UA Apollo, MOTU, etc.) publish meaningful names like
+ * "Monitor L" or "Virtual 3"; simpler devices publish nothing and the
+ * name field is an empty string. Callers should fall back to a numeric
+ * label ("Ch N") when name[0] == '\0'.
+ *
+ * Channel count equals the corresponding input_channel_count /
+ * output_channel_count from jbox_device_info_t; index 0 corresponds
+ * to channel 1 in UI 1-indexed terms.
+ */
+typedef struct {
+    char name[JBOX_NAME_MAX_LEN];
+} jbox_channel_info_t;
+
+typedef struct {
+    jbox_channel_info_t* channels;
+    size_t               count;
+} jbox_channel_list_t;
+
+/* Release a list returned by jbox_engine_enumerate_device_channels. Safe with NULL. */
+void jbox_channel_list_free(jbox_channel_list_t* list);
+
 /* -------------------------------------------------------------------- */
 /*  Routes                                                              */
 /* -------------------------------------------------------------------- */
@@ -185,6 +208,21 @@ void jbox_engine_destroy(jbox_engine_t* engine);
  * failure. Caller releases the list via jbox_device_list_free. */
 jbox_device_list_t* jbox_engine_enumerate_devices(jbox_engine_t* engine,
                                                   jbox_error_t*  err);
+
+/*
+ * Per-channel labels for `uid` in `direction`. `direction` must be
+ * exactly JBOX_DEVICE_DIRECTION_INPUT or JBOX_DEVICE_DIRECTION_OUTPUT.
+ * Returns a list whose `count` equals the device's channel count in
+ * that direction (possibly zero). Entries whose driver did not publish
+ * a name have an empty `name` string. Returns NULL on failure (e.g.,
+ * invalid direction, out of memory); *err is populated when non-NULL.
+ * Caller releases the list via jbox_channel_list_free.
+ */
+jbox_channel_list_t* jbox_engine_enumerate_device_channels(
+    jbox_engine_t*          engine,
+    const char*             uid,
+    jbox_device_direction_t direction,
+    jbox_error_t*           err);
 
 /* Add a route. Returns the new route id (>= 1) on success, or
  * JBOX_INVALID_ROUTE_ID on failure (with *err populated). The route

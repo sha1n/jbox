@@ -29,6 +29,11 @@ const std::vector<BackendDeviceInfo>& Engine::enumerateDevices() {
     return dm_.refresh();
 }
 
+std::vector<std::string> Engine::channelNames(const std::string& uid,
+                                              std::uint32_t direction) {
+    return dm_.backend().channelNames(uid, direction);
+}
+
 jbox_route_id_t Engine::addRoute(const RouteManager::RouteConfig& cfg,
                                  jbox_error_t* err) {
     return rm_.addRoute(cfg, err);

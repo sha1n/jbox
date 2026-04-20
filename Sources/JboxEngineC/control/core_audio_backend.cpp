@@ -274,6 +274,67 @@ std::vector<BackendDeviceInfo> CoreAudioBackend::enumerate() {
 }
 
 // -----------------------------------------------------------------------------
+// Per-channel names
+// -----------------------------------------------------------------------------
+
+std::vector<std::string> CoreAudioBackend::channelNames(
+    const std::string& uid,
+    std::uint32_t direction) {
+    std::vector<std::string> names;
+
+    // Exactly one direction flag must be set; otherwise we don't know
+    // which scope to query and an empty result is the cleanest answer.
+    const bool is_input  = (direction == kBackendDirectionInput);
+    const bool is_output = (direction == kBackendDirectionOutput);
+    if (!is_input && !is_output) return names;
+
+    auto it = device_ids_.find(uid);
+    if (it == device_ids_.end()) return names;
+    const AudioDeviceID device_id = it->second;
+
+    const AudioObjectPropertyScope scope = is_input
+        ? kAudioObjectPropertyScopeInput
+        : kAudioObjectPropertyScopeOutput;
+
+    const std::uint32_t channels = getChannelCount(device_id, scope);
+    names.reserve(channels);
+
+    // Channels are 1-indexed in Core Audio's element addressing.
+    for (std::uint32_t ch = 1; ch <= channels; ++ch) {
+        AudioObjectPropertyAddress addr{
+            kAudioObjectPropertyElementName, scope, ch};
+        UInt32 dataSize = 0;
+        if (AudioObjectGetPropertyDataSize(device_id, &addr, 0, nullptr,
+                                           &dataSize) != noErr ||
+            dataSize != sizeof(CFStringRef)) {
+            names.emplace_back();
+            continue;
+        }
+        CFStringRef str = nullptr;
+        if (AudioObjectGetPropertyData(device_id, &addr, 0, nullptr,
+                                       &dataSize, &str) != noErr ||
+            str == nullptr) {
+            names.emplace_back();
+            continue;
+        }
+        const CFIndex length = CFStringGetLength(str);
+        const CFIndex maxBytes =
+            CFStringGetMaximumSizeForEncoding(length, kCFStringEncodingUTF8) + 1;
+        std::string out(static_cast<std::size_t>(maxBytes), '\0');
+        const Boolean ok = CFStringGetCString(
+            str, out.data(), maxBytes, kCFStringEncodingUTF8);
+        CFRelease(str);
+        if (ok) {
+            out.resize(std::strlen(out.c_str()));
+        } else {
+            out.clear();
+        }
+        names.push_back(std::move(out));
+    }
+    return names;
+}
+
+// -----------------------------------------------------------------------------
 // open / close IOProcs
 // -----------------------------------------------------------------------------
 

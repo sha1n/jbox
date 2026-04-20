@@ -17,6 +17,32 @@ void SimulatedBackend::removeDevice(const std::string& uid) {
     devices_.erase(uid);
 }
 
+void SimulatedBackend::setChannelNames(const std::string& uid,
+                                       std::uint32_t direction,
+                                       std::vector<std::string> names) {
+    auto it = devices_.find(uid);
+    if (it == devices_.end()) return;
+    if (direction == kBackendDirectionInput) {
+        it->second.input_channel_names = std::move(names);
+    } else if (direction == kBackendDirectionOutput) {
+        it->second.output_channel_names = std::move(names);
+    }
+}
+
+std::vector<std::string> SimulatedBackend::channelNames(
+    const std::string& uid,
+    std::uint32_t direction) {
+    auto it = devices_.find(uid);
+    if (it == devices_.end()) return {};
+    if (direction == kBackendDirectionInput) {
+        return it->second.input_channel_names;
+    }
+    if (direction == kBackendDirectionOutput) {
+        return it->second.output_channel_names;
+    }
+    return {};
+}
+
 void SimulatedBackend::deliverBuffer(const std::string& uid,
                                      std::uint32_t frame_count,
                                      const float* input_source,

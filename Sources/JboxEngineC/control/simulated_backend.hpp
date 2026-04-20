@@ -40,6 +40,15 @@ public:
     // Safe to call with an unknown UID (no-op).
     void removeDevice(const std::string& uid);
 
+    // Seed the names reported by `channelNames()` for a given device
+    // and direction. Must be called after `addDevice` for that UID.
+    // Names are stored by value; the vector length is not required
+    // to match the device's channel count (tests pick the contract
+    // they want to exercise).
+    void setChannelNames(const std::string& uid,
+                         std::uint32_t direction,
+                         std::vector<std::string> names);
+
     // Drive one buffer cycle for the device identified by `uid`.
     //
     // If an input callback is registered AND the device is started:
@@ -63,6 +72,8 @@ public:
 
     // IDeviceBackend.
     std::vector<BackendDeviceInfo> enumerate() override;
+    std::vector<std::string> channelNames(const std::string& uid,
+                                          std::uint32_t direction) override;
     IOProcId openInputCallback(const std::string& uid,
                                InputIOProcCallback callback,
                                void* user_data) override;
@@ -85,6 +96,13 @@ private:
         OutputIOProcCallback output_cb = nullptr;
         void*                output_ud = nullptr;
         IOProcId             output_id = kInvalidIOProcId;
+
+        // Test-seeded per-channel names; empty until the test populates
+        // them via setChannelNames(). Element index i corresponds to
+        // channel (i+1) — same 0-indexed convention we use everywhere
+        // else, just rendered as 1-indexed in the UI.
+        std::vector<std::string> input_channel_names;
+        std::vector<std::string> output_channel_names;
     };
 
     std::unordered_map<std::string, DeviceSlot> devices_;
