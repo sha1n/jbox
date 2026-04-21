@@ -16,7 +16,7 @@ struct AddRouteSheet: View {
     @State private var destUID: String = ""
     @State private var pairs: [MappingPair] = [MappingPair(src: 0, dst: 0)]
     @State private var customName: String = ""
-    @State private var lowLatency: Bool = false
+    @State private var latencyMode: LatencyMode = .off
     @State private var errorMessage: String?
 
     /// Row in the mapping editor. `src` and `dst` are 0-indexed
@@ -71,6 +71,22 @@ struct AddRouteSheet: View {
 
     private var canSave: Bool { validationIssue == nil }
 
+    private var latencyModeFooter: String {
+        switch latencyMode {
+        case .off:
+            return "Absorbs USB-burst jitter. Choose this unless you "
+                 + "need noticeably lower latency."
+        case .low:
+            return "Tighter ring buffer. Some USB interfaces that "
+                 + "deliver samples in bursts may underrun — step back "
+                 + "if you hear clicks."
+        case .performance:
+            return "Drum-monitoring tier. Smallest ring + aggressive "
+                 + "drift setpoint. Noticeably lower latency but "
+                 + "underruns are expected on bursty USB sources."
+        }
+    }
+
     // MARK: View
 
     var body: some View {
@@ -107,12 +123,14 @@ struct AddRouteSheet: View {
                 }
 
                 Section {
-                    Toggle("Low latency", isOn: $lowLatency)
+                    Picker("Latency mode", selection: $latencyMode) {
+                        Text("Off — safe default").tag(LatencyMode.off)
+                        Text("Low").tag(LatencyMode.low)
+                        Text("Performance").tag(LatencyMode.performance)
+                    }
+                    .pickerStyle(.menu)
                 } footer: {
-                    Text("Uses a tighter ring buffer to reduce latency. "
-                         + "Some USB interfaces that deliver samples in "
-                         + "bursts may underrun — turn this off if you "
-                         + "hear clicks.")
+                    Text(latencyModeFooter)
                 }
 
                 if let message = errorMessage ?? validationIssue {
@@ -195,7 +213,7 @@ struct AddRouteSheet: View {
             destination: DeviceReference(device: dst),
             mapping: mapping,
             name: customName.trimmingCharacters(in: .whitespaces).isEmpty ? nil : customName,
-            lowLatency: lowLatency
+            latencyMode: latencyMode
         )
         do {
             _ = try store.addRoute(cfg)

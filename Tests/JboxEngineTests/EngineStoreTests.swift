@@ -91,8 +91,8 @@ struct EngineStoreTests {
         #expect(store.routes.isEmpty)
     }
 
-    @Test("addRoute threads RouteConfig.lowLatency through to the engine")
-    func addRouteLowLatencyFlag() throws {
+    @Test("addRoute threads RouteConfig.latencyMode through to the engine")
+    func addRouteLatencyMode() throws {
         let store = try makeStore()
         store.refreshDevices()
         guard let src = store.devices.first(where: { $0.inputChannelCount  >= 1 }),
@@ -102,33 +102,41 @@ struct EngineStoreTests {
             return
         }
 
-        // Baseline: a default-sizing route. We don't start it (leaves
-        // hardware alone); the flag's actual ring-sizing effect on the
-        // pill is covered by the C++ integration test. Here we just
-        // confirm the bit survives the Swift → C bridge.
-        let safeCfg = RouteConfig(
+        // Baseline: three routes, one per tier. We don't start them —
+        // the ring-sizing / setpoint effects are covered by C++
+        // integration tests. Here we just confirm the tier survives
+        // the Swift → C bridge.
+        let offCfg = RouteConfig(
             source: DeviceReference(device: src),
             destination: DeviceReference(device: dst),
             mapping: [ChannelEdge(src: 0, dst: 0)],
-            name: "safe",
-            lowLatency: false)
-        let lowLatCfg = RouteConfig(
+            name: "off",
+            latencyMode: .off)
+        let lowCfg = RouteConfig(
             source: DeviceReference(device: src),
             destination: DeviceReference(device: dst),
             mapping: [ChannelEdge(src: 0, dst: 0)],
-            name: "low-lat",
-            lowLatency: true)
+            name: "low",
+            latencyMode: .low)
+        let perfCfg = RouteConfig(
+            source: DeviceReference(device: src),
+            destination: DeviceReference(device: dst),
+            mapping: [ChannelEdge(src: 0, dst: 0)],
+            name: "performance",
+            latencyMode: .performance)
 
-        let safeRoute   = try store.addRoute(safeCfg)
-        let lowLatRoute = try store.addRoute(lowLatCfg)
+        let offRoute  = try store.addRoute(offCfg)
+        let lowRoute  = try store.addRoute(lowCfg)
+        let perfRoute = try store.addRoute(perfCfg)
 
-        #expect(safeRoute.config.lowLatency   == false)
-        #expect(lowLatRoute.config.lowLatency == true)
-        #expect(store.routes.count == 2)
+        #expect(offRoute.config.latencyMode  == .off)
+        #expect(lowRoute.config.latencyMode  == .low)
+        #expect(perfRoute.config.latencyMode == .performance)
+        #expect(store.routes.count == 3)
 
-        // Clean up so later tests see an empty list.
-        store.removeRoute(safeRoute.id)
-        store.removeRoute(lowLatRoute.id)
+        store.removeRoute(offRoute.id)
+        store.removeRoute(lowRoute.id)
+        store.removeRoute(perfRoute.id)
         #expect(store.routes.isEmpty)
     }
 

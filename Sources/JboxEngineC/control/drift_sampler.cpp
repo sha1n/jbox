@@ -7,11 +7,19 @@
 namespace jbox::control {
 
 namespace {
-// Operating point: target half-fill of the ring, so over/underrun
-// headroom is symmetric. Stated in frames; matches ring capacity
-// scaling in RouteManager.
+// Operating point — the ring-fill level the PI controller drives
+// toward. The value is populated per-route at attemptStart (see
+// route_manager.cpp) based on the selected latency preset:
+//   Safe / Low latency → ring/2 (symmetric over/underrun headroom)
+//   Performance        → ring/4 (asymmetric: short drain headroom in
+//                                 exchange for ~2–5 ms of residency
+//                                 savings; drum-monitoring preset).
+// Falls back to ring/2 only if the cached value is unexpectedly zero,
+// which should never happen on a running route.
 double ringTargetFill(const RouteRecord& r) {
     if (!r.ring) return 0.0;
+    const std::uint32_t cached = r.latency_components.ring_target_fill_frames;
+    if (cached > 0) return static_cast<double>(cached);
     return static_cast<double>(r.ring->usableCapacityFrames()) * 0.5;
 }
 }  // namespace

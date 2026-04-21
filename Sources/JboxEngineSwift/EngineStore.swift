@@ -26,28 +26,42 @@ public struct DeviceReference: Equatable, Hashable, Sendable {
 /// A route as the user configures it. IDs are assigned by the engine
 /// on `addRoute`; `RouteConfig` is what the UI edits before submission
 /// and what gets persisted later in Phase 7.
+/// Tiered latency preset picked per route. Controls both the ring-
+/// buffer sizing and the drift sampler's steady-state setpoint
+/// (docs/spec.md § 2.3). Higher tiers trade reliability for latency.
+public enum LatencyMode: UInt32, Sendable, Equatable, Hashable, CaseIterable {
+    /// Safe default: 8× / 4096-floor ring; ring/2 setpoint. Absorbs
+    /// USB-burst jitter — the sensible choice for general routing.
+    case off         = 0
+    /// Tighter ring (3× / 512-floor), same ring/2 setpoint. USB-burst
+    /// sources may underrun; acceptable trade-off for most rigs.
+    case low         = 1
+    /// Drum-monitoring tier: 2× / 256-floor ring + ring/4 setpoint.
+    /// Halves the ring's residency contribution at the cost of
+    /// asymmetric underrun margin. Opt in when you need real-time
+    /// monitoring and accept occasional clicks on bursty sources.
+    case performance = 2
+}
+
 public struct RouteConfig: Equatable, Sendable {
     public var source: DeviceReference
     public var destination: DeviceReference
     public var mapping: [ChannelEdge]
     /// When nil, `displayName` auto-generates "source → destination".
     public var name: String?
-    /// Opt-in tighter ring-buffer sizing. Engine default (off) uses
-    /// the safe sizing that absorbs USB burst-delivery jitter; on
-    /// trades headroom for ~30–60 ms of latency reduction. See
-    /// docs/spec.md § 2.3.
-    public var lowLatency: Bool
+    /// Tiered latency preset; see `LatencyMode`.
+    public var latencyMode: LatencyMode
 
     public init(source: DeviceReference,
                 destination: DeviceReference,
                 mapping: [ChannelEdge],
                 name: String? = nil,
-                lowLatency: Bool = false) {
+                latencyMode: LatencyMode = .off) {
         self.source = source
         self.destination = destination
         self.mapping = mapping
         self.name = name
-        self.lowLatency = lowLatency
+        self.latencyMode = latencyMode
     }
 
     public var displayName: String {
@@ -226,7 +240,7 @@ public final class EngineStore {
                 destUID: config.destination.uid,
                 mapping: config.mapping,
                 name: config.name ?? "",
-                lowLatency: config.lowLatency
+                latencyMode: config.latencyMode
             )
             let status = try engine.pollStatus(id)
             let route = Route(id: id, config: config, status: status)

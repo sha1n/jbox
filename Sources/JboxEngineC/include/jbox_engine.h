@@ -36,8 +36,11 @@ extern "C" {
  *   3  MINOR — appended `low_latency` to jbox_route_config_t.
  *   4  MINOR — added jbox_route_latency_components_t and
  *              jbox_engine_poll_route_latency_components.
+ *   5  MINOR — `low_latency` renamed to `latency_mode`; the field
+ *              now carries a tier (0=off, 1=low, 2=performance).
+ *              Zero-initialised callers keep the safe default.
  */
-#define JBOX_ENGINE_ABI_VERSION 4u
+#define JBOX_ENGINE_ABI_VERSION 5u
 
 uint32_t jbox_engine_abi_version(void);
 
@@ -156,9 +159,15 @@ typedef struct {
  * fan-out, replicating the source sample into every mapped
  * destination slot.
  *
- * `low_latency` (ABI v3+): when non-zero, the route opts into a
- * tighter ring-buffer sizing. Zero-initialised callers see the safe
- * default that handles USB-burst devices (see docs/spec.md § 2.3).
+ * `latency_mode` (ABI v5+) selects one of three ring-buffer and
+ * drift-setpoint presets (see docs/spec.md § 2.3):
+ *   0 — Off (default). Safe 8× / 4096-floor ring; target fill ring/2.
+ *   1 — Low. 3× / 512-floor ring; target fill ring/2. USB-burst risk.
+ *   2 — Performance. 2× / 256-floor ring; target fill ring/4. Drum-
+ *       monitoring-grade; high underrun risk on bursty sources.
+ * Zero-initialised callers keep the safe default. ABI v3 and v4
+ * used the name `low_latency` for values 0 and 1; the field's
+ * storage is unchanged.
  */
 typedef struct {
     const char*                source_uid;
@@ -166,7 +175,7 @@ typedef struct {
     const jbox_channel_edge_t* mapping;
     size_t                     mapping_count;
     const char*                name;
-    uint32_t                   low_latency;
+    uint32_t                   latency_mode;
 } jbox_route_config_t;
 
 typedef enum {

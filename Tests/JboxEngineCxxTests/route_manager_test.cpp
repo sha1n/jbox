@@ -522,51 +522,73 @@ TEST_CASE("RouteManager: pollLatencyComponents reflects cached components",
     REQUIRE(after_stop.total_us == 0);
 }
 
-TEST_CASE("RouteManager: low_latency mode shrinks estimated_latency_us",
-          "[route_manager][low_latency]") {
-    // Phase 6 refinement #6. With 64-frame device buffers:
-    //   - safe sizing: ring capacity = max(4096, 8 × 64) = 4096
-    //     → target fill ≈ 2047 frames ≈ 42.6 ms at 48 k
-    //   - low-latency sizing: ring = max(512, 3 × 64) = 512
-    //     → target fill ≈ 255 frames ≈ 5.3 ms at 48 k
-    // So the low-latency pill should be materially smaller than the
-    // default pill on the exact same devices. Everything else (HAL
-    // latencies, converter primes, buffer sizes) is equal, so the
-    // reduction is entirely ring-driven.
+TEST_CASE("RouteManager: latency_mode tiers strictly shrink the pill",
+          "[route_manager][latency_mode]") {
+    // Phase 6 refinement #6. With 64-frame device buffers at 48 kHz:
+    //   - safe         (mode 0): ring = 4096,  target ≈ 2047 (42.6 ms)
+    //   - low latency  (mode 1): ring =  512,  target ≈  255 ( 5.3 ms)
+    //   - performance  (mode 2): ring =  256,  target ≈   63 ( 1.3 ms)
+    // Each successive tier must report a strictly smaller pill on the
+    // same devices; everything else (HAL latencies, converter primes,
+    // buffer sizes) is equal, so the reductions are entirely ring-
+    // sizing + drift-setpoint driven.
     Fixture f(/*src*/ 2, /*dst*/ 2, /*buf*/ 64);
 
     std::vector<ChannelEdge> mapping{{0, 0}, {1, 1}};
     jbox_error_t err{};
 
     RouteManager::RouteConfig safe_cfg{
-        "src", "dst", mapping, "safe", /*low_latency*/ false};
+        "src", "dst", mapping, "safe", /*latency_mode*/ 0};
     const auto id_safe = f.rm->addRoute(safe_cfg, &err);
     REQUIRE(id_safe != JBOX_INVALID_ROUTE_ID);
     REQUIRE(f.rm->startRoute(id_safe) == JBOX_OK);
 
-    RouteManager::RouteConfig lowlat_cfg{
-        "src", "dst", mapping, "low-lat", /*low_latency*/ true};
-    const auto id_lowlat = f.rm->addRoute(lowlat_cfg, &err);
-    REQUIRE(id_lowlat != JBOX_INVALID_ROUTE_ID);
-    REQUIRE(f.rm->startRoute(id_lowlat) == JBOX_OK);
+    RouteManager::RouteConfig low_cfg{
+        "src", "dst", mapping, "low", /*latency_mode*/ 1};
+    const auto id_low = f.rm->addRoute(low_cfg, &err);
+    REQUIRE(id_low != JBOX_INVALID_ROUTE_ID);
+    REQUIRE(f.rm->startRoute(id_low) == JBOX_OK);
+
+    RouteManager::RouteConfig perf_cfg{
+        "src", "dst", mapping, "performance", /*latency_mode*/ 2};
+    const auto id_perf = f.rm->addRoute(perf_cfg, &err);
+    REQUIRE(id_perf != JBOX_INVALID_ROUTE_ID);
+    REQUIRE(f.rm->startRoute(id_perf) == JBOX_OK);
 
     jbox_route_status_t safe_status{};
-    jbox_route_status_t lowlat_status{};
+    jbox_route_status_t low_status{};
+    jbox_route_status_t perf_status{};
     REQUIRE(f.rm->pollStatus(id_safe, &safe_status) == JBOX_OK);
-    REQUIRE(f.rm->pollStatus(id_lowlat, &lowlat_status) == JBOX_OK);
+    REQUIRE(f.rm->pollStatus(id_low,  &low_status)  == JBOX_OK);
+    REQUIRE(f.rm->pollStatus(id_perf, &perf_status) == JBOX_OK);
 
     REQUIRE(safe_status.estimated_latency_us > 0);
-    REQUIRE(lowlat_status.estimated_latency_us > 0);
+    REQUIRE(low_status.estimated_latency_us  > 0);
+    REQUIRE(perf_status.estimated_latency_us > 0);
 
-    // The low-latency estimate must be strictly smaller.
-    REQUIRE(lowlat_status.estimated_latency_us
-            < safe_status.estimated_latency_us);
+    // Strictly monotonic: off > low > performance.
+    REQUIRE(safe_status.estimated_latency_us > low_status.estimated_latency_us);
+    REQUIRE(low_status.estimated_latency_us  > perf_status.estimated_latency_us);
 
-    // Ring contribution difference alone is (2047 - 255) frames at
-    // 48 kHz = ~37 333 µs. Assert the observed reduction is at least
-    // 30 000 µs, leaving slack for future tuning of the sizing
-    // constants without flipping this test.
-    const auto reduction_us =
-        safe_status.estimated_latency_us - lowlat_status.estimated_latency_us;
-    REQUIRE(reduction_us > 30'000);
+    // The safe → low gap is ring-sizing dominated. Expected savings
+    // ≈ (2047 − 255) frames @ 48 kHz = ~37 333 µs.
+    REQUIRE(safe_status.estimated_latency_us
+            - low_status.estimated_latency_us > 30'000);
+
+    // The low → performance gap is setpoint + smaller ring; expected
+    // savings ≈ (255 − 63) frames @ 48 kHz = ~4 000 µs.
+    REQUIRE(low_status.estimated_latency_us
+            - perf_status.estimated_latency_us > 3'000);
+
+    // Also check that the per-component breakdown reflects the
+    // setpoint change — performance mode's ring_target_fill_frames
+    // must be about a quarter of the ring, not half.
+    jbox_route_latency_components_t perf_components{};
+    REQUIRE(f.rm->pollLatencyComponents(id_perf, &perf_components) == JBOX_OK);
+    // ring is ~256 frames usable; /4 ≈ 63; /2 ≈ 127. Accept either a
+    // low-bound ratio check (<= ~40 %).
+    const double ring_frac =
+        static_cast<double>(perf_components.ring_target_fill_frames)
+      / 256.0;
+    REQUIRE(ring_frac < 0.40);
 }

@@ -88,10 +88,12 @@ void setError(jbox_error_t* err, jbox_error_code_t code, const char* message) {
 jbox::control::RouteManager::RouteConfig convertRouteConfig(
     const jbox_route_config_t& cfg) {
     jbox::control::RouteManager::RouteConfig out;
-    out.source_uid  = (cfg.source_uid != nullptr) ? cfg.source_uid : "";
-    out.dest_uid    = (cfg.dest_uid   != nullptr) ? cfg.dest_uid   : "";
-    out.name        = (cfg.name       != nullptr) ? cfg.name       : "";
-    out.low_latency = (cfg.low_latency != 0);
+    out.source_uid   = (cfg.source_uid != nullptr) ? cfg.source_uid : "";
+    out.dest_uid     = (cfg.dest_uid   != nullptr) ? cfg.dest_uid   : "";
+    out.name         = (cfg.name       != nullptr) ? cfg.name       : "";
+    // Clamp unknown tier values into the safe default.
+    const std::uint32_t raw_mode = cfg.latency_mode;
+    out.latency_mode = raw_mode <= 2 ? static_cast<std::uint8_t>(raw_mode) : 0;
     out.mapping.reserve(cfg.mapping_count);
     for (std::size_t i = 0; i < cfg.mapping_count; ++i) {
         out.mapping.push_back({

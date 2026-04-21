@@ -333,7 +333,7 @@ public final class Engine {
                          destUID: String,
                          mapping: [ChannelEdge],
                          name: String = "",
-                         lowLatency: Bool = false) throws -> UInt32 {
+                         latencyMode: LatencyMode = .off) throws -> UInt32 {
         guard let h = handle else {
             throw JboxError(code: JBOX_ERR_INTERNAL, message: "engine not initialised")
         }
@@ -350,7 +350,7 @@ public final class Engine {
                             mapping: edgesPtr.baseAddress,
                             mapping_count: cEdges.count,
                             name: name.isEmpty ? nil : namePtr,
-                            low_latency: lowLatency ? 1 : 0
+                            latency_mode: latencyMode.rawValue
                         )
                         var err = jbox_error_t(code: JBOX_OK, message: nil)
                         let id = jbox_engine_add_route(

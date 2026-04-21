@@ -67,16 +67,31 @@ namespace {
 // measured.
 //
 // Phase 6 refinement #6 adds `kRingLowLatency` — an opt-in tighter
-// preset selected per-route when the user flips "Low latency" on. It
+// preset selected per-route when the user picks "Low latency". It
 // halves the multiplier and drops the floor to 512 frames (~10.6 ms
 // at 48 k). Risk: USB-burst sources will underrun; the UI copy makes
-// that explicit and the user can flip back if they hear clicks.
+// that explicit and the user can step back.
+//
+// A later pass added a third tier, `kRingPerformance` (2× / 256 floor
+// ≈ 5.3 ms at 48 k) paired with a drift-setpoint change from
+// usableCapacity/2 → usableCapacity/4. That second knob is the real
+// lever: halving the steady-state ring residency shaves off another
+// ~2–5 ms without shrinking the burst-protection capacity. Drum
+// monitoring on cross-device V31 → Apollo rigs was the motivating
+// scenario; users must opt in and accept a visibly higher underrun
+// probability.
 struct RingSizing {
     std::uint32_t multiplier;
     std::uint32_t floor;
+    // Fraction of `usableCapacityFrames` the drift sampler aims to
+    // maintain in the ring at steady state. 0.5 is the symmetric
+    // (safe) operating point; 0.25 gives aggressive drain headroom at
+    // the cost of symmetric underrun margin.
+    double        target_fill_fraction;
 };
-constexpr RingSizing kRingSafe       { /*mult*/ 8, /*floor*/ 4096 };
-constexpr RingSizing kRingLowLatency { /*mult*/ 3, /*floor*/  512 };
+constexpr RingSizing kRingSafe        { /*mult*/ 8, /*floor*/ 4096, 0.5  };
+constexpr RingSizing kRingLowLatency  { /*mult*/ 3, /*floor*/  512, 0.5  };
+constexpr RingSizing kRingPerformance { /*mult*/ 2, /*floor*/  256, 0.25 };
 
 constexpr std::uint32_t kRtScratchMaxFrames = 8192;
 
@@ -247,7 +262,7 @@ jbox_route_id_t RouteManager::addRoute(const RouteConfig& cfg, jbox_error_t* err
     rec->source_uid     = cfg.source_uid;
     rec->dest_uid       = cfg.dest_uid;
     rec->mapping        = cfg.mapping;
-    rec->low_latency    = cfg.low_latency;
+    rec->latency_mode   = cfg.latency_mode;
     rec->channels_count = static_cast<std::uint32_t>(cfg.mapping.size());
     rec->state          = JBOX_ROUTE_STATE_STOPPED;
     rec->log_queue      = log_queue_;
@@ -396,10 +411,15 @@ jbox_error_code_t RouteManager::attemptStart(RouteRecord& r) {
     }
 
     // Size the ring buffer. See the ring-capacity note near the top of
-    // this file for the rationale. Safe preset: 8 × device-buffer /
-    // 4096 floor (absorbs USB burst-delivery jitter). Low-latency
-    // preset: 3 × / 512 floor (opt-in per route).
-    const RingSizing sizing = r.low_latency ? kRingLowLatency : kRingSafe;
+    // this file for the three presets and their trade-offs. The tier
+    // is chosen by r.latency_mode (0=safe, 1=low, 2=performance).
+    const RingSizing sizing = [&]() {
+        switch (r.latency_mode) {
+            case 2: return kRingPerformance;
+            case 1: return kRingLowLatency;
+            default: return kRingSafe;
+        }
+    }();
     const std::uint32_t max_buffer =
         std::max(src->buffer_frame_size, dst->buffer_frame_size);
     const std::uint32_t capacity_frames =
@@ -446,8 +466,9 @@ jbox_error_code_t RouteManager::attemptStart(RouteRecord& r) {
     lc.src_hal_latency_frames   = src->input_device_latency_frames;
     lc.src_safety_offset_frames = src->input_safety_offset_frames;
     lc.src_buffer_frames        = src->buffer_frame_size;
-    lc.ring_target_fill_frames  =
-        static_cast<std::uint32_t>(r.ring->usableCapacityFrames() / 2);
+    lc.ring_target_fill_frames  = static_cast<std::uint32_t>(
+        static_cast<double>(r.ring->usableCapacityFrames()) *
+        sizing.target_fill_fraction);
     lc.converter_prime_frames   = r.converter->primeLeadingFrames();
     lc.dst_buffer_frames        = dst->buffer_frame_size;
     lc.dst_safety_offset_frames = dst->output_safety_offset_frames;
@@ -463,7 +484,7 @@ jbox_error_code_t RouteManager::attemptStart(RouteRecord& r) {
         r.source_uid,
         src->input_channel_count,
         src->output_channel_count);
-    if (!src_mux.attachInput(&r, &inputIOProcCallback, &r, r.low_latency)) {
+    if (!src_mux.attachInput(&r, &inputIOProcCallback, &r, (r.latency_mode > 0))) {
         destroyMuxIfUnused(r.source_uid);
         releaseRouteResources(r);
         r.state = JBOX_ROUTE_STATE_ERROR;
@@ -479,7 +500,7 @@ jbox_error_code_t RouteManager::attemptStart(RouteRecord& r) {
         r.dest_uid,
         dst->input_channel_count,
         dst->output_channel_count);
-    if (!dst_mux.attachOutput(&r, &outputIOProcCallback, &r, r.low_latency)) {
+    if (!dst_mux.attachOutput(&r, &outputIOProcCallback, &r, (r.latency_mode > 0))) {
         // releaseRouteResources detaches the already-attached input
         // side and cleans up any mux we created.
         releaseRouteResources(r);
