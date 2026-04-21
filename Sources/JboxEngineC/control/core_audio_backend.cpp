@@ -516,4 +516,47 @@ void CoreAudioBackend::stopDevice(const std::string& uid) {
     it->second = false;
 }
 
+std::uint32_t CoreAudioBackend::currentBufferFrameSize(const std::string& uid) {
+    auto it = device_ids_.find(uid);
+    if (it == device_ids_.end()) return 0;
+    return getBufferFrameSize(it->second);
+}
+
+std::uint32_t CoreAudioBackend::requestBufferFrameSize(const std::string& uid,
+                                                      std::uint32_t frames) {
+    auto it = device_ids_.find(uid);
+    if (it == device_ids_.end() || frames == 0) return 0;
+    const AudioDeviceID id = it->second;
+
+    // Clamp the request into the device's supported range. Devices
+    // that do not expose the range property get the request through
+    // unclamped; most then enforce their own clamp internally.
+    AudioObjectPropertyAddress rangeAddr{
+        kAudioDevicePropertyBufferFrameSizeRange,
+        kAudioObjectPropertyScopeGlobal,
+        kAudioObjectPropertyElementMain};
+    AudioValueRange range{0.0, 0.0};
+    UInt32 rangeSize = sizeof(range);
+    std::uint32_t target = frames;
+    if (AudioObjectGetPropertyData(id, &rangeAddr, 0, nullptr,
+                                   &rangeSize, &range) == noErr) {
+        if (range.mMinimum > 0 && target < static_cast<std::uint32_t>(range.mMinimum)) {
+            target = static_cast<std::uint32_t>(range.mMinimum);
+        }
+        if (range.mMaximum > 0 && target > static_cast<std::uint32_t>(range.mMaximum)) {
+            target = static_cast<std::uint32_t>(range.mMaximum);
+        }
+    }
+
+    AudioObjectPropertyAddress setAddr{
+        kAudioDevicePropertyBufferFrameSize,
+        kAudioObjectPropertyScopeGlobal,
+        kAudioObjectPropertyElementMain};
+    UInt32 value = target;
+    (void)AudioObjectSetPropertyData(id, &setAddr, 0, nullptr,
+                                     sizeof(value), &value);
+    // Re-read: the HAL may or may not honour the exact request.
+    return getBufferFrameSize(id);
+}
+
 }  // namespace jbox::control

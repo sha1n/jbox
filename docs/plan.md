@@ -410,7 +410,7 @@ Meters — split into two slices so the diagnostic dots land first:
    - [x] UI: `AddRouteSheet` gains a **Low latency** toggle with explanatory footer copy about USB-burst underrun risk.
    - [x] Tests: `[route_manager][low_latency]` Catch2 case asserts the low-latency pill is > 30 000 µs smaller than the safe pill on identical devices; `EngineStoreTests` round-trips the flag through the Swift bridge.
    - [ ] Follow-up: device-class-driven auto-sizing (USB vs PCIe vs built-in) with a soak-and-tighten scheme. Tracked in Phase 7 or later; the opt-in toggle is enough for now.
-   - [ ] Follow-up: request a smaller device buffer (`kAudioDevicePropertyBufferFrameSize`) when a low-latency route starts, with refcounted restore semantics. See the second commit in this phase item.
+   - [x] Device buffer-size control. `IDeviceBackend` gained `currentBufferFrameSize` + `requestBufferFrameSize`; `DeviceIOMux` refcounts low-latency attachments across both directions, snapshots the original buffer size on the 0→1 edge, asks the backend to shrink to a 64-frame target on first attach, and restores on last detach. `CoreAudioBackend::requestBufferFrameSize` clamps requests into `kAudioDevicePropertyBufferFrameSizeRange`. Tests: three `[device_io_mux][low_latency]` Catch2 cases covering single-route shrink-and-restore, two-LL-routes share-one-shrink, and input+output on the same device sharing a single refcount.
 
 UI tests (minimal):
 - [x] Swift Testing cases for `EngineStore` against the live Core Audio engine (`Tests/JboxEngineTests/EngineStoreTests.swift`, Phase 6 #1).

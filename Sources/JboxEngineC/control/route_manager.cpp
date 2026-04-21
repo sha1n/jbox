@@ -441,7 +441,7 @@ jbox_error_code_t RouteManager::attemptStart(RouteRecord& r) {
         r.source_uid,
         src->input_channel_count,
         src->output_channel_count);
-    if (!src_mux.attachInput(&r, &inputIOProcCallback, &r)) {
+    if (!src_mux.attachInput(&r, &inputIOProcCallback, &r, r.low_latency)) {
         destroyMuxIfUnused(r.source_uid);
         releaseRouteResources(r);
         r.state = JBOX_ROUTE_STATE_ERROR;
@@ -457,7 +457,7 @@ jbox_error_code_t RouteManager::attemptStart(RouteRecord& r) {
         r.dest_uid,
         dst->input_channel_count,
         dst->output_channel_count);
-    if (!dst_mux.attachOutput(&r, &outputIOProcCallback, &r)) {
+    if (!dst_mux.attachOutput(&r, &outputIOProcCallback, &r, r.low_latency)) {
         // releaseRouteResources detaches the already-attached input
         // side and cleans up any mux we created.
         releaseRouteResources(r);

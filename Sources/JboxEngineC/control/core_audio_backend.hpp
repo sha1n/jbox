@@ -56,6 +56,9 @@ public:
     void closeCallback(IOProcId id) override;
     bool startDevice(const std::string& uid) override;
     void stopDevice(const std::string& uid) override;
+    std::uint32_t currentBufferFrameSize(const std::string& uid) override;
+    std::uint32_t requestBufferFrameSize(const std::string& uid,
+                                         std::uint32_t frames) override;
 
     // Forward declaration kept public so the .cpp-local trampoline
     // and helper functions can reference it without becoming friends.

@@ -83,6 +83,22 @@ public:
     void closeCallback(IOProcId id) override;
     bool startDevice(const std::string& uid) override;
     void stopDevice(const std::string& uid) override;
+    std::uint32_t currentBufferFrameSize(const std::string& uid) override;
+    std::uint32_t requestBufferFrameSize(const std::string& uid,
+                                         std::uint32_t frames) override;
+
+    // Test introspection: history of every `requestBufferFrameSize`
+    // call against this backend (one entry per call, in order). Lets
+    // tests assert both the request amount and how many times the
+    // refcounted mux logic crossed a threshold.
+    struct BufferSizeRequest {
+        std::string   uid;
+        std::uint32_t requested;  // what the caller passed
+        std::uint32_t applied;    // what the backend clamped to / returned
+    };
+    const std::vector<BufferSizeRequest>& bufferSizeRequests() const {
+        return buffer_size_requests_;
+    }
 
 private:
     struct DeviceSlot {
@@ -111,6 +127,10 @@ private:
     // Reusable working buffer for output callbacks, to avoid per-cycle
     // allocation in tests. Grown as needed.
     std::vector<float> output_scratch_;
+
+    // Records every requestBufferFrameSize invocation for test
+    // inspection. Does not affect behavior.
+    std::vector<BufferSizeRequest> buffer_size_requests_;
 };
 
 }  // namespace jbox::control

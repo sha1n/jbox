@@ -155,4 +155,25 @@ void SimulatedBackend::stopDevice(const std::string& uid) {
     it->second.started = false;
 }
 
+std::uint32_t SimulatedBackend::currentBufferFrameSize(const std::string& uid) {
+    auto it = devices_.find(uid);
+    if (it == devices_.end()) return 0;
+    return it->second.info.buffer_frame_size;
+}
+
+std::uint32_t SimulatedBackend::requestBufferFrameSize(
+    const std::string& uid, std::uint32_t frames) {
+    auto it = devices_.find(uid);
+    if (it == devices_.end() || frames == 0) {
+        buffer_size_requests_.push_back({uid, frames, 0});
+        return 0;
+    }
+    // No range clamping in the simulated backend — tests supply the
+    // exact frame count they want recorded. The HAL-side clamping
+    // lives in CoreAudioBackend::requestBufferFrameSize.
+    it->second.info.buffer_frame_size = frames;
+    buffer_size_requests_.push_back({uid, frames, frames});
+    return frames;
+}
+
 }  // namespace jbox::control

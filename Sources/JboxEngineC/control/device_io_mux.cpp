@@ -7,6 +7,15 @@
 
 namespace jbox::control {
 
+namespace {
+// Buffer frame size requested when at least one low-latency route is
+// attached to a device. 64 frames is the classic low-latency target on
+// Core Audio. CoreAudioBackend clamps into the device-supported range
+// internally; devices that cannot honour this size return a larger
+// clamped value, and the latency pill still reports the real number.
+constexpr std::uint32_t kLowLatencyBufferFrames = 64;
+}  // namespace
+
 DeviceIOMux::DeviceIOMux(IDeviceBackend& backend,
                          std::string uid,
                          std::uint32_t input_channel_count,
@@ -43,7 +52,8 @@ DeviceIOMux::~DeviceIOMux() {
 
 bool DeviceIOMux::attachInput(void* key,
                               InputIOProcCallback callback,
-                              void* user_data) {
+                              void* user_data,
+                              bool low_latency) {
     if (input_channel_count_ == 0 || callback == nullptr) return false;
 
     auto next = std::make_unique<InputList>();
@@ -54,7 +64,7 @@ bool DeviceIOMux::attachInput(void* key,
             next->push_back(e);
         }
     }
-    next->push_back({key, callback, user_data});
+    next->push_back({key, callback, user_data, low_latency});
 
     const bool first = (input_ioproc_id_ == kInvalidIOProcId);
     if (first) {
@@ -76,16 +86,22 @@ bool DeviceIOMux::attachInput(void* key,
         // receive callbacks either way.
         backend_.startDevice(uid_);
     }
+    if (low_latency) onLowLatencyAttach();
     return true;
 }
 
 void DeviceIOMux::detachInput(void* key) {
     if (!input_list_ || input_list_->empty()) return;
 
+    bool was_low_latency = false;
     auto next = std::make_unique<InputList>();
     next->reserve(input_list_->size());
     for (const auto& e : *input_list_) {
-        if (e.key != key) next->push_back(e);
+        if (e.key == key) {
+            was_low_latency = e.low_latency;
+        } else {
+            next->push_back(e);
+        }
     }
     if (next->size() == input_list_->size()) return;  // key not found
 
@@ -106,11 +122,13 @@ void DeviceIOMux::detachInput(void* key) {
         input_ioproc_id_ = kInvalidIOProcId;
     }
     maybeStopDevice();
+    if (was_low_latency) onLowLatencyDetach();
 }
 
 bool DeviceIOMux::attachOutput(void* key,
                                OutputIOProcCallback callback,
-                               void* user_data) {
+                               void* user_data,
+                               bool low_latency) {
     if (output_channel_count_ == 0 || callback == nullptr) return false;
 
     auto next = std::make_unique<OutputList>();
@@ -121,7 +139,7 @@ bool DeviceIOMux::attachOutput(void* key,
             next->push_back(e);
         }
     }
-    next->push_back({key, callback, user_data});
+    next->push_back({key, callback, user_data, low_latency});
 
     const bool first = (output_ioproc_id_ == kInvalidIOProcId);
     if (first) {
@@ -138,16 +156,22 @@ bool DeviceIOMux::attachOutput(void* key,
     if (first) {
         backend_.startDevice(uid_);
     }
+    if (low_latency) onLowLatencyAttach();
     return true;
 }
 
 void DeviceIOMux::detachOutput(void* key) {
     if (!output_list_ || output_list_->empty()) return;
 
+    bool was_low_latency = false;
     auto next = std::make_unique<OutputList>();
     next->reserve(output_list_->size());
     for (const auto& e : *output_list_) {
-        if (e.key != key) next->push_back(e);
+        if (e.key == key) {
+            was_low_latency = e.low_latency;
+        } else {
+            next->push_back(e);
+        }
     }
     if (next->size() == output_list_->size()) return;
 
@@ -167,6 +191,7 @@ void DeviceIOMux::detachOutput(void* key) {
         output_ioproc_id_ = kInvalidIOProcId;
     }
     maybeStopDevice();
+    if (was_low_latency) onLowLatencyDetach();
 }
 
 bool DeviceIOMux::hasAnyInput() const {
@@ -233,6 +258,26 @@ void DeviceIOMux::maybeStopDevice() {
     if (input_ioproc_id_ == kInvalidIOProcId &&
         output_ioproc_id_ == kInvalidIOProcId) {
         backend_.stopDevice(uid_);
+    }
+}
+
+void DeviceIOMux::onLowLatencyAttach() {
+    if (low_latency_count_ == 0) {
+        // First low-latency requester: snapshot the device's current
+        // buffer size so we can restore it on last detach, then ask
+        // the backend to shrink.
+        original_buffer_frames_ = backend_.currentBufferFrameSize(uid_);
+        (void)backend_.requestBufferFrameSize(uid_, kLowLatencyBufferFrames);
+    }
+    ++low_latency_count_;
+}
+
+void DeviceIOMux::onLowLatencyDetach() {
+    if (low_latency_count_ <= 0) return;  // defensive; should not happen
+    --low_latency_count_;
+    if (low_latency_count_ == 0 && original_buffer_frames_ > 0) {
+        (void)backend_.requestBufferFrameSize(uid_, original_buffer_frames_);
+        original_buffer_frames_ = 0;
     }
 }
 

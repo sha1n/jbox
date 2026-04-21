@@ -134,6 +134,20 @@ public:
     // registered but no longer fire. Safe to call on a non-started
     // device (no-op).
     virtual void stopDevice(const std::string& uid) = 0;
+
+    // Read the device's current buffer frame size as Core Audio
+    // reports it. Returns 0 if the device is unknown or the query
+    // failed. Non-RT; call from the control thread only.
+    virtual std::uint32_t currentBufferFrameSize(const std::string& uid) = 0;
+
+    // Ask the HAL to change the device's buffer frame size. Returns
+    // the post-change value (may differ from `frames` if the HAL
+    // clamped the request into its supported range), or 0 on an
+    // unknown device / failure. Mutates a HAL property visible to
+    // other processes — only called when a route opts in via
+    // `RouteConfig.low_latency`. Non-RT; control thread only.
+    virtual std::uint32_t requestBufferFrameSize(
+        const std::string& uid, std::uint32_t frames) = 0;
 };
 
 }  // namespace jbox::control

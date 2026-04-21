@@ -227,3 +227,116 @@ TEST_CASE("DeviceIOMux: input and output coexist on the same device",
     REQUIRE(out.calls.load() == 1);
     for (float v : out_buf) REQUIRE(v == Catch::Approx(0.5f));
 }
+
+// Phase 6 refinement #6 (second commit): DeviceIOMux asks the backend
+// to lower the device's buffer frame size when any attached route was
+// opened with `low_latency=true`, and restores the original when the
+// last low-latency route detaches. Default-sizing routes don't
+// participate, so a mixed scenario (one low-latency + one safe) keeps
+// the buffer small for as long as the low-latency route is attached.
+TEST_CASE("DeviceIOMux: low-latency request shrinks + refcount restores",
+          "[device_io_mux][low_latency]") {
+    SimulatedBackend backend;
+    // Starting buffer frame size is intentionally larger than the
+    // low-latency target so we can see the shrink happen.
+    BackendDeviceInfo info = makeInput("src", 2);
+    info.buffer_frame_size = 1024;
+    backend.addDevice(info);
+
+    DeviceIOMux mux(backend, "src", /*in*/ 2, /*out*/ 0);
+
+    InputSink safe_sink;
+    InputSink low_sink;
+
+    // Attach a default-sizing route first: no buffer-size request.
+    REQUIRE(mux.attachInput(&safe_sink, &inputSinkCallback, &safe_sink,
+                            /*low_latency*/ false));
+    REQUIRE(backend.bufferSizeRequests().empty());
+    REQUIRE(backend.currentBufferFrameSize("src") == 1024);
+
+    // Attach a low-latency route: first LL attach snapshots the
+    // original size (1024) and shrinks to the low-latency target.
+    REQUIRE(mux.attachInput(&low_sink, &inputSinkCallback, &low_sink,
+                            /*low_latency*/ true));
+    REQUIRE(backend.bufferSizeRequests().size() == 1);
+    REQUIRE(backend.bufferSizeRequests().back().uid == "src");
+    const auto shrunk = backend.currentBufferFrameSize("src");
+    REQUIRE(shrunk < 1024);
+    REQUIRE(shrunk > 0);
+
+    // Detach the default route: low-latency still attached, no change.
+    mux.detachInput(&safe_sink);
+    REQUIRE(backend.bufferSizeRequests().size() == 1);
+    REQUIRE(backend.currentBufferFrameSize("src") == shrunk);
+
+    // Detach the low-latency route: restores original 1024.
+    mux.detachInput(&low_sink);
+    REQUIRE(backend.bufferSizeRequests().size() == 2);
+    REQUIRE(backend.bufferSizeRequests().back().applied == 1024);
+    REQUIRE(backend.currentBufferFrameSize("src") == 1024);
+}
+
+TEST_CASE("DeviceIOMux: two low-latency routes share one shrink",
+          "[device_io_mux][low_latency]") {
+    SimulatedBackend backend;
+    BackendDeviceInfo info = makeInput("src", 2);
+    info.buffer_frame_size = 512;
+    backend.addDevice(info);
+
+    DeviceIOMux mux(backend, "src", /*in*/ 2, /*out*/ 0);
+
+    InputSink a;
+    InputSink b;
+    REQUIRE(mux.attachInput(&a, &inputSinkCallback, &a, /*low_latency*/ true));
+    REQUIRE(backend.bufferSizeRequests().size() == 1);
+    REQUIRE(mux.attachInput(&b, &inputSinkCallback, &b, /*low_latency*/ true));
+    // Second LL attach must not fire another request — count is now 2.
+    REQUIRE(backend.bufferSizeRequests().size() == 1);
+
+    // Detaching the first LL route does not restore yet.
+    mux.detachInput(&a);
+    REQUIRE(backend.bufferSizeRequests().size() == 1);
+
+    // Last LL detach restores.
+    mux.detachInput(&b);
+    REQUIRE(backend.bufferSizeRequests().size() == 2);
+    REQUIRE(backend.bufferSizeRequests().back().applied == 512);
+}
+
+TEST_CASE("DeviceIOMux: low-latency input + output on same device compose",
+          "[device_io_mux][low_latency]") {
+    // Same device acts as both source and destination (duplex loopback).
+    // The route_manager attaches low-latency on both directions of the
+    // same mux; the counter must span both sides.
+    SimulatedBackend backend;
+    BackendDeviceInfo info;
+    info.uid = "duplex";
+    info.name = "duplex";
+    info.direction = kBackendDirectionInput | kBackendDirectionOutput;
+    info.input_channel_count = 2;
+    info.output_channel_count = 2;
+    info.nominal_sample_rate = 48000.0;
+    info.buffer_frame_size = 1024;
+    backend.addDevice(info);
+
+    DeviceIOMux mux(backend, "duplex", /*in*/ 2, /*out*/ 2);
+
+    InputSink in;
+    OutputSource out{.calls = {}, .value = 0.25f};
+
+    REQUIRE(mux.attachInput(&in, &inputSinkCallback, &in,
+                            /*low_latency*/ true));
+    REQUIRE(backend.bufferSizeRequests().size() == 1);
+    REQUIRE(mux.attachOutput(&out, &outputSourceCallback, &out,
+                             /*low_latency*/ true));
+    // Same device: refcount is shared → second direction must not
+    // fire another request.
+    REQUIRE(backend.bufferSizeRequests().size() == 1);
+
+    mux.detachInput(&in);
+    REQUIRE(backend.bufferSizeRequests().size() == 1);
+    mux.detachOutput(&out);
+    // Last LL detach: restore.
+    REQUIRE(backend.bufferSizeRequests().size() == 2);
+    REQUIRE(backend.bufferSizeRequests().back().applied == 1024);
+}
