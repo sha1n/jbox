@@ -41,7 +41,7 @@ A typical example: routing a hardware instrument or external sound module into s
 1. **Pro-audio routing semantics.** Channel numbering is 1-indexed in the UI (0-indexed internally). Devices are identified by Core Audio UID (stable across reboots). Each route is independent; lifecycle and errors are per-route.
 2. **Top-performance real-time engine.** The audio-processing path is written in C++ with strict real-time discipline: no allocations, no locks, no syscalls on the audio thread. Engineered for near-zero added latency.
 3. **UI is replaceable.** The engine is an independent C++ library exposed via a stable public C API. Today's SwiftUI UI is one implementation of that API; it can be rewritten or replaced without touching the engine.
-4. **Do not step on other apps.** Jbox does not create aggregate devices, does not change sample rates, and does not change buffer sizes without explicit user opt-in. Other apps sharing the same hardware are unaffected.
+4. **Do not step on other apps by default; opt-in only when the user asks for it.** The default latency mode leaves the HAL's buffer size alone and coexists with other clients (Core Audio's max-across-clients policy). The opt-in Performance tier does change the buffer size and — when source and destination are the same device (typically an aggregate) — claims Core Audio hog mode for the route's lifetime, which disconnects other apps from that device until the route stops. The UI copy is explicit about this; users have to pick the tier deliberately.
 5. **Personal use first.** v1 runs with free Apple tooling and ad-hoc code signing. No paid Apple Developer Program required. Development works entirely from the command line — the Xcode IDE is never required (though Xcode.app must be installed for its frameworks; see Prerequisites). Distribution to others is possible via an unsigned `.dmg` lane with clear Gatekeeper instructions.
 
 ---
@@ -325,9 +325,16 @@ If that friction ever matters enough to solve, the next step is joining the paid
 
 ## Status
 
-**Phase 6 — SwiftUI UI, first slice shipped.** Phases 0–5 are code-complete; the C++ engine, Core Audio backend, drift correction + resampling, and the multi-route RCU dispatcher are all in place. The GUI currently supports add → start → stop → remove routes end-to-end against real Core Audio, with human-readable channel-label pickers in the add-route sheet and live 4 Hz route-status polling. An `os_log`-based logging pipeline (with edge-triggered RT producers) is wired up under subsystem `com.jbox.app`.
+**Phase 6 — SwiftUI UI, first slice and refinement pass #1 shipped.** Phases 0–5 are code-complete; the C++ engine, Core Audio backend, drift correction + resampling, and the multi-route RCU dispatcher are all in place. The GUI supports add → start → stop → remove routes end-to-end against real Core Audio, with human-readable channel-label pickers in the add-route sheet, live 4 Hz route-status polling, 30 Hz meters, and an Advanced-only diagnostics panel. An `os_log`-based logging pipeline (with edge-triggered RT producers) is wired up under subsystem `com.jbox.app`.
 
-Still pending in Phase 6: meters, `MenuBarExtra`, Preferences window, and `XCUITest` flows. The scene editor was consolidated into Phase 7 alongside persistence. Real-hardware acceptance tests (soak, latency, sample-rate mismatch, multi-route sanity) from Phases 3–5 are deferred to the owner's rig — the simulated backend covers their logic.
+Phase 6 refinements landed:
+- **Fan-out mapping** (1:N) — one source channel can feed multiple destinations.
+- **Computed per-route latency pill** — engine exposes the HAL + buffer + ring + SRC components through the C ABI; UI surfaces the total on the route row and the breakdown in the diagnostics panel.
+- **Tiered latency modes** per route — Off (safe 8× ring, 4096 floor), Low (3× / 512 floor), Performance (2× / 256 floor + `ring/4` drift setpoint). The picker is per-route.
+- **Direct-monitor fast path** for same-device Performance routes — bypasses the ring and SRC entirely, copies input → output in one duplex IOProc, aggregate-device aware.
+- **HAL buffer-size control** — per-route override clamped into the device's supported range (intersected across aggregate sub-devices), with Core Audio hog-mode ownership for the route's lifetime so the request actually lands.
+
+Still pending in Phase 6: `MenuBarExtra`, Preferences window beyond the diagnostics toggle, per-route edit-in-place (rename + mapping), VoiceOver label on the expanded meter panel, and `XCUITest` flows. The scene editor was consolidated into Phase 7 alongside persistence. Real-hardware acceptance tests (soak, latency, sample-rate mismatch, multi-route sanity) from Phases 3–5 are deferred to the owner's rig — the simulated backend covers their logic.
 
 Release engineering is already operational: pushing a `v*` tag triggers `.github/workflows/release.yml`, which builds an ad-hoc-signed `Jbox.app` (with `JboxEngineCLI` bundled inside) and publishes a drag-to-install `Jbox-<version>.dmg` as a draft pre-release. See [docs/releases.md](./docs/releases.md).
 
@@ -341,12 +348,14 @@ Scope for **v1.0.0** (what the first release will do):
 - Auto-resampling when source and destination sample rates differ.
 - Drift correction between independent device clocks.
 - Auto-waiting for missing devices; auto-recovery on device return.
+- **Tiered latency modes** per route (Off / Low / Performance) with an opt-in HAL buffer-size override and a direct-monitor fast path for same-device (aggregate) routes.
+- **Per-route latency pill** plus an Advanced-only diagnostics panel with the full component breakdown.
 - SwiftUI main window + menu bar extra + preferences.
 - Ad-hoc signed `.app` for personal use; unsigned `.dmg` lane for small-audience sharing.
 
 Explicitly **deferred** beyond v1 (see [docs/spec.md § Appendix A](./docs/spec.md#appendix-a--deferred--out-of-scope) for the full list):
 
-- Fan-out / fan-in / summing / any mixer features.
+- Fan-in / summing / any mixer features (fan-out shipped in Phase 6).
 - Per-route gain, mute, or pan.
 - Global hotkeys.
 - Developer ID signing + notarization.

@@ -7,14 +7,6 @@
 
 namespace jbox::control {
 
-namespace {
-// Buffer frame size requested when at least one low-latency route is
-// attached to a device. 64 frames is the classic low-latency target on
-// Core Audio. CoreAudioBackend clamps into the device-supported range
-// internally; devices that cannot honour this size return a larger
-// clamped value, and the latency pill still reports the real number.
-constexpr std::uint32_t kLowLatencyBufferFrames = 64;
-}  // namespace
 
 DeviceIOMux::DeviceIOMux(IDeviceBackend& backend,
                          std::string uid,
@@ -53,7 +45,7 @@ DeviceIOMux::~DeviceIOMux() {
 bool DeviceIOMux::attachInput(void* key,
                               InputIOProcCallback callback,
                               void* user_data,
-                              bool low_latency) {
+                              std::uint32_t requested_buffer_frames) {
     if (input_channel_count_ == 0 || callback == nullptr) return false;
 
     auto next = std::make_unique<InputList>();
@@ -64,7 +56,7 @@ bool DeviceIOMux::attachInput(void* key,
             next->push_back(e);
         }
     }
-    next->push_back({key, callback, user_data, low_latency});
+    next->push_back({key, callback, user_data, requested_buffer_frames});
 
     const bool first = (input_ioproc_id_ == kInvalidIOProcId);
     if (first) {
@@ -86,22 +78,17 @@ bool DeviceIOMux::attachInput(void* key,
         // receive callbacks either way.
         backend_.startDevice(uid_);
     }
-    if (low_latency) onLowLatencyAttach();
+    updateBufferRequest();
     return true;
 }
 
 void DeviceIOMux::detachInput(void* key) {
     if (!input_list_ || input_list_->empty()) return;
 
-    bool was_low_latency = false;
     auto next = std::make_unique<InputList>();
     next->reserve(input_list_->size());
     for (const auto& e : *input_list_) {
-        if (e.key == key) {
-            was_low_latency = e.low_latency;
-        } else {
-            next->push_back(e);
-        }
+        if (e.key != key) next->push_back(e);
     }
     if (next->size() == input_list_->size()) return;  // key not found
 
@@ -122,13 +109,13 @@ void DeviceIOMux::detachInput(void* key) {
         input_ioproc_id_ = kInvalidIOProcId;
     }
     maybeStopDevice();
-    if (was_low_latency) onLowLatencyDetach();
+    updateBufferRequest();
 }
 
 bool DeviceIOMux::attachOutput(void* key,
                                OutputIOProcCallback callback,
                                void* user_data,
-                               bool low_latency) {
+                               std::uint32_t requested_buffer_frames) {
     if (output_channel_count_ == 0 || callback == nullptr) return false;
 
     auto next = std::make_unique<OutputList>();
@@ -139,7 +126,7 @@ bool DeviceIOMux::attachOutput(void* key,
             next->push_back(e);
         }
     }
-    next->push_back({key, callback, user_data, low_latency});
+    next->push_back({key, callback, user_data, requested_buffer_frames});
 
     const bool first = (output_ioproc_id_ == kInvalidIOProcId);
     if (first) {
@@ -156,22 +143,17 @@ bool DeviceIOMux::attachOutput(void* key,
     if (first) {
         backend_.startDevice(uid_);
     }
-    if (low_latency) onLowLatencyAttach();
+    updateBufferRequest();
     return true;
 }
 
 void DeviceIOMux::detachOutput(void* key) {
     if (!output_list_ || output_list_->empty()) return;
 
-    bool was_low_latency = false;
     auto next = std::make_unique<OutputList>();
     next->reserve(output_list_->size());
     for (const auto& e : *output_list_) {
-        if (e.key == key) {
-            was_low_latency = e.low_latency;
-        } else {
-            next->push_back(e);
-        }
+        if (e.key != key) next->push_back(e);
     }
     if (next->size() == output_list_->size()) return;
 
@@ -191,7 +173,7 @@ void DeviceIOMux::detachOutput(void* key) {
         output_ioproc_id_ = kInvalidIOProcId;
     }
     maybeStopDevice();
-    if (was_low_latency) onLowLatencyDetach();
+    updateBufferRequest();
 }
 
 bool DeviceIOMux::hasAnyInput() const {
@@ -261,23 +243,51 @@ void DeviceIOMux::maybeStopDevice() {
     }
 }
 
-void DeviceIOMux::onLowLatencyAttach() {
-    if (low_latency_count_ == 0) {
-        // First low-latency requester: snapshot the device's current
-        // buffer size so we can restore it on last detach, then ask
-        // the backend to shrink.
-        original_buffer_frames_ = backend_.currentBufferFrameSize(uid_);
-        (void)backend_.requestBufferFrameSize(uid_, kLowLatencyBufferFrames);
+std::uint32_t DeviceIOMux::currentMinBufferRequest() const {
+    std::uint32_t min = 0;
+    auto take = [&min](std::uint32_t v) {
+        if (v == 0) return;
+        if (min == 0 || v < min) min = v;
+    };
+    if (input_list_) {
+        for (const auto& e : *input_list_) take(e.requested_buffer_frames);
     }
-    ++low_latency_count_;
+    if (output_list_) {
+        for (const auto& e : *output_list_) take(e.requested_buffer_frames);
+    }
+    return min;
 }
 
-void DeviceIOMux::onLowLatencyDetach() {
-    if (low_latency_count_ <= 0) return;  // defensive; should not happen
-    --low_latency_count_;
-    if (low_latency_count_ == 0 && original_buffer_frames_ > 0) {
-        (void)backend_.requestBufferFrameSize(uid_, original_buffer_frames_);
-        original_buffer_frames_ = 0;
+void DeviceIOMux::updateBufferRequest() {
+    const std::uint32_t target = currentMinBufferRequest();
+
+    if (target == 0) {
+        // No active requester — release exclusive ownership if we
+        // had claimed it. Backend's releaseExclusive restores the
+        // original buffer size.
+        if (exclusive_claimed_) {
+            backend_.releaseExclusive(uid_);
+            exclusive_claimed_ = false;
+        }
+        last_requested_frames_ = 0;
+        return;
+    }
+
+    // At least one route wants a specific target. Claim exclusive on
+    // the 0→1 transition so the buffer-size request actually lands
+    // (the backend's max-across-clients policy would otherwise let
+    // another app's larger preference win). Claim failure is non-
+    // fatal; the route continues on the shared-client path and
+    // accepts whatever the HAL ends up giving.
+    if (!exclusive_claimed_) {
+        exclusive_claimed_ = backend_.claimExclusive(uid_);
+    }
+
+    // Re-apply only if the min changed, to avoid churning the HAL
+    // every time a new route attaches with the same target.
+    if (target != last_requested_frames_) {
+        (void)backend_.requestBufferFrameSize(uid_, target);
+        last_requested_frames_ = target;
     }
 }
 

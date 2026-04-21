@@ -671,6 +671,72 @@ TEST_CASE("RouteManager: duplex fast path honours buffer_frames override",
     REQUIRE(components.src_buffer_frames == 128);
 }
 
+TEST_CASE("supportedBufferFrameSizeRange: plain device returns its own range",
+          "[device_backend][buffer]") {
+    SimulatedBackend backend;
+    BackendDeviceInfo info;
+    info.uid = "plain";
+    info.name = "plain";
+    info.direction = kBackendDirectionInput;
+    info.input_channel_count = 2;
+    info.nominal_sample_rate = 48000.0;
+    info.buffer_frame_size = 128;
+    backend.addDevice(info);
+    backend.setBufferFrameSizeRange("plain", 16, 2048);
+
+    const auto r = backend.supportedBufferFrameSizeRange("plain");
+    REQUIRE(r.minimum == 16);
+    REQUIRE(r.maximum == 2048);
+
+    // Unknown UID returns an empty range so the UI hides the picker.
+    const auto bogus = backend.supportedBufferFrameSizeRange("nope");
+    REQUIRE(bogus.minimum == 0);
+    REQUIRE(bogus.maximum == 0);
+}
+
+TEST_CASE("supportedBufferFrameSizeRange: non-overlapping sub-device ranges collapse to empty",
+          "[device_backend][aggregate][buffer]") {
+    // Sub A accepts [32, 64], sub B accepts [128, 2048] — no
+    // intersection. The engine must not surface a value that
+    // neither member can honour; an empty range signals "hide the
+    // picker, there is no common target".
+    SimulatedBackend backend;
+    BackendDeviceInfo a;
+    a.uid = "sub-a";
+    a.name = "sub-a";
+    a.direction = kBackendDirectionInput;
+    a.input_channel_count = 2;
+    a.nominal_sample_rate = 48000.0;
+    a.buffer_frame_size = 64;
+    backend.addDevice(a);
+    backend.setBufferFrameSizeRange("sub-a", 32, 64);
+
+    BackendDeviceInfo b;
+    b.uid = "sub-b";
+    b.name = "sub-b";
+    b.direction = kBackendDirectionOutput;
+    b.output_channel_count = 2;
+    b.nominal_sample_rate = 48000.0;
+    b.buffer_frame_size = 128;
+    backend.addDevice(b);
+    backend.setBufferFrameSizeRange("sub-b", 128, 2048);
+
+    BackendDeviceInfo agg;
+    agg.uid = "aggregate";
+    agg.name = "aggregate";
+    agg.direction = kBackendDirectionInput | kBackendDirectionOutput;
+    agg.input_channel_count  = 2;
+    agg.output_channel_count = 2;
+    agg.nominal_sample_rate  = 48000.0;
+    agg.buffer_frame_size    = 128;
+    backend.addAggregateDevice(agg, {"sub-a", "sub-b"});
+    backend.setBufferFrameSizeRange("aggregate", 16, 8192);
+
+    const auto r = backend.supportedBufferFrameSizeRange("aggregate");
+    REQUIRE(r.minimum == 0);
+    REQUIRE(r.maximum == 0);
+}
+
 TEST_CASE("supportedBufferFrameSizeRange intersects aggregate sub-device ranges",
           "[device_backend][aggregate][buffer]") {
     // The range query the UI uses must reflect every active member

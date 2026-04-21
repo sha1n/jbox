@@ -228,17 +228,17 @@ TEST_CASE("DeviceIOMux: input and output coexist on the same device",
     for (float v : out_buf) REQUIRE(v == Catch::Approx(0.5f));
 }
 
-// Phase 6 refinement #6 (second commit): DeviceIOMux asks the backend
-// to lower the device's buffer frame size when any attached route was
-// opened with `low_latency=true`, and restores the original when the
-// last low-latency route detaches. Default-sizing routes don't
-// participate, so a mixed scenario (one low-latency + one safe) keeps
-// the buffer small for as long as the low-latency route is attached.
-TEST_CASE("DeviceIOMux: low-latency request shrinks + refcount restores",
+// Phase 6 refinement #6: DeviceIOMux asks the backend to lower the
+// device's buffer frame size when any attached route supplies a
+// non-zero `requested_buffer_frames`, and restores the original when
+// the last requester detaches. Routes that pass 0 don't participate,
+// so a mixed scenario (one requester + one no-opinion) keeps the
+// buffer small for as long as the requester is attached. The
+// restore happens inside `releaseExclusive` from the backend's
+// snapshot, not via a second `requestBufferFrameSize` call.
+TEST_CASE("DeviceIOMux: buffer request shrinks + refcount restores",
           "[device_io_mux][low_latency]") {
     SimulatedBackend backend;
-    // Starting buffer frame size is intentionally larger than the
-    // low-latency target so we can see the shrink happen.
     BackendDeviceInfo info = makeInput("src", 2);
     info.buffer_frame_size = 1024;
     backend.addDevice(info);
@@ -248,35 +248,40 @@ TEST_CASE("DeviceIOMux: low-latency request shrinks + refcount restores",
     InputSink safe_sink;
     InputSink low_sink;
 
-    // Attach a default-sizing route first: no buffer-size request.
+    // Attach a no-opinion route first: no buffer-size request, no
+    // exclusive claim.
     REQUIRE(mux.attachInput(&safe_sink, &inputSinkCallback, &safe_sink,
-                            /*low_latency*/ false));
+                            /*requested_buffer_frames*/ 0));
     REQUIRE(backend.bufferSizeRequests().empty());
+    REQUIRE_FALSE(backend.isExclusive("src"));
     REQUIRE(backend.currentBufferFrameSize("src") == 1024);
 
-    // Attach a low-latency route: first LL attach snapshots the
-    // original size (1024) and shrinks to the low-latency target.
+    // Attach a requester: 0→1 transition claims exclusive + shrinks.
     REQUIRE(mux.attachInput(&low_sink, &inputSinkCallback, &low_sink,
-                            /*low_latency*/ true));
+                            /*requested_buffer_frames*/ 64));
     REQUIRE(backend.bufferSizeRequests().size() == 1);
-    REQUIRE(backend.bufferSizeRequests().back().uid == "src");
-    const auto shrunk = backend.currentBufferFrameSize("src");
-    REQUIRE(shrunk < 1024);
-    REQUIRE(shrunk > 0);
+    REQUIRE(backend.bufferSizeRequests().back().uid       == "src");
+    REQUIRE(backend.bufferSizeRequests().back().requested == 64);
+    REQUIRE(backend.isExclusive("src"));
+    REQUIRE(backend.currentBufferFrameSize("src") == 64);
 
-    // Detach the default route: low-latency still attached, no change.
+    // Detach the no-opinion route: nothing changes.
     mux.detachInput(&safe_sink);
     REQUIRE(backend.bufferSizeRequests().size() == 1);
-    REQUIRE(backend.currentBufferFrameSize("src") == shrunk);
+    REQUIRE(backend.isExclusive("src"));
+    REQUIRE(backend.currentBufferFrameSize("src") == 64);
 
-    // Detach the low-latency route: restores original 1024.
+    // Detach the requester: 1→0 transition releases exclusive, which
+    // internally restores the original buffer size from the
+    // snapshot. The restore does NOT flow through requestBufferFrame-
+    // Size, so the request log still has just the one shrink entry.
     mux.detachInput(&low_sink);
-    REQUIRE(backend.bufferSizeRequests().size() == 2);
-    REQUIRE(backend.bufferSizeRequests().back().applied == 1024);
+    REQUIRE(backend.bufferSizeRequests().size() == 1);
+    REQUIRE_FALSE(backend.isExclusive("src"));
     REQUIRE(backend.currentBufferFrameSize("src") == 1024);
 }
 
-TEST_CASE("DeviceIOMux: two low-latency routes share one shrink",
+TEST_CASE("DeviceIOMux: two requesters take the smallest frame count",
           "[device_io_mux][low_latency]") {
     SimulatedBackend backend;
     BackendDeviceInfo info = makeInput("src", 2);
@@ -287,27 +292,39 @@ TEST_CASE("DeviceIOMux: two low-latency routes share one shrink",
 
     InputSink a;
     InputSink b;
-    REQUIRE(mux.attachInput(&a, &inputSinkCallback, &a, /*low_latency*/ true));
+    // First requester asks for 128.
+    REQUIRE(mux.attachInput(&a, &inputSinkCallback, &a,
+                            /*requested_buffer_frames*/ 128));
     REQUIRE(backend.bufferSizeRequests().size() == 1);
-    REQUIRE(mux.attachInput(&b, &inputSinkCallback, &b, /*low_latency*/ true));
-    // Second LL attach must not fire another request — count is now 2.
-    REQUIRE(backend.bufferSizeRequests().size() == 1);
+    REQUIRE(backend.bufferSizeRequests().back().requested == 128);
+    REQUIRE(backend.currentBufferFrameSize("src") == 128);
 
-    // Detaching the first LL route does not restore yet.
-    mux.detachInput(&a);
-    REQUIRE(backend.bufferSizeRequests().size() == 1);
-
-    // Last LL detach restores.
-    mux.detachInput(&b);
+    // Second requester asks for 64 — smaller wins, triggers a new
+    // request.
+    REQUIRE(mux.attachInput(&b, &inputSinkCallback, &b,
+                            /*requested_buffer_frames*/ 64));
     REQUIRE(backend.bufferSizeRequests().size() == 2);
-    REQUIRE(backend.bufferSizeRequests().back().applied == 512);
+    REQUIRE(backend.bufferSizeRequests().back().requested == 64);
+    REQUIRE(backend.currentBufferFrameSize("src") == 64);
+
+    // Detaching the 64-frame requester moves the min back to 128.
+    mux.detachInput(&b);
+    REQUIRE(backend.bufferSizeRequests().size() == 3);
+    REQUIRE(backend.bufferSizeRequests().back().requested == 128);
+    REQUIRE(backend.currentBufferFrameSize("src") == 128);
+
+    // Last requester detaches — restore via releaseExclusive, no new
+    // request entry.
+    mux.detachInput(&a);
+    REQUIRE(backend.bufferSizeRequests().size() == 3);
+    REQUIRE(backend.currentBufferFrameSize("src") == 512);
 }
 
-TEST_CASE("DeviceIOMux: low-latency input + output on same device compose",
+TEST_CASE("DeviceIOMux: request on input + output of same device shares one shrink",
           "[device_io_mux][low_latency]") {
-    // Same device acts as both source and destination (duplex loopback).
-    // The route_manager attaches low-latency on both directions of the
-    // same mux; the counter must span both sides.
+    // Same device acts as both source and destination (duplex
+    // loopback). The route_manager attaches requests on both
+    // directions of the same mux; the refcount must span both sides.
     SimulatedBackend backend;
     BackendDeviceInfo info;
     info.uid = "duplex";
@@ -325,18 +342,21 @@ TEST_CASE("DeviceIOMux: low-latency input + output on same device compose",
     OutputSource out{.calls = {}, .value = 0.25f};
 
     REQUIRE(mux.attachInput(&in, &inputSinkCallback, &in,
-                            /*low_latency*/ true));
+                            /*requested_buffer_frames*/ 64));
     REQUIRE(backend.bufferSizeRequests().size() == 1);
+    REQUIRE(backend.currentBufferFrameSize("duplex") == 64);
+
+    // Same device, same target: the min hasn't changed, no second
+    // request fires.
     REQUIRE(mux.attachOutput(&out, &outputSourceCallback, &out,
-                             /*low_latency*/ true));
-    // Same device: refcount is shared → second direction must not
-    // fire another request.
+                             /*requested_buffer_frames*/ 64));
     REQUIRE(backend.bufferSizeRequests().size() == 1);
 
     mux.detachInput(&in);
     REQUIRE(backend.bufferSizeRequests().size() == 1);
+    REQUIRE(backend.currentBufferFrameSize("duplex") == 64);
     mux.detachOutput(&out);
-    // Last LL detach: restore.
-    REQUIRE(backend.bufferSizeRequests().size() == 2);
-    REQUIRE(backend.bufferSizeRequests().back().applied == 1024);
+    // Last requester detaches — restore via releaseExclusive.
+    REQUIRE(backend.bufferSizeRequests().size() == 1);
+    REQUIRE(backend.currentBufferFrameSize("duplex") == 1024);
 }

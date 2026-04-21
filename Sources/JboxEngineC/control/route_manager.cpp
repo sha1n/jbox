@@ -640,7 +640,21 @@ jbox_error_code_t RouteManager::attemptStart(RouteRecord& r) {
         r.source_uid,
         src->input_channel_count,
         src->output_channel_count);
-    if (!src_mux.attachInput(&r, &inputIOProcCallback, &r, (r.latency_mode > 0))) {
+    // Mux-path buffer target: only non-zero when the route opted into
+    // a latency tier. Honours the per-route override when supplied,
+    // otherwise falls back to the mux's 64-frame default for low /
+    // performance tiers. The mux will claim exclusive (hog) ownership
+    // of the device on the 0→1 transition so the request lands even
+    // against apps holding the device at a larger size.
+    constexpr std::uint32_t kMuxDefaultBufferTarget = 64;
+    const std::uint32_t mux_buffer_target =
+        r.latency_mode > 0
+            ? (r.buffer_frames_override > 0
+                   ? r.buffer_frames_override
+                   : kMuxDefaultBufferTarget)
+            : 0;
+
+    if (!src_mux.attachInput(&r, &inputIOProcCallback, &r, mux_buffer_target)) {
         destroyMuxIfUnused(r.source_uid);
         releaseRouteResources(r);
         r.state = JBOX_ROUTE_STATE_ERROR;
@@ -656,7 +670,7 @@ jbox_error_code_t RouteManager::attemptStart(RouteRecord& r) {
         r.dest_uid,
         dst->input_channel_count,
         dst->output_channel_count);
-    if (!dst_mux.attachOutput(&r, &outputIOProcCallback, &r, (r.latency_mode > 0))) {
+    if (!dst_mux.attachOutput(&r, &outputIOProcCallback, &r, mux_buffer_target)) {
         // releaseRouteResources detaches the already-attached input
         // side and cleans up any mux we created.
         releaseRouteResources(r);

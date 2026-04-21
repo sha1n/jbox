@@ -65,13 +65,22 @@ public:
     // Attach a per-route input callback identified by `key`. Fails and
     // returns false if: `key` is already attached, the device has no
     // input channels, `callback` is null, or the backend refuses to
-    // open the input IOProc on the first attach. When `low_latency`
-    // is true, the mux participates in device-buffer refcounting —
-    // see the note on buffer-size shrinking below.
+    // open the input IOProc on the first attach.
+    //
+    // `requested_buffer_frames` lets the route participate in the
+    // mux's device-buffer negotiation. 0 means "no opinion" — the
+    // route neither shrinks the buffer nor prevents another route's
+    // shrink request. Non-zero enters this request into the mux's
+    // refcount: on the 0→1 transition the mux claims exclusive
+    // (hog-mode) ownership of the device and requests the minimum
+    // across currently-attached routes; on the 1→0 transition the
+    // exclusive claim is released (which restores the original
+    // buffer size via the backend's snapshot). When multiple routes
+    // attach with different non-zero requests, the smallest wins.
     bool attachInput(void* key,
                      InputIOProcCallback callback,
                      void* user_data,
-                     bool low_latency = false);
+                     std::uint32_t requested_buffer_frames = 0);
 
     // Detach the input callback previously registered with `key`.
     // No-op if `key` is not attached. Blocks the caller for one grace
@@ -82,7 +91,7 @@ public:
     bool attachOutput(void* key,
                       OutputIOProcCallback callback,
                       void* user_data,
-                      bool low_latency = false);
+                      std::uint32_t requested_buffer_frames = 0);
     void detachOutput(void* key);
 
     bool hasAnyInput() const;
@@ -95,13 +104,15 @@ private:
         void*               key = nullptr;
         InputIOProcCallback cb  = nullptr;
         void*               user_data = nullptr;
-        bool                low_latency = false;
+        // 0 = route has no opinion on buffer size. Non-zero takes
+        // part in the mux's min-across-requests refcount.
+        std::uint32_t       requested_buffer_frames = 0;
     };
     struct OutputEntry {
         void*                key = nullptr;
         OutputIOProcCallback cb  = nullptr;
         void*                user_data = nullptr;
-        bool                 low_latency = false;
+        std::uint32_t        requested_buffer_frames = 0;
     };
     using InputList  = std::vector<InputEntry>;
     using OutputList = std::vector<OutputEntry>;
@@ -119,14 +130,16 @@ private:
     void waitForOutputQuiescence();
     void maybeStopDevice();
 
-    // Low-latency refcount — spans both input and output directions
-    // because kAudioDevicePropertyBufferFrameSize is a global device
-    // property, not per-scope. `onLowLatencyAttach` / Detach advance
-    // the counter and, at the 0→1 / 1→0 transitions, ask the backend
-    // to shrink the device buffer (snapshotting the original) or
-    // restore it.
-    void onLowLatencyAttach();
-    void onLowLatencyDetach();
+    // Recompute the min across currently-attached non-zero requests
+    // and push the result through to the backend — spans both input
+    // and output directions because the HAL buffer-frame-size is a
+    // global device property, not per-scope. On the 0→1 transition
+    // the mux claims exclusive (hog-mode) ownership so the request
+    // actually lands even when another app is holding the device at
+    // a larger size. On the 1→0 transition it releases, which
+    // restores the original buffer size from the backend's snapshot.
+    void updateBufferRequest();
+    std::uint32_t currentMinBufferRequest() const;
 
     IDeviceBackend&  backend_;
     std::string      uid_;
@@ -158,10 +171,15 @@ private:
     std::unique_ptr<InputList>  input_list_;
     std::unique_ptr<OutputList> output_list_;
 
-    // Low-latency refcounting state. Both the count and the snapshot
-    // are owned by the control thread only.
-    int           low_latency_count_        = 0;
-    std::uint32_t original_buffer_frames_   = 0;
+    // Buffer-negotiation state — control thread only.
+    // `exclusive_claimed_` tracks whether we currently hold the
+    // backend's exclusive (hog-mode) claim. The backend keeps the
+    // per-device buffer snapshot internally under its claim state,
+    // so the mux doesn't duplicate that storage.
+    bool          exclusive_claimed_      = false;
+    // Last buffer size we asked the backend for. Used to suppress
+    // redundant calls when the min hasn't changed across attaches.
+    std::uint32_t last_requested_frames_  = 0;
 };
 
 }  // namespace jbox::control
