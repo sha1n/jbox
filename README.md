@@ -42,14 +42,15 @@ A typical example: routing a hardware instrument or external sound module into s
 2. **Top-performance real-time engine.** The audio-processing path is written in C++ with strict real-time discipline: no allocations, no locks, no syscalls on the audio thread. Engineered for near-zero added latency.
 3. **UI is replaceable.** The engine is an independent C++ library exposed via a stable public C API. Today's SwiftUI UI is one implementation of that API; it can be rewritten or replaced without touching the engine.
 4. **Do not step on other apps.** Jbox does not create aggregate devices, does not change sample rates, and does not change buffer sizes without explicit user opt-in. Other apps sharing the same hardware are unaffected.
-5. **Personal use first.** v1 runs with free Apple tooling and ad-hoc code signing. No paid Apple Developer Program required. Development works entirely from the command line — the Xcode IDE is never required (though Xcode.app must be installed for its frameworks; see Prerequisites). Distribution to others is possible via an unsigned `.zip` lane with clear Gatekeeper instructions.
+5. **Personal use first.** v1 runs with free Apple tooling and ad-hoc code signing. No paid Apple Developer Program required. Development works entirely from the command line — the Xcode IDE is never required (though Xcode.app must be installed for its frameworks; see Prerequisites). Distribution to others is possible via an unsigned `.dmg` lane with clear Gatekeeper instructions.
 
 ---
 
 ## Documentation
 
 - **[docs/spec.md](./docs/spec.md)** — the authoritative technical specification. Five sections: system architecture, audio engine internals, data model and persistence, UI design, and testing / build / distribution. Read this for design decisions and their rationale.
-- **[docs/plan.md](./docs/plan.md)** — phased implementation plan with concrete tasks. Nine phases from empty repo to v1.0.0 release. Read this to follow or contribute to the implementation.
+- **[docs/plan.md](./docs/plan.md)** — phased implementation plan with concrete tasks. Nine phases from empty repo to v1.0.0 release. Read this to follow or contribute to the implementation; phase statuses are updated as work lands.
+- **[docs/releases.md](./docs/releases.md)** — end-to-end release pipeline walk-through: the version synchronization map, the tag-driven flow, and how to redo a bad release.
 - **This file** — orientation. Scope, principles, documentation map, quick-start.
 
 ---
@@ -324,7 +325,13 @@ If that friction ever matters enough to solve, the next step is joining the paid
 
 ## Status
 
-**Phase 0 — specification.** The design is locked; implementation has not yet begun. See [docs/plan.md](./docs/plan.md) for the phased implementation roadmap.
+**Phase 6 — SwiftUI UI, first slice shipped.** Phases 0–5 are code-complete; the C++ engine, Core Audio backend, drift correction + resampling, and the multi-route RCU dispatcher are all in place. The GUI currently supports add → start → stop → remove routes end-to-end against real Core Audio, with human-readable channel-label pickers in the add-route sheet and live 4 Hz route-status polling. An `os_log`-based logging pipeline (with edge-triggered RT producers) is wired up under subsystem `com.jbox.app`.
+
+Still pending in Phase 6: meters, `MenuBarExtra`, Preferences window, and `XCUITest` flows. The scene editor was consolidated into Phase 7 alongside persistence. Real-hardware acceptance tests (soak, latency, sample-rate mismatch, multi-route sanity) from Phases 3–5 are deferred to the owner's rig — the simulated backend covers their logic.
+
+Release engineering is already operational: pushing a `v*` tag triggers `.github/workflows/release.yml`, which builds an ad-hoc-signed `Jbox.app` (with `JboxEngineCLI` bundled inside) and publishes a drag-to-install `Jbox-<version>.dmg` as a draft pre-release. See [docs/releases.md](./docs/releases.md).
+
+See [docs/plan.md](./docs/plan.md) for the full phased implementation roadmap.
 
 Scope for **v1.0.0** (what the first release will do):
 
@@ -335,7 +342,7 @@ Scope for **v1.0.0** (what the first release will do):
 - Drift correction between independent device clocks.
 - Auto-waiting for missing devices; auto-recovery on device return.
 - SwiftUI main window + menu bar extra + preferences.
-- Ad-hoc signed `.app` for personal use; unsigned `.zip` lane for small-audience sharing.
+- Ad-hoc signed `.app` for personal use; unsigned `.dmg` lane for small-audience sharing.
 
 Explicitly **deferred** beyond v1 (see [docs/spec.md § Appendix A](./docs/spec.md#appendix-a--deferred--out-of-scope) for the full list):
 

@@ -32,8 +32,8 @@
 | 3     | First working route                   | Audio from V31 → Apollo Virtual outputs, end-to-end, with real devices.               | ✅ Code done (`6b74c59`) — manual hardware test deferred |
 | 4     | Drift correction and resampling       | 30-minute soak test on real devices with zero dropouts.                                | ✅ Code done (13 commits from `6e42c74`) — hardware soak deferred |
 | 5     | Multi-route and shared devices        | Three simultaneous routes running, including one that shares a device with another.   | ✅ Code done (4 commits from `a83c4b5`) — real-hardware three-route sanity deferred |
-| 6     | SwiftUI UI                            | User can add / edit / delete / start / stop routes through the GUI.                   | 🚧 First slice landed (4 commits from `7e3e3f8`) — meters, MenuBarExtra, Preferences, scenes still pending |
-| 6+    | Logging pipeline                      | `os_log`-visible events for engine lifecycle, route mutations, and RT dropouts.       | 🚧 Option-B slice landed (drainer + Swift `Logger` wrappers + edge-triggered RT producers). Rotating file sink still pending (Phase 8). |
+| 6     | SwiftUI UI                            | User can add / edit / delete / start / stop routes through the GUI.                   | 🚧 First slice + channel-label pickers landed (7 commits from `7e3e3f8` through `7f778d2`) — meters, MenuBarExtra, Preferences, scenes still pending |
+| 6+    | Logging pipeline                      | `os_log`-visible events for engine lifecycle, route mutations, and RT dropouts.       | 🚧 Option-B slice landed (drainer + Swift `Logger` wrappers + edge-triggered RT producers). Coverage closed in `7f778d2`. Rotating file sink still pending (Phase 8). |
 | 7     | Persistence, scenes, launch-at-login  | Relaunching the app restores configured routes and scenes.                             | ⏳ Pending |
 | 8     | Packaging and installation            | `Jbox.app` runs from `/Applications` on a clean user account.                          | ⏳ Pending |
 | 9     | Release hardening                     | v1.0.0 tagged and published to GitHub Releases.                                        | ⏳ Pending |
@@ -95,7 +95,7 @@ Scripts:
 - [x] `scripts/rt_safety_scan.sh` — scans `Sources/JboxEngineC/rt/` for banned symbols (allocators, locks, dispatch calls, non-RT-safe logging, smart pointer construction). Bash-3.2 compatible (macOS default shell). Clean pass on an empty `rt/`.
 - [x] `scripts/bundle_app.sh` — **fully functional** (not a placeholder): creates `build/Jbox.app`, generates `Info.plist`, copies the executable, ad-hoc signs with Hardened Runtime. Overshot the original plan; good as-is.
 - [x] `scripts/build_release.sh` — wraps `swift build -c release` + `bundle_app.sh`. Works end-to-end.
-- [x] `scripts/package_unsigned_release.sh` — placeholder stub (exits zero with a notice). Full implementation in Phase 8.
+- [x] `scripts/package_unsigned_release.sh` — started life as a placeholder stub in Phase 1. Real implementation (DMG with `.app`, `Applications` symlink, uninstaller, `READ-THIS-FIRST.txt`) landed in Phase 5 timeframe under `64c6fdd` so the release workflow could ship an alpha DMG. See Phase 8 tasks below for the remaining rotating-file-sink work; the DMG packaging itself is complete.
 - [x] `scripts/run_app.sh` — builds, bundles, and launches the `.app` locally via `open`.
 
 CI:
@@ -307,7 +307,7 @@ Phase 5 summary of deviations:
 
 ## Phase 6 — SwiftUI UI
 
-**Status:** 🚧 First slice landed (4 commits: `7e3e3f8`..`3704846`). The app now has a working main window, add-route sheet, row-level start/stop/remove actions, and live 4 Hz status polling — you can add → start → stop → remove routes entirely from the GUI, against the real Core Audio engine. Meters, MenuBarExtra, Preferences, scene editor, and the XCUITest flows are not implemented yet; scene editor is being pushed into Phase 7 next to persistence (a scene editor without durable state is a UX pothole). The bridge API has not changed.
+**Status:** 🚧 First slice landed (4 commits: `7e3e3f8`..`3704846`), followed by the logging pipeline slice (`7684034`), channel-label pickers in the add-route sheet (`ddb1e7d`), and a coverage-closure pass (`7f778d2`). The app has a working main window, add-route sheet with per-channel label pickers, row-level start/stop/remove actions, and live 4 Hz status polling — you can add → start → stop → remove routes entirely from the GUI, against the real Core Audio engine. Meters, MenuBarExtra, Preferences, scene editor, and the XCUITest flows are not implemented yet; scene editor is being pushed into Phase 7 next to persistence (a scene editor without durable state is a UX pothole). The bridge API picked up one additive symbol (`jbox_engine_enumerate_device_channels` / `jbox_channel_list_free`); ABI version unchanged (additive is MINOR per [spec.md § 1.6](./spec.md#16-versioning-of-the-bridge-api)).
 
 A **logging pipeline slice** also landed alongside the UI first-slice (unplanned but necessary for user-visible diagnostics): `LogDrainer` now drains `DefaultRtLogQueue` into `os_log` under subsystem `com.jbox.app`, RT callbacks push edge-triggered events on underrun / overrun / channel-mismatch, control-side code paths log route lifecycle and errors directly. Swift uses `Logger` wrappers (`JboxLog`) sharing the same subsystem. The rotating file sink in `~/Library/Logs/Jbox/` described in [spec.md § 2.9](./spec.md#29-rt-safe-logging) is **not yet implemented** — deferred to Phase 8 alongside packaging. See Phase 8 tasks below.
 
@@ -334,15 +334,15 @@ Main window:
 - [x] `NavigationSplitView` layout: sidebar (currently just "All Routes" — Scenes row lands with Phase 7 persistence) + detail list of routes with empty-state fallback.
 - [x] Route row view: status glyph, display name, source → destination / channel-count summary, counters (produced / consumed / underruns), Start/Stop and Remove buttons.
 - [x] Route editor sheet: device pickers (direction-filtered), dynamic channel-mapping editor (1-indexed display, constrained steppers), client-side validation mirroring the v1 ChannelMapper rules, engine-side errors surfaced inline.
-- [ ] **Human-readable channel labels in the mapping editor.** Core Audio exposes per-channel names via `kAudioObjectPropertyElementName` (scope = input / output, element = 1..N). Devices that bother to populate it (UA Apollo, MOTU, etc.) return labels like `Monitor L`, `Virtual 1`, `ADAT 3`; simpler devices return empty, in which case the UI falls back to numeric labels. Tasks:
-  - [ ] Extend `IDeviceBackend` with `channelNames(uid, direction)` returning `std::vector<std::string>` (one entry per channel, possibly empty strings).
-  - [ ] `CoreAudioBackend::channelNames`: query `kAudioObjectPropertyElementName` per element, convert `CFStringRef` → `std::string`, trim empties.
-  - [ ] `SimulatedBackend::channelNames`: test seam — returns either a test-provided map or empty vectors.
-  - [ ] Bridge: `jbox_engine_enumerate_device_channels(engine, uid, direction, err)` returning a heap-allocated `jbox_channel_list_t` (paired `jbox_channel_list_free`). New symbol; appending is MINOR ABI.
-  - [ ] Swift wrapper: `Engine.enumerateChannels(uid:direction:) throws -> [String]`.
-  - [ ] `EngineStore`: per-(uid, direction) cache, invalidated on `refreshDevices()`.
-  - [ ] `AddRouteSheet`: replace the channel steppers with `Picker`s rendering `"Ch N · <name>"` when a name is present, `"Ch N"` when not.
-  - [ ] Tests: bridge-level round-trip through `SimulatedBackend`; Swift-side test that the Store cache invalidates on refresh.
+- [x] **Human-readable channel labels in the mapping editor.** Core Audio exposes per-channel names via `kAudioObjectPropertyElementName` (scope = input / output, element = 1..N). Devices that bother to populate it (UA Apollo, MOTU, etc.) return labels like `Monitor L`, `Virtual 1`, `ADAT 3`; simpler devices return empty, in which case the UI falls back to numeric labels. Landed in `ddb1e7d`, coverage closed in `7f778d2`. Sub-tasks:
+  - [x] Extend `IDeviceBackend` with `channelNames(uid, direction)` returning `std::vector<std::string>` (one entry per channel, possibly empty strings).
+  - [x] `CoreAudioBackend::channelNames`: query `kAudioObjectPropertyElementName` per element, convert `CFStringRef` → `std::string`, trim empties.
+  - [x] `SimulatedBackend::channelNames`: test seam — returns either a test-provided map or empty vectors.
+  - [x] Bridge: `jbox_engine_enumerate_device_channels(engine, uid, direction, err)` returning a heap-allocated `jbox_channel_list_t` (paired `jbox_channel_list_free`). New symbol; appending is MINOR ABI.
+  - [x] Swift wrapper: `Engine.enumerateChannels(uid:direction:) throws -> [String]`.
+  - [x] `EngineStore`: per-(uid, direction) cache, invalidated on `refreshDevices()`.
+  - [x] `AddRouteSheet`: channel steppers replaced with `Picker`s rendering `"Ch N · <name>"` when a name is present, `"Ch N"` when not (display via `ChannelLabel`).
+  - [x] Tests: bridge-level round-trip through `SimulatedBackend` (`bridge_api_test.cpp`); Swift-side cache-invalidation test (`EngineStoreTests.swift`); label formatter tests (`ChannelLabelTests.swift`); RT-producer / drainer coverage in `logging_pipeline_test.cpp`.
 - [ ] Scene editor sheet. **Deferred to Phase 7** — scenes only make sense with persistence.
 - [ ] Preferences window (`Settings` scene) with three tabs. **Pending.**
 
@@ -412,7 +412,7 @@ Testing:
 **Exit criteria.**
 - `scripts/bundle_app.sh` produces a valid `Jbox.app` that runs when dragged to `/Applications`.
 - `scripts/build_release.sh` runs the full build, bundles, ad-hoc-signs, and leaves a ready-to-use `.app`.
-- `scripts/package_unsigned_release.sh` produces a `.zip` containing the app and a `READ-THIS-FIRST.txt`.
+- `scripts/package_unsigned_release.sh` produces a `.dmg` containing the app, an `Applications` symlink, an `Uninstall Jbox.command`, and a `READ-THIS-FIRST.txt`. **(Already landed early in `64c6fdd`; leave as-is unless the layout needs revisiting.)**
 - Smoke test on a clean macOS user account: unzip → drag to Applications → right-click → Open → Gatekeeper dialog → Open → app launches → microphone permission dialog → grant → app works.
 
 **Tasks.**
@@ -425,7 +425,7 @@ Scripts:
   - Copy `Jbox.icns` → `Contents/Resources/`.
   - `codesign --sign - --force --options runtime Jbox.app` (ad-hoc signing with Hardened Runtime).
 - [ ] `scripts/build_release.sh` — convenience wrapper: `swift build -c release` + `bundle_app.sh`.
-- [ ] `scripts/package_unsigned_release.sh` — zips `Jbox.app` plus `READ-THIS-FIRST.txt` into `Jbox-<version>.zip`.
+- [x] `scripts/package_unsigned_release.sh` — builds `Jbox-<version>.dmg` containing the `.app`, an `Applications` symlink, an `Uninstall Jbox.command`, and a `READ-THIS-FIRST.txt`. *(Landed early in `64c6fdd` so the release workflow could ship an alpha DMG.)*
 - [ ] `scripts/run_app.sh` — build + bundle + `open build/Jbox.app`.
 
 Assets:
@@ -445,7 +445,7 @@ Logging — rotating file sink (completes [spec.md § 2.9](./spec.md#29-rt-safe-
 - [ ] Decide whether `.app`'s `Contents/MacOS/Jbox` and the CLI share the same log file (likely yes) or separate by process (noisier but clearer).
 
 Testing:
-- [ ] Fresh-user smoke test: create a new macOS user account, download the `.zip`, follow the `READ-THIS-FIRST.txt`, verify the app runs and a test route works.
+- [ ] Fresh-user smoke test: create a new macOS user account, download the `.dmg`, follow the `READ-THIS-FIRST.txt`, verify the app runs and a test route works.
 
 ---
 
@@ -457,7 +457,7 @@ Testing:
 
 **Exit criteria.**
 - All release-gate tests (see [spec.md § 5.6](./spec.md#56-release-gates)) pass.
-- `v1.0.0` tag exists; GitHub Releases draft populated with `Jbox-1.0.0.zip` and the `READ-THIS-FIRST.txt`.
+- `v1.0.0` tag exists; GitHub Releases draft populated with `Jbox-1.0.0.dmg` (ad-hoc signed, not notarized).
 - `docs/testing/soak.md`, `docs/testing/latency.md`, `docs/testing/stress.md` document the real-hardware test procedures so future releases are reproducible.
 
 **Tasks.**
@@ -472,14 +472,14 @@ CI release pipeline:
   - Full build in release mode.
   - Run all automated tests.
   - Run `build_release.sh` and `package_unsigned_release.sh`.
-  - Upload `.zip` as a draft release asset.
+  - Upload `.dmg` as a draft pre-release asset. **(Already landed in `64c6fdd` / `release.yml`.)**
 - [ ] Release checklist in `.github/ISSUE_TEMPLATE/release.md` covering the release-gate items from the spec.
 
 Final polish:
 - [ ] Review and update all three docs (`README.md`, `spec.md`, `plan.md`) for anything that changed during implementation.
 - [ ] Scan all source files for stale TODOs / FIXMEs; address or file follow-up issues.
 - [ ] Verify `LICENSE` has been decided and committed.
-- [ ] Smoke test the release `.zip` from GitHub on a fresh user account.
+- [ ] Smoke test the release `.dmg` from GitHub on a fresh user account.
 
 Tagging:
 - [ ] Tag `v1.0.0` on `master`.

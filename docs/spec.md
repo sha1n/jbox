@@ -39,7 +39,7 @@ The motivating workflow is routing two output channels of a Roland V31 USB sound
 2. **Top-performance real-time engine.** The audio-processing path is written in C++ with strict real-time discipline: no allocations, no locks, no syscalls on the audio thread.
 3. **UI is replaceable.** The engine is an independent library with a stable public C API. The entire v1 SwiftUI UI could be replaced by a CLI, a web UI, an AppKit UI, or anything else, without touching the engine.
 4. **Do not step on other apps.** Jbox does not create aggregate devices, does not change device sample rates, and does not change device buffer sizes without explicit user opt-in. Other apps sharing the same hardware are unaffected by Jbox's presence.
-5. **Personal use first.** v1 does not require a paid Apple Developer Program subscription, does not require anyone to use the Xcode IDE, and does not require Mac App Store distribution. Xcode.app must be installed for its frameworks (see § 5.2 for details), but development can happen entirely from the command line in any editor. The build produces an ad-hoc-signed `.app` that runs on the user's Mac, and optionally packages an unsigned `.zip` for sharing with a small audience (with right-click → Open Gatekeeper instructions).
+5. **Personal use first.** v1 does not require a paid Apple Developer Program subscription, does not require anyone to use the Xcode IDE, and does not require Mac App Store distribution. Xcode.app must be installed for its frameworks (see § 5.2 for details), but development can happen entirely from the command line in any editor. The build produces an ad-hoc-signed `.app` that runs on the user's Mac, and optionally packages an unsigned `.dmg` for sharing with a small audience (with right-click → Open Gatekeeper instructions).
 
 ---
 
@@ -699,53 +699,72 @@ jbox/
 ├── README.md                  ← project orientation (GitHub landing page)
 ├── docs/
 │   ├── spec.md                ← this file
-│   └── plan.md                ← phased implementation plan
+│   ├── plan.md                ← phased implementation plan
+│   └── releases.md            ← release pipeline walk-through
 ├── Package.swift              ← single SPM manifest, root of the build
+├── Makefile                   ← convenience wrappers over scripts/
 ├── Sources/
 │   ├── JboxEngineC/
 │   │   ├── include/
-│   │   │   └── jbox_engine.h  ← public C API
-│   │   ├── rt/                ← real-time code (statically scanned)
-│   │   │   ├── ring_buffer.hpp
-│   │   │   ├── ring_buffer.cpp
-│   │   │   ├── rt_log_queue.hpp
-│   │   │   ├── ioproc_dispatch.hpp
-│   │   │   └── ioproc_dispatch.cpp
-│   │   └── control/
-│   │       ├── engine.cpp
-│   │       ├── device_manager.cpp
-│   │       ├── route_manager.cpp
-│   │       ├── drift_tracker.cpp
-│   │       └── ...
+│   │   │   └── jbox_engine.h       ← public C API + ABI version
+│   │   ├── rt/                     ← real-time code (statically scanned)
+│   │   │   ├── ring_buffer.hpp         (header-only; caller owns storage)
+│   │   │   ├── rt_log_queue.hpp        (header-only; templated on capacity)
+│   │   │   ├── rt_log_codes.hpp        (event-code constants)
+│   │   │   ├── atomic_meter.hpp
+│   │   │   └── audio_converter_wrapper.{hpp,cpp}
+│   │   └── control/                ← non-RT engine (allocations, logging sinks)
+│   │       ├── engine.{hpp,cpp}        ← facade; owns DeviceManager + RouteManager + LogDrainer
+│   │       ├── bridge_api.cpp          ← implements jbox_engine_*
+│   │       ├── channel_mapper.{hpp,cpp}
+│   │       ├── device_backend.hpp      ← IDeviceBackend abstraction
+│   │       ├── core_audio_backend.{hpp,cpp}
+│   │       ├── simulated_backend.{hpp,cpp}   ← deterministic test backend
+│   │       ├── device_manager.{hpp,cpp}
+│   │       ├── device_io_mux.{hpp,cpp}       ← RCU-style per-device active-route list
+│   │       ├── route_manager.{hpp,cpp}
+│   │       ├── drift_tracker.{hpp,cpp}       ← PI controller state
+│   │       ├── drift_sampler.{hpp,cpp}       ← ~100 Hz sampler thread
+│   │       └── log_drainer.{hpp,cpp}         ← consumer thread; os_log sink
 │   ├── JboxEngineSwift/
-│   │   └── JboxEngine.swift   ← Swift wrapper over C API
+│   │   ├── JboxEngine.swift        ← Swift wrapper over C API
+│   │   ├── EngineStore.swift       ← @Observable device + route store (polling, caching)
+│   │   ├── ChannelLabel.swift      ← "Ch N · <name>" formatter
+│   │   └── JboxLog.swift           ← os.Logger wrappers (app / engine / ui categories)
 │   ├── JboxEngineCLI/
-│   │   └── main.swift         ← CLI harness
-│   └── JboxApp/
-│       ├── JboxApp.swift      ← @main App
-│       ├── Model/
-│       ├── Views/
-│       ├── ViewModels/
-│       ├── Persistence/
-│       └── Resources/
-│           ├── Info.plist.in
-│           └── Jbox.icns
+│   │   └── main.swift              ← CLI harness (`--list-devices`, `--route`)
+│   └── JboxApp/                    ← flat for now; Model/ Views/ Persistence/ land in Phases 6–7
+│       ├── JboxApp.swift           ← @main App + engine bootstrap
+│       ├── RouteListView.swift
+│       └── AddRouteSheet.swift
 ├── Tests/
-│   ├── JboxEngineTests/       ← C++ unit tests
-│   ├── JboxEngineIntegrationTests/  ← C++ simulation harness tests
-│   └── JboxAppTests/
+│   ├── JboxEngineCxxTests/         ← Catch2-based C++ unit + integration tests (executable target)
+│   ├── JboxEngineTests/            ← Swift Testing: bridge + wrapper + EngineStore
+│   ├── JboxEngineIntegrationTests/ ← Swift integration tests (placeholder)
+│   └── JboxAppTests/               ← XCUITest / UI tests (placeholder)
+├── ThirdParty/
+│   └── Catch2/                     ← vendored Catch2 v3 amalgamation
 ├── scripts/
 │   ├── rt_safety_scan.sh
 │   ├── bundle_app.sh
 │   ├── build_release.sh
 │   ├── package_unsigned_release.sh
-│   └── run_app.sh
+│   ├── run_app.sh
+│   └── verify.sh                   ← local mirror of CI
 ├── .github/
 │   └── workflows/
-│       └── ci.yml
+│       ├── ci.yml
+│       └── release.yml             ← tag-driven DMG build + draft GitHub Release
 ├── .gitignore
 └── LICENSE
 ```
+
+Notes that differ from the original spec draft:
+- **`ioproc_dispatch.{hpp,cpp}` was never created.** The RCU active-route list landed in Phase 5 as `control/device_io_mux.{hpp,cpp}` — intentionally in `control/` because the mutation work (allocating new lists, deferring reclamation) is control-thread work, while the IOProc trampolines it installs are the only RT-reachable code from that module.
+- **`ring_buffer.cpp` was never created.** The ring buffer is header-only; callers provide the backing storage so the class itself stays allocation-free and trivially header-placeable in `rt/`.
+- **No `Sources/JboxApp/Resources/Info.plist.in`.** `scripts/bundle_app.sh` emits the `Info.plist` inline via heredoc (see [docs/releases.md](./releases.md) for the version flow). If the plist grows complex, a template file is the natural refactor.
+- **`Sources/JboxApp/` is flat.** `Model/`, `Views/`, `Persistence/` appear only when Phases 6 (meters, preferences) and 7 (persistence, scenes) need them.
+- **`release.yml`** (tag-driven) lives alongside `ci.yml`; tag-push builds an ad-hoc-signed DMG and creates a draft pre-release GitHub Release.
 
 ### 5.4 Continuous integration
 
@@ -760,9 +779,11 @@ jbox/
 
 **On release tag `vX.Y.Z`:**
 1. Full build in release mode.
-2. `scripts/build_release.sh` — runs `bundle_app.sh`, produces ad-hoc-signed `Jbox.app`.
-3. `scripts/package_unsigned_release.sh` — packages `Jbox.app` plus a `READ-THIS-FIRST.txt` with Gatekeeper instructions into `Jbox-X.Y.Z.zip`.
-4. Upload `Jbox-X.Y.Z.zip` to GitHub Releases (draft by default; promoted manually).
+2. `scripts/build_release.sh` — runs `bundle_app.sh`, produces ad-hoc-signed `Jbox.app` with the `JboxEngineCLI` executable bundled at `Contents/MacOS/JboxEngineCLI`.
+3. `scripts/package_unsigned_release.sh` — wraps the `.app`, the `Uninstall Jbox.command`, and a `READ-THIS-FIRST.txt` into a drag-to-install `Jbox-X.Y.Z.dmg`.
+4. Upload `Jbox-X.Y.Z.dmg` to GitHub Releases (draft pre-release by default; promoted manually).
+
+See [docs/releases.md](./releases.md) for the end-to-end release walk-through, including the version-synchronization map.
 
 No CI secrets for code signing / notarization are required — v1 does not use Developer ID.
 
@@ -774,16 +795,17 @@ No CI secrets for code signing / notarization are required — v1 does not use D
 - First launch may prompt for microphone/audio access (expected); the user grants it.
 
 **Secondary mode — small-audience distribution, unsigned.**
-- `scripts/package_unsigned_release.sh` produces `Jbox-X.Y.Z.zip` containing:
-  - `Jbox.app` (ad-hoc signed)
-  - `READ-THIS-FIRST.txt` with clear instructions:
+- `scripts/package_unsigned_release.sh` produces `Jbox-X.Y.Z.dmg` containing:
+  - `Jbox.app` (ad-hoc signed; CLI bundled inside at `Contents/MacOS/JboxEngineCLI`)
+  - `Applications` symlink (drag-to-install target)
+  - `Uninstall Jbox.command` (double-click to remove deployed files)
+  - `READ-THIS-FIRST.txt` with Gatekeeper + CLI-usage instructions:
     > To open Jbox for the first time on your Mac:
-    > 1. Unzip this file.
-    > 2. Drag Jbox.app into your Applications folder.
-    > 3. Right-click (or ⌃-click) Jbox.app and choose **Open**.
-    > 4. Click **Open** in the Gatekeeper confirmation dialog.
-    > 5. You only need to do this once. Subsequent launches work normally.
-- Share via GitHub Releases, email attachment, or any other mechanism.
+    > 1. Mount the DMG and drag Jbox.app into the Applications symlink.
+    > 2. Right-click (or ⌃-click) Jbox.app in /Applications and choose **Open**.
+    > 3. Click **Open** in the Gatekeeper confirmation dialog.
+    > 4. You only need to do this once. Subsequent launches work normally.
+- Share via GitHub Releases (draft auto-populated on tag push), email attachment, or any other mechanism.
 - Recipients must trust the source — there is no notarization chain.
 
 **Future modes (not v1).**
@@ -799,7 +821,7 @@ Before tagging a release:
 2. RT-safety scan clean.
 3. Device-level soak test (≥ 30 minutes with a real hardware setup) passes with zero dropouts.
 4. Latency measurement within budget (see Section 2.5 / 2.6).
-5. Manual smoke test on a clean macOS 15 user account: unzip the `.app`, approve Gatekeeper, create a test route, start it, verify audio flows. Covers the full first-run experience end-to-end.
+5. Manual smoke test on a clean macOS 15 user account: mount the DMG, drag the `.app` to Applications, approve Gatekeeper, create a test route, start it, verify audio flows. Covers the full first-run experience end-to-end.
 
 ### 5.7 Deferred to future versions
 
@@ -807,7 +829,7 @@ Before tagging a release:
 - **Developer ID signing and Apple notarization** — waiting until there's a real audience to sign for.
 - **Mac App Store distribution** — architecturally ruled out.
 - **Homebrew cask** — a natural future distribution vector once notarized.
-- **Installer package (`.pkg`)** instead of a `.zip` with a `.app` — a `.pkg` offers a cleaner install experience (including `/Applications` placement) but requires signing to be smooth; deferred with signing.
+- **Installer package (`.pkg`)** instead of a `.dmg` with a `.app` — a `.pkg` offers a cleaner install experience (fully automated `/Applications` placement, no drag step) but requires signing to be smooth; deferred with signing.
 
 ---
 
