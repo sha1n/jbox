@@ -30,7 +30,7 @@ The motivating workflow is routing two output channels of a Roland V31 USB sound
 
 - **Not a mixer.** Jbox does 1:N channel mapping (fan-out allowed). No summing / fan-in, no per-channel gain, no mute.
 - **Not a DAW.** No recording, no plugins, no timeline, no MIDI.
-- **Not a virtual audio driver.** Jbox does not create devices that other apps see. It routes between existing Core Audio devices.
+- **Not a virtual audio driver in v1.** Jbox v1 does not create devices that other apps see — it routes between existing Core Audio devices. A userspace HAL plugin that publishes Jbox as a selectable input / output device is a planned post-v1 feature (see § 2.13 and Appendix A); v1 scope remains device-to-device routing only.
 - **Not a broadcast router.** No network audio (Dante, AVB, NDI), no IP streaming.
 
 ### Core design principles
@@ -282,6 +282,8 @@ The trade-off is inherent to setpoint size: drain headroom before underrun equal
 
 Note: the HAL buffer-frame-size property is visible to every process. Other applications using the same device observe the buffer change for the duration of the route's lifetime; when the route stops and the mux releases exclusive ownership, those apps reconnect and see the restored size. This is documented in the UI copy for the Performance tier.
 
+**Device sharing (hog-mode opt-out).** Hog-mode ownership is what guarantees the requested buffer size actually lands, but it also disconnects every other client of the device for the route's lifetime — Music, browsers, conferencing apps playing through the same device go silent until the route stops. For users who prefer coexistence over a guaranteed small buffer, Jbox exposes a per-route `share_device` flag (default governed by a global preference). When set, the route skips `claimExclusive` entirely and takes the shared-client path that already exists as the fall-through when hog-mode acquisition fails: the route runs at whatever buffer size the HAL currently has (driven by the loudest shared-mode client), and the Performance-tier direct-monitor fast path is unavailable — the UI degrades those tiers to Low latency for the affected route. The flag is advisory when the route is the sole client of the device (no other app contests hog mode, and the buffer request lands either way) and load-bearing when it is not. Engine-side the flag is a single bit on the route record gating the existing `dm_.backend().claimExclusive(...)` call; clients pass it through a new field in `RouteConfig`, which requires a `JBOX_ENGINE_ABI_VERSION` MINOR bump and matching additive symbols for the global default.
+
 ### 2.8 Metering
 
 - Each route has a `MeterArray` — a small contiguous `std::atomic<float>` buffer sized to `max(sourceChannels.size(), destChannels.size())`.
@@ -382,6 +384,7 @@ The engine computes this once at `startRoute` (no RT-thread cost) and surfaces i
 - **Per-route gain and mute.** Would require a small DSP block in the engine; deferred until the user sees a concrete need.
 - **Internal CPU budget telemetry** (percentage of audio cycle used per callback). Nice to have; not required for v1.
 - **Alternative resampler backends** (libsamplerate, SoXr). Apple `AudioConverter` is sufficient; revisit if quality or performance ever disappoints.
+- **Virtual Core Audio device (Jbox as a selectable input / output).** A userspace HAL plugin (`.driver` bundle installed into `/Library/Audio/Plug-Ins/HAL/`) that publishes Jbox as a Core Audio device; other applications can then target it as an output (or record from it as an input), and the engine treats the virtual device as an ordinary source / destination UID. Requires a second signed binary with its own lifecycle, an installer path with admin authorization (the HAL plugin directory is system-owned and not writable from an ad-hoc-signed `.app`), a new engine contract for "source UID backed by an in-process virtual device" that skips the HAL `AudioDeviceIOProc` path and feeds samples through a direct SPSC ring, and a packaging story that survives uninstall cleanly. Complements the per-route hog-mode opt-out rather than replacing it: the opt-out lets other apps keep using a shared real device, the virtual device lets other apps deliberately route *through* Jbox. Not on the v1 path; design work tracked in the plan's deferred section. DriverKit kernel extensions are a separate matter and remain permanently out of scope — a userspace HAL plugin is sufficient.
 
 ---
 
@@ -913,8 +916,8 @@ Consolidated list of items explicitly deferred from v1, for easy cross-reference
 - `.pkg` installer.
 
 **Virtual devices.**
-- Creating a virtual Core Audio device (as BlackHole / Loopback do). Jbox routes between existing devices only.
-- DriverKit extensions.
+- Userspace HAL plugin that publishes Jbox as a Core Audio device (as BlackHole / Loopback do). Deferred from v1, planned post-v1 — see § 2.13 for the engine-side contract and the plan's deferred section for the phase checklist. v1 routes between existing devices only.
+- DriverKit kernel extensions. Permanently out of scope — a userspace HAL plugin covers the same use cases without the code-signing burden.
 
 **UI scope extensions.**
 - Localization.
