@@ -3,9 +3,11 @@ import JboxEngineSwift
 
 /// Modal sheet presented from the main window's "+" toolbar button.
 /// Picks source and destination devices, edits a channel mapping as
-/// a list of 1-indexed pairs (v1 rules: non-empty, no duplicate src,
-/// no duplicate dst), and submits to `store.addRoute`. Engine-side
-/// validation errors are surfaced inline.
+/// a list of 1-indexed pairs, and submits to `store.addRoute`.
+/// Mapping rules (docs/spec.md § 3.1): non-empty; no duplicate dst
+/// (fan-in / summing is deferred per Appendix A). Duplicate src is
+/// **allowed** — it produces fan-out, one source feeding multiple
+/// destinations. Engine-side validation errors are surfaced inline.
 struct AddRouteSheet: View {
     let store: EngineStore
     let onClose: () -> Void
@@ -49,7 +51,6 @@ struct AddRouteSheet: View {
         if sourceUID.isEmpty { return "Pick a source device." }
         if destUID.isEmpty   { return "Pick a destination device." }
         if pairs.isEmpty     { return "Add at least one channel pair." }
-        var seenSrc = Set<Int>()
         var seenDst = Set<Int>()
         for (i, p) in pairs.enumerated() {
             if p.src < 0 || p.src >= srcChannels {
@@ -58,11 +59,11 @@ struct AddRouteSheet: View {
             if p.dst < 0 || p.dst >= dstChannels {
                 return "Row \(i + 1): destination channel out of range."
             }
-            if !seenSrc.insert(p.src).inserted {
-                return "Row \(i + 1): source channel \(p.src + 1) is already used."
-            }
+            // Duplicate src is fine (fan-out: one source feeding many
+            // destinations). Duplicate dst is still rejected —
+            // summing / fan-in is deferred per spec.md Appendix A.
             if !seenDst.insert(p.dst).inserted {
-                return "Row \(i + 1): destination channel \(p.dst + 1) is already used."
+                return "Row \(i + 1): destination channel \(p.dst + 1) is already in use."
             }
         }
         return nil

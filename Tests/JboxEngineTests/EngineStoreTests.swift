@@ -60,18 +60,27 @@ struct EngineStoreTests {
         #expect(store.routes.isEmpty)
     }
 
-    @Test("addRoute with a duplicate source edge is rejected before reaching the engine list")
-    func addRouteDuplicateSrc() throws {
+    @Test("addRoute with a duplicate destination edge is rejected before reaching the engine list")
+    func addRouteDuplicateDst() throws {
+        // Phase 6 refinement #1 flipped the duplicate-src rule —
+        // fan-out is now accepted. Fan-in (duplicate dst) is the
+        // remaining validator rejection.
         let store = try makeStore()
         store.refreshDevices()
         let src = store.devices.first(where: { $0.directionInput })!
         let dst = store.devices.first(where: { $0.directionOutput })!
 
+        // Need both a second input channel and a shared dst to
+        // isolate the dst-duplication case. Skip if the CI runner
+        // can't furnish them.
+        guard src.inputChannelCount >= 2 else {
+            return
+        }
         let cfg = RouteConfig(
             source: DeviceReference(device: src),
             destination: DeviceReference(device: dst),
             mapping: [ChannelEdge(src: 0, dst: 0),
-                      ChannelEdge(src: 0, dst: 1)]
+                      ChannelEdge(src: 1, dst: 0)]
         )
         do {
             _ = try store.addRoute(cfg)

@@ -77,10 +77,23 @@ TEST_CASE("RouteManager: addRoute rejects empty mapping", "[route_manager]") {
     REQUIRE(err.code == JBOX_ERR_MAPPING_INVALID);
 }
 
-TEST_CASE("RouteManager: addRoute rejects duplicate source channel", "[route_manager]") {
+TEST_CASE("RouteManager: addRoute accepts fan-out (duplicate src)",
+          "[route_manager][fan_out]") {
+    // Phase 6 refinement #1: a single source channel feeding two
+    // destinations is now a supported mapping — the engine happily
+    // accepts it. Fan-in (duplicate dst) still fails at validate().
     Fixture f(4, 4);
     std::vector<ChannelEdge> m{{0, 0}, {0, 1}};
-    RouteManager::RouteConfig cfg{"src", "dst", m, "dup"};
+    RouteManager::RouteConfig cfg{"src", "dst", m, "fan-out"};
+    jbox_error_t err{};
+    REQUIRE(f.rm->addRoute(cfg, &err) != JBOX_INVALID_ROUTE_ID);
+}
+
+TEST_CASE("RouteManager: addRoute rejects duplicate destination channel",
+          "[route_manager]") {
+    Fixture f(4, 4);
+    std::vector<ChannelEdge> m{{0, 0}, {1, 0}};
+    RouteManager::RouteConfig cfg{"src", "dst", m, "fan-in"};
     jbox_error_t err{};
     REQUIRE(f.rm->addRoute(cfg, &err) == JBOX_INVALID_ROUTE_ID);
     REQUIRE(err.code == JBOX_ERR_MAPPING_INVALID);
@@ -340,6 +353,41 @@ TEST_CASE("RouteManager: non-contiguous channel selection",
         REQUIRE(out[fr * 4 + 1] == static_cast<float>(fr) + 100.0f); // dst ch 1 ← src ch 3
         REQUIRE(out[fr * 4 + 2] == 0.0f);
         REQUIRE(out[fr * 4 + 3] == 0.0f);
+    }
+}
+
+TEST_CASE("RouteManager: fan-out replicates one source into multiple destinations",
+          "[route_manager][fan_out][integration]") {
+    // Phase 6 refinement #1 end-to-end check: a single source channel
+    // mapped to two distinct destination channels drives both dst
+    // channels with the same input signal on the same IOProc tick.
+    Fixture f(/*src*/ 2, /*dst*/ 4, /*buf*/ 32);
+
+    // src channel 0 → dst channels 1 AND 3.
+    std::vector<ChannelEdge> m{{0, 1}, {0, 3}};
+    RouteManager::RouteConfig cfg{"src", "dst", m, "fan-out"};
+    jbox_error_t err{};
+    const auto id = f.rm->addRoute(cfg, &err);
+    REQUIRE(id != JBOX_INVALID_ROUTE_ID);
+    REQUIRE(f.rm->startRoute(id) == JBOX_OK);
+
+    constexpr std::uint32_t kFrames = 32;
+    std::vector<float> input(kFrames * 2);
+    for (std::uint32_t i = 0; i < kFrames; ++i) {
+        input[i * 2 + 0] = static_cast<float>(i) * 0.01f;  // src ch 0
+        input[i * 2 + 1] = 99.0f;                          // src ch 1 (unmapped — must not leak)
+    }
+
+    std::vector<float> output(kFrames * 4, 0.0f);
+    f.backend->deliverBuffer("src", kFrames, input.data(), nullptr);
+    f.backend->deliverBuffer("dst", kFrames, nullptr, output.data());
+
+    for (std::uint32_t i = 0; i < kFrames; ++i) {
+        const float expected = static_cast<float>(i) * 0.01f;
+        REQUIRE(output[i * 4 + 0] == 0.0f);      // dst ch 0 unmapped
+        REQUIRE(output[i * 4 + 1] == expected);  // dst ch 1 ← src ch 0
+        REQUIRE(output[i * 4 + 2] == 0.0f);      // dst ch 2 unmapped
+        REQUIRE(output[i * 4 + 3] == expected);  // dst ch 3 ← src ch 0 (fan-out replica)
     }
 }
 

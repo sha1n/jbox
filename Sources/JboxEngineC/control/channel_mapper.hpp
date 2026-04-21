@@ -8,14 +8,20 @@
 // v1 invariants enforced here:
 //   1. The edge list is non-empty.
 //   2. Every channel index is non-negative.
-//   3. Each source channel appears at most once.
-//   4. Each destination channel appears at most once.
+//   3. Each destination channel appears at most once.
+//
+// Phase 6 refinement #1 relaxed the earlier "each source channel
+// appears at most once" rule — fan-out (one source feeding several
+// destinations) is supported: the same source sample is written to
+// every mapped destination slot on each IOProc tick, which costs
+// nothing extra on the hot path because the per-output-slot loop
+// already iterates one edge at a time. Fan-in (multiple sources into
+// one destination, requires summing semantics) remains deferred per
+// docs/spec.md Appendix A.
 //
 // Device-level bounds (is channel N present on device X?) are the
 // responsibility of the caller; ChannelMapper only enforces invariants
-// that depend on the edge list alone. Future versions that permit
-// fan-out or fan-in will relax rules (3) and (4) respectively; the
-// ChannelEdge struct itself does not change.
+// that depend on the edge list alone.
 //
 // See docs/spec.md §§ 3.1.2, 3.1.3.
 
@@ -38,7 +44,6 @@ enum class ChannelMapperError {
     kOk = 0,
     kEmpty,                 // edge list was empty
     kNegativeChannel,       // some edge had a negative src or dst
-    kDuplicateSource,       // same src channel appeared more than once
     kDuplicateDestination,  // same dst channel appeared more than once
 };
 
@@ -48,7 +53,7 @@ const char* channelMapperErrorName(ChannelMapperError error) noexcept;
 
 // Validate an edge list. Returns kOk on success, or the first
 // violation encountered. Validation order follows the invariant
-// numbering above (empty → negative → duplicate-src → duplicate-dst).
+// numbering above (empty → negative → duplicate-dst).
 ChannelMapperError validate(std::span<const ChannelEdge> edges);
 
 }  // namespace jbox::control

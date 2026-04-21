@@ -377,10 +377,10 @@ Meters — split into two slices so the diagnostic dots land first:
 
 **Post-Slice-B refinements.** Five queued items captured from the post-Slice-B usage pass. Each is small enough to land in its own commit; none of them invalidate Slice A or Slice B.
 
-1. **Fan-out mapping (1:N).**
-   - [ ] Engine: `ChannelMapper::validate()` drops the "duplicate `src`" rejection; keeps the "duplicate `dst`" rejection (summing / fan-in stays deferred per [spec.md Appendix A](./spec.md#appendix-a--deferred--out-of-scope)). No hot-path change — the scratch-copy / converter / metering loops already iterate per output slot, so a fan-out edge is "just another output channel" whose scratch cell happens to hold the same source sample.
-   - [ ] Tests: new `channel_mapper_test.cpp` case asserting fan-out (two edges with the same `src` but different `dst`) validates as `kOk`; existing "duplicate source rejected" case flips. Add a `route_manager_test.cpp` case through `SimulatedBackend` that injects a known signal on one source channel and asserts it appears on two destination channels.
-   - [ ] UI: `AddRouteSheet` mirror — the client-side validator currently mirrors the old "duplicate source" rule; relax it, keep "duplicate destination" as the only uniqueness check. Update the sheet's inline error copy to "Destination channel already in use."
+1. **Fan-out mapping (1:N).** **Landed.**
+   - [x] Engine: `ChannelMapper::validate()` no longer rejects duplicate `src`. The `kDuplicateSource` enum entry was removed outright (internal C++ only; `JBOX_ERR_MAPPING_INVALID` remains the public error code). Duplicate `dst` is still rejected — fan-in / summing stays deferred per [spec.md Appendix A](./spec.md#appendix-a--deferred--out-of-scope). No hot-path change: the scratch-copy / converter / metering loops already iterate per output slot, so a fan-out edge is "just another output channel" whose scratch cell happens to hold the same source sample.
+   - [x] Tests: the existing `[channel_mapper]` cases flipped — "duplicate source is rejected" → "duplicate source is allowed (fan-out)"; the mixed-duplicates case now reports `kDuplicateDestination` since src-dup no longer errors; new fan-out shape case (1:3). `[route_manager][fan_out][integration]` asserts end-to-end that one src channel mapped to two dst channels produces the same sample on both. `EngineStoreTests.addRouteDuplicateDst` replaces the old duplicate-src case.
+   - [x] UI: `AddRouteSheet`'s client-side validator drops the `seenSrc` check; keeps the `seenDst` rejection with the copy "destination channel … is already in use." Doc comment at the top of the file updated.
    - [ ] Spec already updated: § 1.1, § 2.5 (converter output slot semantics), § 3.1 mapping invariants, § 4.3 editor validation, Appendix A.
 
 2. **Edit existing routes.**

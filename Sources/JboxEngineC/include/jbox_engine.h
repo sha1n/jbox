@@ -151,8 +151,10 @@ typedef struct {
  * Route creation request. Caller-owned; engine copies the referenced
  * strings and mapping array internally. `name` may be NULL.
  *
- * v1 mapping invariants: non-empty; no duplicate src channel; no
- * duplicate dst channel. (See docs/spec.md § 3.1.)
+ * Mapping invariants (see docs/spec.md § 3.1.3): non-empty; no
+ * duplicate dst channel. Duplicate src is permitted — it produces
+ * fan-out, replicating the source sample into every mapped
+ * destination slot.
  *
  * `low_latency` (ABI v3+): when non-zero, the route opts into a
  * tighter ring-buffer sizing. Zero-initialised callers see the safe

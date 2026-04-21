@@ -45,16 +45,26 @@ TEST_CASE("ChannelMapper: negative destination channel is rejected", "[channel_m
     REQUIRE(validate(edges) == ChannelMapperError::kNegativeChannel);
 }
 
-TEST_CASE("ChannelMapper: duplicate source is rejected", "[channel_mapper]") {
-    // Same src channel mapped to two different destinations would be
-    // fan-out; explicitly out of scope in v1.
+TEST_CASE("ChannelMapper: duplicate source is allowed (fan-out)",
+          "[channel_mapper][fan_out]") {
+    // Phase 6 refinement #1: fan-out is supported. The same source
+    // channel may feed multiple destinations — the hot-path loop
+    // iterates per output slot, so a shared src simply replicates the
+    // sample into each mapped dst.
     std::vector<ChannelEdge> edges{{1, 3}, {1, 4}};
-    REQUIRE(validate(edges) == ChannelMapperError::kDuplicateSource);
+    REQUIRE(validate(edges) == ChannelMapperError::kOk);
+}
+
+TEST_CASE("ChannelMapper: one source feeding three destinations",
+          "[channel_mapper][fan_out]") {
+    // Broader fan-out: one-to-many with N = 3.
+    std::vector<ChannelEdge> edges{{0, 0}, {0, 1}, {0, 2}};
+    REQUIRE(validate(edges) == ChannelMapperError::kOk);
 }
 
 TEST_CASE("ChannelMapper: duplicate destination is rejected", "[channel_mapper]") {
     // Two src channels mapped to the same dst would be fan-in (summing);
-    // explicitly out of scope in v1.
+    // explicitly out of scope per docs/spec.md Appendix A.
     std::vector<ChannelEdge> edges{{1, 3}, {2, 3}};
     REQUIRE(validate(edges) == ChannelMapperError::kDuplicateDestination);
 }
@@ -73,11 +83,12 @@ TEST_CASE("ChannelMapper: negative takes precedence over duplicate", "[channel_m
     REQUIRE(validate(edges) == ChannelMapperError::kNegativeChannel);
 }
 
-TEST_CASE("ChannelMapper: duplicate-src takes precedence over duplicate-dst", "[channel_mapper]") {
-    // Both duplicates present simultaneously, but src duplication is
-    // detected first during the sweep.
+TEST_CASE("ChannelMapper: fan-out mixed with duplicate-dst reports dst",
+          "[channel_mapper][fan_out]") {
+    // The {1,3},{1,4} pair is valid fan-out; the trailing {2,3}
+    // collides with the first edge's dst. Duplicate-dst wins.
     std::vector<ChannelEdge> edges{{1, 3}, {1, 4}, {2, 3}};
-    REQUIRE(validate(edges) == ChannelMapperError::kDuplicateSource);
+    REQUIRE(validate(edges) == ChannelMapperError::kDuplicateDestination);
 }
 
 TEST_CASE("ChannelMapper: 32-channel fully-populated mapping passes", "[channel_mapper]") {
@@ -101,7 +112,6 @@ TEST_CASE("ChannelMapper: error names are non-empty for all codes", "[channel_ma
     REQUIRE(std::string_view{channelMapperErrorName(ChannelMapperError::kOk)} == "ok");
     REQUIRE(std::string_view{channelMapperErrorName(ChannelMapperError::kEmpty)}.size() > 0);
     REQUIRE(std::string_view{channelMapperErrorName(ChannelMapperError::kNegativeChannel)}.size() > 0);
-    REQUIRE(std::string_view{channelMapperErrorName(ChannelMapperError::kDuplicateSource)}.size() > 0);
     REQUIRE(std::string_view{channelMapperErrorName(ChannelMapperError::kDuplicateDestination)}.size() > 0);
 }
 
