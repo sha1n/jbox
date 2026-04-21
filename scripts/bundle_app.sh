@@ -64,6 +64,35 @@ chmod +x "${APP_BUNDLE}/Contents/MacOS/${APP_NAME}"
 cp "${SRC_CLI_BINARY}" "${APP_BUNDLE}/Contents/MacOS/${CLI_NAME}"
 chmod +x "${APP_BUNDLE}/Contents/MacOS/${CLI_NAME}"
 
+# Slice the 2048x2048 source PNG into the standard iconset and emit
+# Contents/Resources/Jbox.icns. Uses only macOS built-ins (sips,
+# iconutil) so this works on a clean Mac without extra tooling.
+ICON_SRC="${ROOT_DIR}/assets/jbox-icon.png"
+if [[ ! -f "${ICON_SRC}" ]]; then
+    echo "bundle_app: icon source ${ICON_SRC} not found." >&2
+    exit 1
+fi
+ICONSET_DIR="${BUILD_DIR}/Jbox.iconset"
+rm -rf "${ICONSET_DIR}"
+mkdir -p "${ICONSET_DIR}"
+for spec in "16 icon_16x16.png" \
+            "32 icon_16x16@2x.png" \
+            "32 icon_32x32.png" \
+            "64 icon_32x32@2x.png" \
+            "128 icon_128x128.png" \
+            "256 icon_128x128@2x.png" \
+            "256 icon_256x256.png" \
+            "512 icon_256x256@2x.png" \
+            "512 icon_512x512.png" \
+            "1024 icon_512x512@2x.png"; do
+    size="${spec% *}"
+    name="${spec#* }"
+    sips -z "${size}" "${size}" "${ICON_SRC}" \
+        --out "${ICONSET_DIR}/${name}" >/dev/null
+done
+iconutil -c icns "${ICONSET_DIR}" -o "${APP_BUNDLE}/Contents/Resources/Jbox.icns"
+rm -rf "${ICONSET_DIR}"
+
 # Generate Info.plist.
 cat > "${APP_BUNDLE}/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
@@ -74,6 +103,10 @@ cat > "${APP_BUNDLE}/Contents/Info.plist" <<PLIST
     <string>en</string>
     <key>CFBundleExecutable</key>
     <string>${APP_NAME}</string>
+    <key>CFBundleIconFile</key>
+    <string>Jbox</string>
+    <key>CFBundleIconName</key>
+    <string>Jbox</string>
     <key>CFBundleIdentifier</key>
     <string>${BUNDLE_ID}</string>
     <key>CFBundleInfoDictionaryVersion</key>
