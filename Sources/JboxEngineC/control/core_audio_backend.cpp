@@ -1,6 +1,7 @@
 // core_audio_backend.cpp — Core Audio HAL implementation of IDeviceBackend.
 
 #include "core_audio_backend.hpp"
+#include "audio_buffer_interleave.hpp"
 
 #include <CoreAudio/CoreAudio.h>
 #include <os/log.h>
@@ -163,56 +164,9 @@ std::uint32_t getSafetyOffsetFrames(AudioObjectID device,
 }
 
 // RT thread trampoline. Core Audio invokes this from its audio
-// callback; we must NOT allocate, lock, or syscall here.
-// Read `frame_count` input frames into `scratch` (interleaved) from
-// `inInputData`, interleaving if the device presents non-interleaved
-// per-channel buffers. Returns the frame count actually available.
-std::uint32_t readInputInterleaved(const AudioBufferList* inInputData,
-                                   std::uint32_t channels,
-                                   float* scratch) {
-    if (inInputData == nullptr || inInputData->mNumberBuffers == 0) return 0;
-    if (inInputData->mNumberBuffers == 1 &&
-        inInputData->mBuffers[0].mNumberChannels == channels) {
-        const std::uint32_t frame_count =
-            inInputData->mBuffers[0].mDataByteSize /
-            (sizeof(float) * channels);
-        std::memcpy(scratch, inInputData->mBuffers[0].mData,
-                    frame_count * channels * sizeof(float));
-        return frame_count;
-    }
-    const std::uint32_t per_ch_bytes = inInputData->mBuffers[0].mDataByteSize;
-    const std::uint32_t frame_count = per_ch_bytes / sizeof(float);
-    for (std::uint32_t ch = 0; ch < channels && ch < inInputData->mNumberBuffers; ++ch) {
-        const auto* src = static_cast<const float*>(inInputData->mBuffers[ch].mData);
-        for (std::uint32_t f = 0; f < frame_count; ++f) {
-            scratch[f * channels + ch] = src[f];
-        }
-    }
-    return frame_count;
-}
-
-// De-interleave `frame_count` interleaved frames in `scratch` into
-// `outOutputData`'s per-channel buffers, or memcpy if the device uses
-// interleaved output.
-void writeOutputFromInterleaved(AudioBufferList* outOutputData,
-                                std::uint32_t channels,
-                                std::uint32_t frame_count,
-                                const float* scratch) {
-    if (outOutputData == nullptr || outOutputData->mNumberBuffers == 0) return;
-    if (outOutputData->mNumberBuffers == 1 &&
-        outOutputData->mBuffers[0].mNumberChannels == channels) {
-        std::memcpy(outOutputData->mBuffers[0].mData, scratch,
-                    frame_count * channels * sizeof(float));
-        return;
-    }
-    for (std::uint32_t ch = 0; ch < channels && ch < outOutputData->mNumberBuffers; ++ch) {
-        auto* dst = static_cast<float*>(outOutputData->mBuffers[ch].mData);
-        for (std::uint32_t f = 0; f < frame_count; ++f) {
-            dst[f] = scratch[f * channels + ch];
-        }
-    }
-}
-
+// callback; we must NOT allocate, lock, or syscall here. Interleave
+// / de-interleave helpers live in audio_buffer_interleave.hpp so
+// they can be unit-tested against synthetic AudioBufferLists.
 OSStatus ioProcTrampoline(AudioObjectID /*inDevice*/,
                           const AudioTimeStamp* /*inNow*/,
                           const AudioBufferList* inInputData,
