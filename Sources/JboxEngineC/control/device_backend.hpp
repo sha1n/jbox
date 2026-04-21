@@ -174,6 +174,19 @@ public:
     // `RouteConfig.low_latency`. Non-RT; control thread only.
     virtual std::uint32_t requestBufferFrameSize(
         const std::string& uid, std::uint32_t frames) = 0;
+
+    // Claim exclusive ownership of the device via Core Audio's
+    // `kAudioDevicePropertyHogMode` (this process becomes the
+    // device's only client — other apps sharing it are disconnected
+    // until we release). Returns true on success. Used by the
+    // Performance-mode direct-monitor fast path so the buffer-size
+    // request reliably lands on devices held open by another app
+    // (e.g. Apollo + UAD Console). Non-RT; control thread only.
+    virtual bool claimExclusive(const std::string& uid) = 0;
+
+    // Release exclusive ownership previously acquired via
+    // `claimExclusive`. Safe to call even when not claimed.
+    virtual void releaseExclusive(const std::string& uid) = 0;
 };
 
 }  // namespace jbox::control

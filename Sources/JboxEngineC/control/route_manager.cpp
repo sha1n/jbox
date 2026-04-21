@@ -497,14 +497,24 @@ jbox_error_code_t RouteManager::attemptStart(RouteRecord& r) {
         r.latency_components   = lc;
         r.estimated_latency_us = estimateLatencyMicroseconds(lc);
 
+        // Try to claim exclusive (hog-mode) ownership of the device
+        // before touching its buffer size — with other apps (UAD
+        // Console, system audio, etc.) disconnected we're the only
+        // client and Core Audio's max-across-clients policy collapses
+        // to just our request. This is how DAWs force the buffer to
+        // their preferred size. Failure is non-fatal: we fall through
+        // to the shared path and accept whatever buffer size the HAL
+        // ends up giving us.
+        r.duplex_exclusive_claimed =
+            dm_.backend().claimExclusive(r.source_uid);
+
         // Request a small HAL buffer before opening the IOProc — same
         // target the mux uses for low-latency attachments (64 frames).
         // Snapshot the pre-change value so stopRoute can restore it.
         // On aggregate devices and most HALs the change propagates to
         // member devices; if another app is holding the device at a
-        // larger size Core Audio's max-across-clients policy keeps
-        // the buffer there, and the actual post-change value surfaces
-        // in the latency-component pill.
+        // larger size without hog mode, the buffer stays there and
+        // the actual post-change value surfaces in the pill.
         constexpr std::uint32_t kDuplexBufferTargetFrames = 64;
         const std::uint32_t current_buffer =
             dm_.backend().currentBufferFrameSize(r.source_uid);
@@ -533,6 +543,10 @@ jbox_error_code_t RouteManager::attemptStart(RouteRecord& r) {
                 (void)dm_.backend().requestBufferFrameSize(
                     r.source_uid, r.duplex_original_buffer_frames);
                 r.duplex_original_buffer_frames = 0;
+            }
+            if (r.duplex_exclusive_claimed) {
+                dm_.backend().releaseExclusive(r.source_uid);
+                r.duplex_exclusive_claimed = false;
             }
             r.state = JBOX_ROUTE_STATE_ERROR;
             r.last_error = JBOX_ERR_DEVICE_BUSY;
@@ -673,10 +687,18 @@ void RouteManager::releaseRouteResources(RouteRecord& r) {
             r.duplex_ioproc_id = kInvalidIOProcId;
         }
         dm_.backend().stopDevice(r.source_uid);
+        // Order matters: restore the buffer size first so other apps
+        // that reconnect after we release exclusive ownership see the
+        // original number, then release hog mode so they can actually
+        // reconnect.
         if (r.duplex_original_buffer_frames > 0) {
             (void)dm_.backend().requestBufferFrameSize(
                 r.source_uid, r.duplex_original_buffer_frames);
             r.duplex_original_buffer_frames = 0;
+        }
+        if (r.duplex_exclusive_claimed) {
+            dm_.backend().releaseExclusive(r.source_uid);
+            r.duplex_exclusive_claimed = false;
         }
         r.duplex_mode = false;
     }

@@ -664,6 +664,45 @@ std::uint32_t CoreAudioBackend::currentBufferFrameSize(const std::string& uid) {
     return getBufferFrameSize(it->second);
 }
 
+bool CoreAudioBackend::claimExclusive(const std::string& uid) {
+    auto it = device_ids_.find(uid);
+    if (it == device_ids_.end()) return false;
+    const AudioDeviceID id = it->second;
+
+    AudioObjectPropertyAddress addr{kAudioDevicePropertyHogMode,
+                                    kAudioObjectPropertyScopeGlobal,
+                                    kAudioObjectPropertyElementMain};
+    // Set to our pid; Core Audio atomically swings hog ownership to us
+    // if no other process currently holds it, or fails.
+    pid_t desired = getpid();
+    if (AudioObjectSetPropertyData(id, &addr, 0, nullptr,
+                                   sizeof(desired), &desired) != noErr) {
+        return false;
+    }
+    // Re-read to confirm — the HAL may have atomically written back
+    // a different pid if another claim happened concurrently.
+    pid_t current = -1;
+    UInt32 size = sizeof(current);
+    if (AudioObjectGetPropertyData(id, &addr, 0, nullptr,
+                                   &size, &current) != noErr) {
+        return false;
+    }
+    return current == getpid();
+}
+
+void CoreAudioBackend::releaseExclusive(const std::string& uid) {
+    auto it = device_ids_.find(uid);
+    if (it == device_ids_.end()) return;
+    const AudioDeviceID id = it->second;
+
+    AudioObjectPropertyAddress addr{kAudioDevicePropertyHogMode,
+                                    kAudioObjectPropertyScopeGlobal,
+                                    kAudioObjectPropertyElementMain};
+    pid_t unowned = -1;
+    (void)AudioObjectSetPropertyData(id, &addr, 0, nullptr,
+                                     sizeof(unowned), &unowned);
+}
+
 std::uint32_t CoreAudioBackend::requestBufferFrameSize(const std::string& uid,
                                                       std::uint32_t frames) {
     auto it = device_ids_.find(uid);

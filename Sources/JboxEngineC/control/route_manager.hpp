@@ -98,6 +98,11 @@ struct RouteRecord {
     // restored on stop. 0 means we did not request a shrink (e.g.,
     // the device was already at a small buffer).
     std::uint32_t duplex_original_buffer_frames  = 0;
+    // True iff we successfully claimed Core Audio hog mode on the
+    // device for this route. Released in releaseRouteResources.
+    // Hog mode lets us override a shared buffer size that another
+    // app (e.g. UAD Console holding Apollo at 512) was enforcing.
+    bool          duplex_exclusive_claimed       = false;
 
     std::vector<float> input_scratch;
     std::vector<float> output_scratch;

@@ -89,6 +89,8 @@ public:
     std::uint32_t currentBufferFrameSize(const std::string& uid) override;
     std::uint32_t requestBufferFrameSize(const std::string& uid,
                                          std::uint32_t frames) override;
+    bool claimExclusive(const std::string& uid) override;
+    void releaseExclusive(const std::string& uid) override;
 
     // Test introspection: history of every `requestBufferFrameSize`
     // call against this backend (one entry per call, in order). Lets
@@ -101,6 +103,13 @@ public:
     };
     const std::vector<BufferSizeRequest>& bufferSizeRequests() const {
         return buffer_size_requests_;
+    }
+
+    // Introspection for tests: returns whether `claimExclusive` is
+    // currently held on the device. Unknown UID → false.
+    bool isExclusive(const std::string& uid) const {
+        auto it = devices_.find(uid);
+        return it != devices_.end() && it->second.exclusive_claimed;
     }
 
 private:
@@ -119,6 +128,11 @@ private:
         DuplexIOProcCallback duplex_cb = nullptr;
         void*                duplex_ud = nullptr;
         IOProcId             duplex_id = kInvalidIOProcId;
+
+        // claimExclusive / releaseExclusive state. Tests introspect
+        // via `isExclusive(uid)` to confirm the fast path hogged the
+        // device.
+        bool                 exclusive_claimed = false;
 
         // Test-seeded per-channel names; empty until the test populates
         // them via setChannelNames(). Element index i corresponds to

@@ -213,6 +213,20 @@ std::uint32_t SimulatedBackend::currentBufferFrameSize(const std::string& uid) {
     return it->second.info.buffer_frame_size;
 }
 
+bool SimulatedBackend::claimExclusive(const std::string& uid) {
+    auto it = devices_.find(uid);
+    if (it == devices_.end()) return false;
+    if (it->second.exclusive_claimed) return false;
+    it->second.exclusive_claimed = true;
+    return true;
+}
+
+void SimulatedBackend::releaseExclusive(const std::string& uid) {
+    auto it = devices_.find(uid);
+    if (it == devices_.end()) return;
+    it->second.exclusive_claimed = false;
+}
+
 std::uint32_t SimulatedBackend::requestBufferFrameSize(
     const std::string& uid, std::uint32_t frames) {
     auto it = devices_.find(uid);

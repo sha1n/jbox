@@ -496,6 +496,46 @@ TEST_CASE("RouteManager: duplex fast path shrinks device buffer and restores on 
     REQUIRE(backend->currentBufferFrameSize("aggregate")   == 512);
 }
 
+TEST_CASE("RouteManager: duplex fast path claims exclusive ownership + releases on stop",
+          "[route_manager][duplex][exclusive]") {
+    // Performance-mode same-device routes take Core Audio hog mode so
+    // the buffer-size request reliably lands even when another app
+    // (UAD Console, system audio, a running DAW) is holding the
+    // device at a larger buffer. The claim happens before the shrink
+    // request; the release happens after the restore so external apps
+    // see the original buffer size when they reconnect.
+    auto backend_ptr = std::make_unique<SimulatedBackend>();
+    SimulatedBackend* backend = backend_ptr.get();
+    BackendDeviceInfo info;
+    info.uid = "aggregate";
+    info.name = "aggregate";
+    info.direction = kBackendDirectionInput | kBackendDirectionOutput;
+    info.input_channel_count  = 2;
+    info.output_channel_count = 2;
+    info.nominal_sample_rate  = 48000.0;
+    info.buffer_frame_size    = 512;
+    backend->addDevice(info);
+    auto dm = std::make_unique<DeviceManager>(std::move(backend_ptr));
+    dm->refresh();
+    RouteManager rm(*dm);
+
+    std::vector<ChannelEdge> m{{0, 0}};
+    RouteManager::RouteConfig cfg{
+        "aggregate", "aggregate", m, "duplex-exclusive",
+        /*latency_mode*/ 2};
+    jbox_error_t err{};
+    const auto id = rm.addRoute(cfg, &err);
+    REQUIRE_FALSE(backend->isExclusive("aggregate"));  // not yet started
+
+    REQUIRE(rm.startRoute(id) == JBOX_OK);
+    REQUIRE(backend->isExclusive("aggregate"));
+
+    REQUIRE(rm.stopRoute(id) == JBOX_OK);
+    REQUIRE_FALSE(backend->isExclusive("aggregate"));
+    // Buffer size still restored to the pre-route value.
+    REQUIRE(backend->currentBufferFrameSize("aggregate") == 512);
+}
+
 TEST_CASE("RouteManager: duplex fast path skips buffer shrink when already small",
           "[route_manager][duplex][buffer]") {
     // If the device is already at or below the target (64 frames),
