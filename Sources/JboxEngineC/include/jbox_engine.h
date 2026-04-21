@@ -39,8 +39,11 @@ extern "C" {
  *   5  MINOR — `low_latency` renamed to `latency_mode`; the field
  *              now carries a tier (0=off, 1=low, 2=performance).
  *              Zero-initialised callers keep the safe default.
+ *   6  MINOR — appended `buffer_frames` to jbox_route_config_t (0
+ *              means use the tier default; non-zero overrides the
+ *              target HAL buffer size the fast path requests).
  */
-#define JBOX_ENGINE_ABI_VERSION 5u
+#define JBOX_ENGINE_ABI_VERSION 6u
 
 uint32_t jbox_engine_abi_version(void);
 
@@ -162,12 +165,21 @@ typedef struct {
  * `latency_mode` (ABI v5+) selects one of three ring-buffer and
  * drift-setpoint presets (see docs/spec.md § 2.3):
  *   0 — Off (default). Safe 8× / 4096-floor ring; target fill ring/2.
- *   1 — Low. 3× / 512-floor ring; target fill ring/2. USB-burst risk.
- *   2 — Performance. 2× / 256-floor ring; target fill ring/4. Drum-
- *       monitoring-grade; high underrun risk on bursty sources.
+ *   1 — Low. 3× / 512-floor ring; target fill ring/2. Bursty-USB risk.
+ *   2 — Performance. 2× / 256-floor ring; target fill ring/4. Lowest
+ *       latency; high underrun risk on bursty sources.
  * Zero-initialised callers keep the safe default. ABI v3 and v4
  * used the name `low_latency` for values 0 and 1; the field's
  * storage is unchanged.
+ *
+ * `buffer_frames` (ABI v6+) overrides the HAL buffer-frame-size
+ * target the Performance-mode direct-monitor fast path asks the
+ * backend for. 0 means "use the tier default" (currently 64 frames
+ * for Performance; Off / Low do not touch the buffer regardless).
+ * Non-zero values are clamped by the HAL into the device's
+ * supported range (`supportedBufferFrameSizeRange`) — callers
+ * typically surface that range in their UI so users only choose
+ * values the device can honour.
  */
 typedef struct {
     const char*                source_uid;
@@ -176,6 +188,7 @@ typedef struct {
     size_t                     mapping_count;
     const char*                name;
     uint32_t                   latency_mode;
+    uint32_t                   buffer_frames;
 } jbox_route_config_t;
 
 typedef enum {
@@ -317,6 +330,20 @@ jbox_error_code_t jbox_engine_poll_route_latency_components(
     jbox_engine_t*                   engine,
     jbox_route_id_t                  route_id,
     jbox_route_latency_components_t* out_components);
+
+/*
+ * Supported HAL buffer-frame-size range for the device identified by
+ * `uid` (ABI v6+). Both `out_min` and `out_max` are filled with 0
+ * when the device is unknown or the HAL does not expose the property.
+ * For an aggregate device the reported range is the intersection of
+ * every active sub-device's range, so every value the UI surfaces is
+ * accepted by every member simultaneously.
+ */
+jbox_error_code_t jbox_engine_supported_buffer_frame_size_range(
+    jbox_engine_t* engine,
+    const char*    uid,
+    uint32_t*      out_min,
+    uint32_t*      out_max);
 
 /* -------------------------------------------------------------------- */
 /*  Metering                                                            */

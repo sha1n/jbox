@@ -831,6 +831,48 @@ void CoreAudioBackend::releaseExclusive(const std::string& uid) {
     exclusive_state_.erase(it);
 }
 
+IDeviceBackend::BufferFrameSizeRange
+CoreAudioBackend::supportedBufferFrameSizeRange(const std::string& uid) {
+    auto it = device_ids_.find(uid);
+    if (it == device_ids_.end()) return {};
+    const AudioDeviceID id = it->second;
+
+    auto readRange = [](AudioObjectID obj) -> BufferFrameSizeRange {
+        AudioObjectPropertyAddress addr{
+            kAudioDevicePropertyBufferFrameSizeRange,
+            kAudioObjectPropertyScopeGlobal,
+            kAudioObjectPropertyElementMain};
+        AudioValueRange r{0.0, 0.0};
+        UInt32 size = sizeof(r);
+        if (AudioObjectGetPropertyData(obj, &addr, 0, nullptr, &size, &r) != noErr) {
+            return {};
+        }
+        return {static_cast<std::uint32_t>(r.mMinimum),
+                static_cast<std::uint32_t>(r.mMaximum)};
+    };
+
+    // For an aggregate device: intersect every active sub-device's
+    // range with the aggregate's own so the returned window is what
+    // every member can honour simultaneously. Empty range (min == 0)
+    // from a member means "unknown / not exposed"; skip it.
+    BufferFrameSizeRange r = readRange(id);
+    for (AudioObjectID sub : getActiveSubDevices(id)) {
+        BufferFrameSizeRange s = readRange(sub);
+        if (s.minimum == 0 && s.maximum == 0) continue;
+        if (r.minimum == 0 && r.maximum == 0) {
+            r = s;
+            continue;
+        }
+        if (s.minimum > r.minimum) r.minimum = s.minimum;
+        if (s.maximum < r.maximum) r.maximum = s.maximum;
+    }
+    if (r.maximum > 0 && r.minimum > r.maximum) {
+        // Empty intersection — fall back to the aggregate's own.
+        return readRange(id);
+    }
+    return r;
+}
+
 std::uint32_t CoreAudioBackend::requestBufferFrameSize(const std::string& uid,
                                                       std::uint32_t frames) {
     auto it = device_ids_.find(uid);

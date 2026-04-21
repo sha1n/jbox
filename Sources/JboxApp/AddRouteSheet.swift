@@ -17,7 +17,14 @@ struct AddRouteSheet: View {
     @State private var pairs: [MappingPair] = [MappingPair(src: 0, dst: 0)]
     @State private var customName: String = ""
     @State private var latencyMode: LatencyMode = .off
+    /// 0 == "use the tier default" (currently 64 for Performance).
+    @State private var bufferFrames: UInt32 = 0
     @State private var errorMessage: String?
+
+    /// Standard buffer-size options offered to the user. The menu
+    /// filters down to the subset the selected device supports.
+    private static let kBufferSizeChoices: [UInt32] = [
+        32, 64, 128, 256, 512, 1024, 2048]
 
     /// Row in the mapping editor. `src` and `dst` are 0-indexed
     /// internally; the UI renders them as 1-indexed per spec § 2.3.
@@ -70,6 +77,33 @@ struct AddRouteSheet: View {
     }
 
     private var canSave: Bool { validationIssue == nil }
+
+    /// Buffer-size choices the Performance-mode picker offers —
+    /// intersection of our standard choices with the source
+    /// device's HAL-reported range (and the destination's, if they
+    /// differ). Returns the full list when the device does not
+    /// expose a range.
+    private var bufferSizeOptions: [UInt32] {
+        var range: ClosedRange<UInt32>? = nil
+        if !sourceUID.isEmpty,
+           let r = store.bufferFrameRange(forDeviceUid: sourceUID) {
+            range = r
+        }
+        if sourceUID != destUID, !destUID.isEmpty,
+           let r = store.bufferFrameRange(forDeviceUid: destUID) {
+            if let existing = range {
+                let lo = max(existing.lowerBound, r.lowerBound)
+                let hi = min(existing.upperBound, r.upperBound)
+                range = lo <= hi ? lo...hi : nil
+            } else {
+                range = r
+            }
+        }
+        if let range {
+            return Self.kBufferSizeChoices.filter { range.contains($0) }
+        }
+        return Self.kBufferSizeChoices
+    }
 
     private var latencyModeFooter: String {
         switch latencyMode {
@@ -133,6 +167,16 @@ struct AddRouteSheet: View {
                         Text("Performance").tag(LatencyMode.performance)
                     }
                     .pickerStyle(.menu)
+
+                    if latencyMode == .performance {
+                        Picker("Buffer size", selection: $bufferFrames) {
+                            Text("Default (64)").tag(UInt32(0))
+                            ForEach(bufferSizeOptions, id: \.self) { frames in
+                                Text("\(frames) frames").tag(frames)
+                            }
+                        }
+                        .pickerStyle(.menu)
+                    }
                 } footer: {
                     Text(latencyModeFooter)
                 }
@@ -217,7 +261,8 @@ struct AddRouteSheet: View {
             destination: DeviceReference(device: dst),
             mapping: mapping,
             name: customName.trimmingCharacters(in: .whitespaces).isEmpty ? nil : customName,
-            latencyMode: latencyMode
+            latencyMode: latencyMode,
+            bufferFrames: bufferFrames == 0 ? nil : bufferFrames
         )
         do {
             _ = try store.addRoute(cfg)

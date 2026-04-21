@@ -286,6 +286,35 @@ void SimulatedBackend::releaseExclusive(const std::string& uid) {
     }
 }
 
+IDeviceBackend::BufferFrameSizeRange
+SimulatedBackend::supportedBufferFrameSizeRange(const std::string& uid) {
+    auto it = devices_.find(uid);
+    if (it == devices_.end()) return {};
+    BufferFrameSizeRange r{it->second.buffer_frame_size_min,
+                           it->second.buffer_frame_size_max};
+    for (const auto& sub_uid : it->second.sub_device_uids) {
+        auto sub = devices_.find(sub_uid);
+        if (sub == devices_.end()) continue;
+        if (sub->second.buffer_frame_size_min > r.minimum) {
+            r.minimum = sub->second.buffer_frame_size_min;
+        }
+        if (sub->second.buffer_frame_size_max < r.maximum) {
+            r.maximum = sub->second.buffer_frame_size_max;
+        }
+    }
+    if (r.maximum > 0 && r.minimum > r.maximum) return {};
+    return r;
+}
+
+void SimulatedBackend::setBufferFrameSizeRange(const std::string& uid,
+                                               std::uint32_t minimum,
+                                               std::uint32_t maximum) {
+    auto it = devices_.find(uid);
+    if (it == devices_.end()) return;
+    it->second.buffer_frame_size_min = minimum;
+    it->second.buffer_frame_size_max = maximum;
+}
+
 std::uint32_t SimulatedBackend::requestBufferFrameSize(
     const std::string& uid, std::uint32_t frames) {
     auto it = devices_.find(uid);

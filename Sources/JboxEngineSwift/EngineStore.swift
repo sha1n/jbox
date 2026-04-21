@@ -51,17 +51,24 @@ public struct RouteConfig: Equatable, Sendable {
     public var name: String?
     /// Tiered latency preset; see `LatencyMode`.
     public var latencyMode: LatencyMode
+    /// Optional HAL buffer-frame-size override for Performance-mode
+    /// same-device routes. `nil` means "use the tier default"
+    /// (currently 64). Non-nil is clamped by the HAL into the
+    /// device's supported range when the route starts.
+    public var bufferFrames: UInt32?
 
     public init(source: DeviceReference,
                 destination: DeviceReference,
                 mapping: [ChannelEdge],
                 name: String? = nil,
-                latencyMode: LatencyMode = .off) {
+                latencyMode: LatencyMode = .off,
+                bufferFrames: UInt32? = nil) {
         self.source = source
         self.destination = destination
         self.mapping = mapping
         self.name = name
         self.latencyMode = latencyMode
+        self.bufferFrames = bufferFrames
     }
 
     public var displayName: String {
@@ -228,6 +235,14 @@ public final class EngineStore {
         }
     }
 
+    /// Supported HAL buffer-frame-size range for the given device
+    /// UID, or `nil` when the device exposes no range. Forwarded
+    /// from `Engine.supportedBufferFrameSizeRange`; never throws
+    /// past the caller — errors become `nil`.
+    public func bufferFrameRange(forDeviceUid uid: String) -> ClosedRange<UInt32>? {
+        (try? engine.supportedBufferFrameSizeRange(forDeviceUid: uid)) ?? nil
+    }
+
     // MARK: Routes
 
     /// Add a route; returns the new live `Route` value (also appended
@@ -240,7 +255,8 @@ public final class EngineStore {
                 destUID: config.destination.uid,
                 mapping: config.mapping,
                 name: config.name ?? "",
-                latencyMode: config.latencyMode
+                latencyMode: config.latencyMode,
+                bufferFrames: config.bufferFrames ?? 0
             )
             let status = try engine.pollStatus(id)
             let route = Route(id: id, config: config, status: status)

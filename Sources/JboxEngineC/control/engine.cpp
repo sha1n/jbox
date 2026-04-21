@@ -62,6 +62,11 @@ jbox_error_code_t Engine::pollLatencyComponents(
     return rm_.pollLatencyComponents(id, out);
 }
 
+IDeviceBackend::BufferFrameSizeRange Engine::supportedBufferFrameSizeRange(
+    const std::string& uid) {
+    return dm_.backend().supportedBufferFrameSizeRange(uid);
+}
+
 std::size_t Engine::pollMeters(jbox_route_id_t id,
                                jbox_meter_side_t side,
                                float* out_peaks,

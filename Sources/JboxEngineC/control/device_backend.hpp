@@ -175,6 +175,20 @@ public:
     virtual std::uint32_t requestBufferFrameSize(
         const std::string& uid, std::uint32_t frames) = 0;
 
+    // The device's supported buffer-frame-size range from
+    // `kAudioDevicePropertyBufferFrameSizeRange`. `{0, 0}` when the
+    // device is unknown or the property is not exposed. For an
+    // aggregate device this returns the narrowest range compatible
+    // with every active sub-device — i.e. max of the members' minima
+    // and min of the members' maxima — so the UI's picker values
+    // are uniformly accepted by every member.
+    struct BufferFrameSizeRange {
+        std::uint32_t minimum = 0;
+        std::uint32_t maximum = 0;
+    };
+    virtual BufferFrameSizeRange supportedBufferFrameSizeRange(
+        const std::string& uid) = 0;
+
     // Claim exclusive ownership of the device via Core Audio's
     // `kAudioDevicePropertyHogMode` (this process becomes the
     // device's only client — other apps sharing it are disconnected

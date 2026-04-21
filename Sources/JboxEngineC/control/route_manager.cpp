@@ -312,6 +312,7 @@ jbox_route_id_t RouteManager::addRoute(const RouteConfig& cfg, jbox_error_t* err
     rec->dest_uid       = cfg.dest_uid;
     rec->mapping        = cfg.mapping;
     rec->latency_mode   = cfg.latency_mode;
+    rec->buffer_frames_override = cfg.buffer_frames;
     rec->channels_count = static_cast<std::uint32_t>(cfg.mapping.size());
     rec->state          = JBOX_ROUTE_STATE_STOPPED;
     rec->log_queue      = log_queue_;
@@ -506,18 +507,24 @@ jbox_error_code_t RouteManager::attemptStart(RouteRecord& r) {
         r.duplex_exclusive_claimed =
             dm_.backend().claimExclusive(r.source_uid);
 
-        // Request a small HAL buffer before opening the IOProc — same
-        // target the mux uses for low-latency attachments (64 frames).
-        // On aggregate devices the change fans out to every member
-        // (that's where the actual HAL buffer lives); if another app
-        // is holding a member at a larger size without hog mode, that
-        // member stays there and the actual post-change value surfaces
-        // in the pill. Pre-change buffer snapshots are kept by the
-        // backend's claimExclusive state and restored in
-        // releaseExclusive — the fast path doesn't track them here.
+        // Request a small HAL buffer before opening the IOProc. The
+        // target is the user's override if they supplied one
+        // (`RouteConfig.buffer_frames`), otherwise the fast-path
+        // default of 64 frames. On aggregate devices the change fans
+        // out to every member (that's where the actual HAL buffer
+        // lives); if another app is holding a member at a larger
+        // size without hog mode, that member stays there and the
+        // actual post-change value surfaces in the pill. Pre-change
+        // buffer snapshots are kept by the backend's claimExclusive
+        // state and restored in releaseExclusive — the fast path
+        // doesn't track them here.
         constexpr std::uint32_t kDuplexBufferTargetFrames = 64;
+        const std::uint32_t target_frames =
+            r.buffer_frames_override > 0
+                ? r.buffer_frames_override
+                : kDuplexBufferTargetFrames;
         (void)dm_.backend().requestBufferFrameSize(
-            r.source_uid, kDuplexBufferTargetFrames);
+            r.source_uid, target_frames);
 
         // Re-read the device's buffer frame size after the request:
         // the HAL may have clamped to its allowed range, or another

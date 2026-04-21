@@ -633,6 +633,88 @@ TEST_CASE("RouteManager: duplex fast path hogs aggregate sub-devices and shrinks
     REQUIRE(backend->currentBufferFrameSize("aggregate")  == 512);
 }
 
+TEST_CASE("RouteManager: duplex fast path honours buffer_frames override",
+          "[route_manager][duplex][buffer]") {
+    // ABI v6: a non-zero `buffer_frames` on the route config
+    // overrides the fast path's 64-frame default. Verify the request
+    // lands on the device and the pill reflects the chosen value.
+    auto backend_ptr = std::make_unique<SimulatedBackend>();
+    SimulatedBackend* backend = backend_ptr.get();
+    BackendDeviceInfo info;
+    info.uid = "aggregate";
+    info.name = "aggregate";
+    info.direction = kBackendDirectionInput | kBackendDirectionOutput;
+    info.input_channel_count  = 2;
+    info.output_channel_count = 2;
+    info.nominal_sample_rate  = 48000.0;
+    info.buffer_frame_size    = 512;
+    backend->addDevice(info);
+    auto dm = std::make_unique<DeviceManager>(std::move(backend_ptr));
+    dm->refresh();
+    RouteManager rm(*dm);
+
+    std::vector<ChannelEdge> m{{0, 0}};
+    RouteManager::RouteConfig cfg{
+        "aggregate", "aggregate", m, "duplex-override",
+        /*latency_mode*/ 2,
+        /*buffer_frames*/ 128};
+    jbox_error_t err{};
+    const auto id = rm.addRoute(cfg, &err);
+    REQUIRE(rm.startRoute(id) == JBOX_OK);
+
+    REQUIRE(backend->currentBufferFrameSize("aggregate") == 128);
+    REQUIRE(backend->bufferSizeRequests().size() == 1);
+    REQUIRE(backend->bufferSizeRequests().front().requested == 128);
+
+    jbox_route_latency_components_t components{};
+    REQUIRE(rm.pollLatencyComponents(id, &components) == JBOX_OK);
+    REQUIRE(components.src_buffer_frames == 128);
+}
+
+TEST_CASE("supportedBufferFrameSizeRange intersects aggregate sub-device ranges",
+          "[device_backend][aggregate][buffer]") {
+    // The range query the UI uses must reflect every active member
+    // on an aggregate device — values outside any member's range
+    // would fail silently. Sub A accepts [32, 1024], sub B accepts
+    // [128, 4096]; the intersection is [128, 1024].
+    SimulatedBackend backend;
+    BackendDeviceInfo a;
+    a.uid = "sub-a";
+    a.name = "sub-a";
+    a.direction = kBackendDirectionInput;
+    a.input_channel_count = 2;
+    a.nominal_sample_rate = 48000.0;
+    a.buffer_frame_size = 128;
+    backend.addDevice(a);
+    backend.setBufferFrameSizeRange("sub-a", 32, 1024);
+
+    BackendDeviceInfo b;
+    b.uid = "sub-b";
+    b.name = "sub-b";
+    b.direction = kBackendDirectionOutput;
+    b.output_channel_count = 2;
+    b.nominal_sample_rate = 48000.0;
+    b.buffer_frame_size = 128;
+    backend.addDevice(b);
+    backend.setBufferFrameSizeRange("sub-b", 128, 4096);
+
+    BackendDeviceInfo agg;
+    agg.uid = "aggregate";
+    agg.name = "aggregate";
+    agg.direction = kBackendDirectionInput | kBackendDirectionOutput;
+    agg.input_channel_count  = 2;
+    agg.output_channel_count = 2;
+    agg.nominal_sample_rate  = 48000.0;
+    agg.buffer_frame_size    = 128;
+    backend.addAggregateDevice(agg, {"sub-a", "sub-b"});
+    // Aggregate's own declared range is wide.
+    backend.setBufferFrameSizeRange("aggregate", 16, 8192);
+
+    const auto r = backend.supportedBufferFrameSizeRange("aggregate");
+    REQUIRE(r.minimum == 128);
+    REQUIRE(r.maximum == 1024);
+}
+
 TEST_CASE("RouteManager: duplex fast path leaves an already-small device at target",
           "[route_manager][duplex][buffer]") {
     // If the device is already at the target (64 frames), the shrink

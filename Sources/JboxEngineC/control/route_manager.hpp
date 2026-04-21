@@ -109,6 +109,9 @@ struct RouteRecord {
     // Latency tier captured at addRoute time; honoured at every
     // subsequent attemptStart. 0 = safe, 1 = low, 2 = performance.
     std::uint8_t  latency_mode          = 0;
+    // Optional user override of the HAL buffer frame size the fast
+    // path requests. 0 means the tier default is used.
+    std::uint32_t buffer_frames_override = 0;
 
     std::uint32_t channels_count        = 0;
     std::uint32_t source_total_channels = 0;
@@ -165,7 +168,11 @@ public:
         std::string                      name;  // may be empty
         // Tiered latency preset: 0 = safe (default), 1 = low latency,
         // 2 = performance. See docs/spec.md § 2.3.
-        std::uint8_t                     latency_mode = 0;
+        std::uint8_t                     latency_mode  = 0;
+        // User-chosen HAL buffer frame size override for the fast
+        // path. 0 means "use the tier default". Clamped by the HAL
+        // into the device's supported range on apply.
+        std::uint32_t                    buffer_frames = 0;
     };
 
     // Add a route in state STOPPED. Returns the new id on success, or

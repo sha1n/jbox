@@ -64,6 +64,8 @@ public:
                                          std::uint32_t frames) override;
     bool claimExclusive(const std::string& uid) override;
     void releaseExclusive(const std::string& uid) override;
+    BufferFrameSizeRange supportedBufferFrameSizeRange(
+        const std::string& uid) override;
 
     // Forward declaration kept public so the .cpp-local trampoline
     // and helper functions can reference it without becoming friends.

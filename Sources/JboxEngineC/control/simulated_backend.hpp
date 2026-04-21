@@ -100,6 +100,14 @@ public:
                                          std::uint32_t frames) override;
     bool claimExclusive(const std::string& uid) override;
     void releaseExclusive(const std::string& uid) override;
+    BufferFrameSizeRange supportedBufferFrameSizeRange(
+        const std::string& uid) override;
+
+    // Tests can override the default simulated range — (1, 65535) —
+    // with a specific range to exercise per-device constraints.
+    void setBufferFrameSizeRange(const std::string& uid,
+                                 std::uint32_t minimum,
+                                 std::uint32_t maximum);
 
     // Test introspection: history of every `requestBufferFrameSize`
     // call against this backend (one entry per call, in order). Lets
@@ -147,6 +155,13 @@ private:
         // references another device in `devices_`. Matches macOS
         // aggregate-device semantics.
         std::vector<std::string> sub_device_uids;
+
+        // Simulated per-device buffer frame size range (inclusive),
+        // used by `supportedBufferFrameSizeRange`. Defaults to a
+        // permissive (1, 65535) until a test sets it via
+        // `setBufferFrameSizeRange`.
+        std::uint32_t buffer_frame_size_min = 1;
+        std::uint32_t buffer_frame_size_max = 65535;
 
         // Test-seeded per-channel names; empty until the test populates
         // them via setChannelNames(). Element index i corresponds to
