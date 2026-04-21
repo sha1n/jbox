@@ -404,6 +404,14 @@ Meters — split into two slices so the diagnostic dots land first:
 5. **VoiceOver label on the expanded meter panel** (carried forward from Slice B — still pending).
    - [ ] Composite accessibility label on `MeterPanel` summarising "per-channel peak dBFS on source; per-channel peak dBFS on dest", so VoiceOver users get the same information the colour + height cues give sighted users. Cheap follow-up; matches the pattern `SignalDotRow` already uses for the collapsed state.
 
+6. **Per-route low-latency mode.** Added after the first user pass on the #3 pill — the default sizing revealed ~60–85 ms pills on common devices, and two co-sourced routes through destinations with different HAL latencies sounded like a digital delay effect. See [spec.md § 2.3](./spec.md#23-route-lifecycle) and [§ 2.7](./spec.md#27-per-device-coordination-when-routes-share-a-device).
+   - [x] Engine: `jbox_route_config_t` appended `low_latency` (ABI v2 → v3, MINOR). `RouteManager` selects between `kRingSafe` (8× / 4096 floor, default) and `kRingLowLatency` (3× / 512 floor) in `attemptStart`. The drift setpoint is already `ring/2` so it scales automatically. Existing V31-rationale comment preserved.
+   - [x] Swift: `RouteConfig.lowLatency: Bool = false` (default off) threaded through `JboxEngine.addRoute` into the C struct.
+   - [x] UI: `AddRouteSheet` gains a **Low latency** toggle with explanatory footer copy about USB-burst underrun risk.
+   - [x] Tests: `[route_manager][low_latency]` Catch2 case asserts the low-latency pill is > 30 000 µs smaller than the safe pill on identical devices; `EngineStoreTests` round-trips the flag through the Swift bridge.
+   - [ ] Follow-up: device-class-driven auto-sizing (USB vs PCIe vs built-in) with a soak-and-tighten scheme. Tracked in Phase 7 or later; the opt-in toggle is enough for now.
+   - [ ] Follow-up: request a smaller device buffer (`kAudioDevicePropertyBufferFrameSize`) when a low-latency route starts, with refcounted restore semantics. See the second commit in this phase item.
+
 UI tests (minimal):
 - [x] Swift Testing cases for `EngineStore` against the live Core Audio engine (`Tests/JboxEngineTests/EngineStoreTests.swift`, Phase 6 #1).
 - [ ] SwiftUI preview providers for route row, route editor, sidebar. **Pending.**

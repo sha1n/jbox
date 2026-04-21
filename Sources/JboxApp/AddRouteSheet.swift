@@ -14,6 +14,7 @@ struct AddRouteSheet: View {
     @State private var destUID: String = ""
     @State private var pairs: [MappingPair] = [MappingPair(src: 0, dst: 0)]
     @State private var customName: String = ""
+    @State private var lowLatency: Bool = false
     @State private var errorMessage: String?
 
     /// Row in the mapping editor. `src` and `dst` are 0-indexed
@@ -104,6 +105,15 @@ struct AddRouteSheet: View {
                     TextField("Auto from devices", text: $customName)
                 }
 
+                Section {
+                    Toggle("Low latency", isOn: $lowLatency)
+                } footer: {
+                    Text("Uses a tighter ring buffer to reduce latency. "
+                         + "Some USB interfaces that deliver samples in "
+                         + "bursts may underrun — turn this off if you "
+                         + "hear clicks.")
+                }
+
                 if let message = errorMessage ?? validationIssue {
                     Section {
                         Label(message, systemImage: "exclamationmark.triangle")
@@ -183,7 +193,8 @@ struct AddRouteSheet: View {
             source: DeviceReference(device: src),
             destination: DeviceReference(device: dst),
             mapping: mapping,
-            name: customName.trimmingCharacters(in: .whitespaces).isEmpty ? nil : customName
+            name: customName.trimmingCharacters(in: .whitespaces).isEmpty ? nil : customName,
+            lowLatency: lowLatency
         )
         do {
             _ = try store.addRoute(cfg)

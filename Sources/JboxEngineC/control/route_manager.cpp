@@ -61,12 +61,22 @@ namespace {
 // and never bursts. Real-hardware Phase-6 testing (V31 → Apollo, 48 k,
 // 64-frame device buffers) produced u1000+ underruns in under a minute
 // because 4 × 64 = 256 frames ≈ 5 ms is smaller than a typical USB
-// delivery gap. Bumped to `8 × max_buffer`, floor 4096 frames
-// (~85 ms at 48 k) — generous for a routing tool that is not used for
-// live monitoring, still well below any human-perceptible routing
-// latency.
-constexpr std::uint32_t kRingCapacityMultiplier = 8;
-constexpr std::uint32_t kRingCapacityFloor      = 4096;
+// delivery gap. `kRingSafe` (8 × max_buffer, floor 4096 frames ≈ 85 ms
+// at 48 k) is the default — generous for a routing tool that is not
+// used for live monitoring, but well above any burst gap we have
+// measured.
+//
+// Phase 6 refinement #6 adds `kRingLowLatency` — an opt-in tighter
+// preset selected per-route when the user flips "Low latency" on. It
+// halves the multiplier and drops the floor to 512 frames (~10.6 ms
+// at 48 k). Risk: USB-burst sources will underrun; the UI copy makes
+// that explicit and the user can flip back if they hear clicks.
+struct RingSizing {
+    std::uint32_t multiplier;
+    std::uint32_t floor;
+};
+constexpr RingSizing kRingSafe       { /*mult*/ 8, /*floor*/ 4096 };
+constexpr RingSizing kRingLowLatency { /*mult*/ 3, /*floor*/  512 };
 
 constexpr std::uint32_t kRtScratchMaxFrames = 8192;
 
@@ -237,6 +247,7 @@ jbox_route_id_t RouteManager::addRoute(const RouteConfig& cfg, jbox_error_t* err
     rec->source_uid     = cfg.source_uid;
     rec->dest_uid       = cfg.dest_uid;
     rec->mapping        = cfg.mapping;
+    rec->low_latency    = cfg.low_latency;
     rec->channels_count = static_cast<std::uint32_t>(cfg.mapping.size());
     rec->state          = JBOX_ROUTE_STATE_STOPPED;
     rec->log_queue      = log_queue_;
@@ -363,14 +374,16 @@ jbox_error_code_t RouteManager::attemptStart(RouteRecord& r) {
     }
 
     // Size the ring buffer. See the ring-capacity note near the top of
-    // this file for the rationale. Tl;dr: 8 × device-buffer with a
-    // 4096-frame floor to absorb USB burst-delivery jitter.
+    // this file for the rationale. Safe preset: 8 × device-buffer /
+    // 4096 floor (absorbs USB burst-delivery jitter). Low-latency
+    // preset: 3 × / 512 floor (opt-in per route).
+    const RingSizing sizing = r.low_latency ? kRingLowLatency : kRingSafe;
     const std::uint32_t max_buffer =
         std::max(src->buffer_frame_size, dst->buffer_frame_size);
     const std::uint32_t capacity_frames =
-        std::max<std::uint32_t>(kRingCapacityFloor,
-                                max_buffer > 0 ? max_buffer * kRingCapacityMultiplier
-                                               : kRingCapacityFloor);
+        std::max<std::uint32_t>(sizing.floor,
+                                max_buffer > 0 ? max_buffer * sizing.multiplier
+                                               : sizing.floor);
 
     r.ring_storage.assign(static_cast<std::size_t>(capacity_frames) * r.channels_count, 0.0f);
     r.ring = std::make_unique<jbox::rt::RingBuffer>(

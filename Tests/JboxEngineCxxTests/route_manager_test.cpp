@@ -415,3 +415,52 @@ TEST_CASE("RouteManager: estimated_latency_us reflects HAL components",
     REQUIRE(rm.pollStatus(id, &after_stop) == JBOX_OK);
     REQUIRE(after_stop.estimated_latency_us == 0);
 }
+
+TEST_CASE("RouteManager: low_latency mode shrinks estimated_latency_us",
+          "[route_manager][low_latency]") {
+    // Phase 6 refinement #6. With 64-frame device buffers:
+    //   - safe sizing: ring capacity = max(4096, 8 × 64) = 4096
+    //     → target fill ≈ 2047 frames ≈ 42.6 ms at 48 k
+    //   - low-latency sizing: ring = max(512, 3 × 64) = 512
+    //     → target fill ≈ 255 frames ≈ 5.3 ms at 48 k
+    // So the low-latency pill should be materially smaller than the
+    // default pill on the exact same devices. Everything else (HAL
+    // latencies, converter primes, buffer sizes) is equal, so the
+    // reduction is entirely ring-driven.
+    Fixture f(/*src*/ 2, /*dst*/ 2, /*buf*/ 64);
+
+    std::vector<ChannelEdge> mapping{{0, 0}, {1, 1}};
+    jbox_error_t err{};
+
+    RouteManager::RouteConfig safe_cfg{
+        "src", "dst", mapping, "safe", /*low_latency*/ false};
+    const auto id_safe = f.rm->addRoute(safe_cfg, &err);
+    REQUIRE(id_safe != JBOX_INVALID_ROUTE_ID);
+    REQUIRE(f.rm->startRoute(id_safe) == JBOX_OK);
+
+    RouteManager::RouteConfig lowlat_cfg{
+        "src", "dst", mapping, "low-lat", /*low_latency*/ true};
+    const auto id_lowlat = f.rm->addRoute(lowlat_cfg, &err);
+    REQUIRE(id_lowlat != JBOX_INVALID_ROUTE_ID);
+    REQUIRE(f.rm->startRoute(id_lowlat) == JBOX_OK);
+
+    jbox_route_status_t safe_status{};
+    jbox_route_status_t lowlat_status{};
+    REQUIRE(f.rm->pollStatus(id_safe, &safe_status) == JBOX_OK);
+    REQUIRE(f.rm->pollStatus(id_lowlat, &lowlat_status) == JBOX_OK);
+
+    REQUIRE(safe_status.estimated_latency_us > 0);
+    REQUIRE(lowlat_status.estimated_latency_us > 0);
+
+    // The low-latency estimate must be strictly smaller.
+    REQUIRE(lowlat_status.estimated_latency_us
+            < safe_status.estimated_latency_us);
+
+    // Ring contribution difference alone is (2047 - 255) frames at
+    // 48 kHz = ~37 333 µs. Assert the observed reduction is at least
+    // 30 000 µs, leaving slack for future tuning of the sizing
+    // constants without flipping this test.
+    const auto reduction_us =
+        safe_status.estimated_latency_us - lowlat_status.estimated_latency_us;
+    REQUIRE(reduction_us > 30'000);
+}

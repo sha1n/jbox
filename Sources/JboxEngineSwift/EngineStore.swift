@@ -32,15 +32,22 @@ public struct RouteConfig: Equatable, Sendable {
     public var mapping: [ChannelEdge]
     /// When nil, `displayName` auto-generates "source → destination".
     public var name: String?
+    /// Opt-in tighter ring-buffer sizing. Engine default (off) uses
+    /// the safe sizing that absorbs USB burst-delivery jitter; on
+    /// trades headroom for ~30–60 ms of latency reduction. See
+    /// docs/spec.md § 2.3.
+    public var lowLatency: Bool
 
     public init(source: DeviceReference,
                 destination: DeviceReference,
                 mapping: [ChannelEdge],
-                name: String? = nil) {
+                name: String? = nil,
+                lowLatency: Bool = false) {
         self.source = source
         self.destination = destination
         self.mapping = mapping
         self.name = name
+        self.lowLatency = lowLatency
     }
 
     public var displayName: String {
@@ -212,7 +219,8 @@ public final class EngineStore {
                 sourceUID: config.source.uid,
                 destUID: config.destination.uid,
                 mapping: config.mapping,
-                name: config.name ?? ""
+                name: config.name ?? "",
+                lowLatency: config.lowLatency
             )
             let status = try engine.pollStatus(id)
             let route = Route(id: id, config: config, status: status)

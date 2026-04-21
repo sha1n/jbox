@@ -90,6 +90,10 @@ struct RouteRecord {
     std::vector<float> input_scratch;
     std::vector<float> output_scratch;
 
+    // Sizing mode captured at addRoute time; honoured at every
+    // subsequent attemptStart.
+    bool          low_latency           = false;
+
     std::uint32_t channels_count        = 0;
     std::uint32_t source_total_channels = 0;
     std::uint32_t dest_total_channels   = 0;
@@ -143,6 +147,9 @@ public:
         std::string                      dest_uid;
         std::vector<jbox::control::ChannelEdge> mapping;
         std::string                      name;  // may be empty
+        // Opt-in tighter ring sizing (and a smaller requested device
+        // buffer in a follow-up commit). See docs/spec.md § 2.3.
+        bool                             low_latency = false;
     };
 
     // Add a route in state STOPPED. Returns the new id on success, or

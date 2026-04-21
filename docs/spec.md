@@ -171,7 +171,9 @@ Route {
 **Start sequence** (all on the control thread — never the RT thread):
 
 1. Resolve source and destination `DeviceHandle`s by UID. If either missing, transition the route to `waiting`.
-2. Allocate the ring buffer. Size = `max( max(source_buffer, dest_buffer) × 8 , 4096 )` frames per channel. At 48 kHz with 64-sample device buffers the floor dominates — 4096 frames = ~85 ms of headroom. The headroom is sized to absorb USB-class source-device delivery jitter (buffers can arrive in bursts with multi-ms gaps), which is the dominant source of underrun on real hardware. The original sizing was `max_buffer × 4` with a 256-frame floor (~5 ms); that was tuned against the synchronous simulated backend and produced sustained underruns on a real Roland V31 → Apollo route during Phase 6 testing.
+2. Allocate the ring buffer, using one of two sizing presets selected by `RouteConfig.lowLatency` (Phase 6 refinement #6):
+   - **Safe (default, `lowLatency = false`).** `max( max(source_buffer, dest_buffer) × 8 , 4096 )` frames per channel. At 48 kHz with 64-sample device buffers the floor dominates — 4096 frames = ~85 ms of headroom. Sized to absorb USB-class source-device delivery jitter (buffers can arrive in bursts with multi-ms gaps), which is the dominant source of underrun on real hardware. The original sizing was `max_buffer × 4` with a 256-frame floor (~5 ms); that was tuned against the synchronous simulated backend and produced sustained underruns on a real Roland V31 → Apollo route during Phase 6 testing.
+   - **Low latency (`lowLatency = true`).** `max( max(source_buffer, dest_buffer) × 3 , 512 )` frames per channel. At 48 kHz with 64-sample buffers this gives ~10.6 ms of headroom and a ~5 ms drift setpoint, cutting the pill in § 2.12 by ~37 ms relative to the safe preset. **Risk:** bursty USB sources will underrun — the UI copy warns about this and the user can flip it back if they hear clicks. Not recommended for class-compliant interfaces that deliver samples in gaps.
 3. Construct the `AudioConverter` with source rate → destination rate and `kAudioConverterSampleRateConverterComplexity_Mastering`.
 4. If the source device has no input IOProc yet (first route to use it as source), register one and start the device.
 5. Same for destination device and output IOProc.
@@ -256,6 +258,8 @@ void input_ioproc(AudioDeviceID dev, const AudioBufferList* input, ...) {
 The `activeInputRoutes` pointer is swapped atomically (RCU-style) when a route is added or removed. The RT thread never sees a partially-updated list. The old list is freed on the control thread after a grace period.
 
 **Why not lock?** A lock on the RT thread would violate our real-time discipline. Atomic pointer swap with deferred free is the standard RT-safe pattern for "sometimes-mutating list."
+
+**Latency across co-sourced routes.** When two routes share a source but target different destinations, each destination has its own HAL latency (`kAudioDevicePropertyLatency` + `kAudioDevicePropertySafetyOffset`) and its own drift-correction PI loop locking to its own clock. The two outputs therefore carry a fixed delay difference equal to the difference of the two pills (§ 2.12) — small on similarly-buffered destinations, large when one destination is HDMI / AirPlay and the other is a low-latency USB interface. This is audible as a hollow/chorus effect at small offsets and as a clearly-separated digital-delay effect at larger ones. It is not a bug; it is the unavoidable consequence of two independent destination clocks. Users who need phase coherence across destinations should route through an aggregate device; users who only need the relative delay below the chorus threshold should flip `lowLatency` on for both routes to shrink each contribution.
 
 ### 2.8 Metering
 

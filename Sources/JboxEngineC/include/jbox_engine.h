@@ -33,8 +33,9 @@ extern "C" {
 /* ABI history:
  *   1  initial Phase 3 contract.
  *   2  MINOR — appended `estimated_latency_us` to jbox_route_status_t.
+ *   3  MINOR — appended `low_latency` to jbox_route_config_t.
  */
-#define JBOX_ENGINE_ABI_VERSION 2u
+#define JBOX_ENGINE_ABI_VERSION 3u
 
 uint32_t jbox_engine_abi_version(void);
 
@@ -150,6 +151,10 @@ typedef struct {
  *
  * v1 mapping invariants: non-empty; no duplicate src channel; no
  * duplicate dst channel. (See docs/spec.md § 3.1.)
+ *
+ * `low_latency` (ABI v3+): when non-zero, the route opts into a
+ * tighter ring-buffer sizing. Zero-initialised callers see the safe
+ * default that handles USB-burst devices (see docs/spec.md § 2.3).
  */
 typedef struct {
     const char*                source_uid;
@@ -157,6 +162,7 @@ typedef struct {
     const jbox_channel_edge_t* mapping;
     size_t                     mapping_count;
     const char*                name;
+    uint32_t                   low_latency;
 } jbox_route_config_t;
 
 typedef enum {

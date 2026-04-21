@@ -82,6 +82,47 @@ struct EngineStoreTests {
         #expect(store.routes.isEmpty)
     }
 
+    @Test("addRoute threads RouteConfig.lowLatency through to the engine")
+    func addRouteLowLatencyFlag() throws {
+        let store = try makeStore()
+        store.refreshDevices()
+        guard let src = store.devices.first(where: { $0.inputChannelCount  >= 1 }),
+              let dst = store.devices.first(where: { $0.outputChannelCount >= 1 })
+        else {
+            Issue.record("CI runner expected to expose at least one input- and one output-capable device")
+            return
+        }
+
+        // Baseline: a default-sizing route. We don't start it (leaves
+        // hardware alone); the flag's actual ring-sizing effect on the
+        // pill is covered by the C++ integration test. Here we just
+        // confirm the bit survives the Swift → C bridge.
+        let safeCfg = RouteConfig(
+            source: DeviceReference(device: src),
+            destination: DeviceReference(device: dst),
+            mapping: [ChannelEdge(src: 0, dst: 0)],
+            name: "safe",
+            lowLatency: false)
+        let lowLatCfg = RouteConfig(
+            source: DeviceReference(device: src),
+            destination: DeviceReference(device: dst),
+            mapping: [ChannelEdge(src: 0, dst: 0)],
+            name: "low-lat",
+            lowLatency: true)
+
+        let safeRoute   = try store.addRoute(safeCfg)
+        let lowLatRoute = try store.addRoute(lowLatCfg)
+
+        #expect(safeRoute.config.lowLatency   == false)
+        #expect(lowLatRoute.config.lowLatency == true)
+        #expect(store.routes.count == 2)
+
+        // Clean up so later tests see an empty list.
+        store.removeRoute(safeRoute.id)
+        store.removeRoute(lowLatRoute.id)
+        #expect(store.routes.isEmpty)
+    }
+
     @Test("addRoute + removeRoute round-trips through the observable list")
     func addRouteThenRemove() throws {
         let store = try makeStore()

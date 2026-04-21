@@ -281,7 +281,8 @@ public final class Engine {
     public func addRoute(sourceUID: String,
                          destUID: String,
                          mapping: [ChannelEdge],
-                         name: String = "") throws -> UInt32 {
+                         name: String = "",
+                         lowLatency: Bool = false) throws -> UInt32 {
         guard let h = handle else {
             throw JboxError(code: JBOX_ERR_INTERNAL, message: "engine not initialised")
         }
@@ -297,7 +298,8 @@ public final class Engine {
                             dest_uid: dstPtr,
                             mapping: edgesPtr.baseAddress,
                             mapping_count: cEdges.count,
-                            name: name.isEmpty ? nil : namePtr
+                            name: name.isEmpty ? nil : namePtr,
+                            low_latency: lowLatency ? 1 : 0
                         )
                         var err = jbox_error_t(code: JBOX_OK, message: nil)
                         let id = jbox_engine_add_route(
