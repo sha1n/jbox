@@ -316,7 +316,7 @@ A **logging pipeline slice** also landed alongside the UI first-slice (unplanned
 **Entry criteria.** Phase 5 complete. Bridge API stable (no breaking changes planned during Phase 6).
 
 **Exit criteria.**
-- [x] User can add / edit / delete routes through the main window route editor. *(Add/delete done in first slice; "edit" of an existing route is not yet wired — re-create workflow works.)*
+- [~] User can add / edit / delete routes through the main window route editor. Add/delete landed in the first slice. **Rename and mapping-edit are scheduled in the post-Slice-B refinements block below** — rename is a non-disruptive metadata update; mapping edit on a running route uses stop → reconfigure → start. Re-create workflow remains available as the fallback.
 - [x] User can start / stop routes; status (running / stopped / waiting / error) reflects correctly. Row-level Start/Stop buttons and `StatusGlyph` render all five states; live polling keeps them up to date.
 - [x] Per-channel signal indication — **Slice A (signal-present dots)**: landed. See the Meters task block below for the landing commit hashes.
 - [x] Per-channel bar meters with color thresholds — **Slice B (full meters)**: landed. Dots stay as the glanceable collapsed summary; a chevron per route toggles the expanded `MeterPanel` with `Canvas`-drawn vertical bars, dB gridlines, and decaying peak-hold ticks. See the Meters task block below.
@@ -374,6 +374,34 @@ Meters — split into two slices so the diagnostic dots land first:
   - [x] `RouteRow` gains a chevron to toggle expansion; collapsed rows keep today's `SignalDotRow`, expanded rows swap it for the `MeterPanel`. Expansion state lives in `@State private var expandedRoutes: Set<UInt32>` on `RouteListView`; Phase 7 persistence can migrate it onto `EngineStore`.
   - [x] Color thresholds match [spec.md § 4.5](./spec.md#45-meters): gray below -60 dBFS, green below -6, yellow to -3, red above. Bar height is a second, color-independent cue for accessibility.
   - [ ] VoiceOver-friendly labels on the expanded panel. **Pending** — `SignalDotRow` already carries one; `MeterPanel` still needs a comparable composite label. Deferred to a follow-up since it's additive.
+
+**Post-Slice-B refinements.** Five queued items captured from the post-Slice-B usage pass. Each is small enough to land in its own commit; none of them invalidate Slice A or Slice B.
+
+1. **Fan-out mapping (1:N).**
+   - [ ] Engine: `ChannelMapper::validate()` drops the "duplicate `src`" rejection; keeps the "duplicate `dst`" rejection (summing / fan-in stays deferred per [spec.md Appendix A](./spec.md#appendix-a--deferred--out-of-scope)). No hot-path change — the scratch-copy / converter / metering loops already iterate per output slot, so a fan-out edge is "just another output channel" whose scratch cell happens to hold the same source sample.
+   - [ ] Tests: new `channel_mapper_test.cpp` case asserting fan-out (two edges with the same `src` but different `dst`) validates as `kOk`; existing "duplicate source rejected" case flips. Add a `route_manager_test.cpp` case through `SimulatedBackend` that injects a known signal on one source channel and asserts it appears on two destination channels.
+   - [ ] UI: `AddRouteSheet` mirror — the client-side validator currently mirrors the old "duplicate source" rule; relax it, keep "duplicate destination" as the only uniqueness check. Update the sheet's inline error copy to "Destination channel already in use."
+   - [ ] Spec already updated: § 1.1, § 2.5 (converter output slot semantics), § 3.1 mapping invariants, § 4.3 editor validation, Appendix A.
+
+2. **Edit existing routes.**
+   - [ ] Engine: a non-disruptive rename call (`jbox_engine_rename_route(engine, id, new_name)` — additive symbol, MINOR ABI bump). Mapping edit on a running route uses the existing `stopRoute` + mutate config + `startRoute` sequence from the Swift side — no new engine API for the mapping path in v1.
+   - [ ] UI: `EditRouteSheet` (sibling to `AddRouteSheet`, sharing the channel-mapping editor component); row affordance via double-click the name for rename, double-click elsewhere or `⌘E` for mapping edit. The sheet's "Apply" button copy reflects whether the route is running (e.g. "Apply and restart" vs "Apply").
+   - [ ] Tests: rename round-trip (Swift + C++ bridge); mapping-edit flow exercised end-to-end via `EngineStoreTests`.
+
+3. **Computed per-route latency.**
+   - [ ] Backend: extend `BackendDeviceInfo` with `latency_frames` and `safety_offset_frames`. `CoreAudioBackend` populates them from `kAudioDevicePropertyLatency` / `kAudioDevicePropertySafetyOffset` (+ `kAudioStreamPropertyLatency` when present); `SimulatedBackend` returns the values passed by the test harness.
+   - [ ] Engine: route status gains `estimated_latency_frames` (additive field — MINOR ABI bump is already the pattern per Phase 3 deviation). Computed once at `startRoute` per the formula in [spec.md § 2.12](./spec.md#212-estimated-per-route-latency) using the `AudioConverter`'s `kAudioConverterPrimeInfo` leading-frames value.
+   - [ ] Swift: wrapper exposes `Route.status.estimatedLatencyMs`.
+   - [ ] UI: collapsed route row gains a faint "~NN ms" pill next to the counters; expanded panel (when "Show engine diagnostics" is on — see #4) shows the component breakdown.
+   - [ ] Tests: C++ unit test on the latency-sum helper using `SimulatedBackend` with known component values; Swift test on the `ms` formatter.
+
+4. **Advanced / engine-diagnostics toggle.**
+   - [ ] Preferences window (Phase 6 pending task) adds an **Advanced → "Show engine diagnostics"** toggle (default off). Stored in `AppState.preferences` once Phase 7 persistence lands; until then, a `@State` default on the app root is fine.
+   - [ ] `RouteRow` uses the toggle: when off, the row hides the `frames_produced / frames_consumed · u<K>` counter string and leaves only the friendlier signals (status glyph + dots/bars + latency pill). When on, the counters + the latency breakdown live inside the expanded panel, not in the collapsed row, to keep the collapsed line calm.
+   - [ ] Spec already updated: § 4.6 Advanced tab.
+
+5. **VoiceOver label on the expanded meter panel** (carried forward from Slice B — still pending).
+   - [ ] Composite accessibility label on `MeterPanel` summarising "per-channel peak dBFS on source; per-channel peak dBFS on dest", so VoiceOver users get the same information the colour + height cues give sighted users. Cheap follow-up; matches the pattern `SignalDotRow` already uses for the collapsed state.
 
 UI tests (minimal):
 - [x] Swift Testing cases for `EngineStore` against the live Core Audio engine (`Tests/JboxEngineTests/EngineStoreTests.swift`, Phase 6 #1).

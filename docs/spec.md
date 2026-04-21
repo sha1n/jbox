@@ -28,7 +28,7 @@ The motivating workflow is routing two output channels of a Roland V31 USB sound
 
 ### What Jbox is not
 
-- **Not a mixer.** Jbox does 1:1 channel mapping. No summing, no splitting, no per-channel gain, no mute.
+- **Not a mixer.** Jbox does 1:N channel mapping (fan-out allowed). No summing / fan-in, no per-channel gain, no mute.
 - **Not a DAW.** No recording, no plugins, no timeline, no MIDI.
 - **Not a virtual audio driver.** Jbox does not create devices that other apps see. It routes between existing Core Audio devices.
 - **Not a broadcast router.** No network audio (Dante, AVB, NDI), no IP streaming.
@@ -205,7 +205,7 @@ Apple's `AudioConverter` is production-grade, supports variable sample-rate rati
 - `kAudioConverterSampleRateConverterComplexity` = `kAudioConverterSampleRateConverterComplexity_Mastering` (highest quality).
 - `kAudioConverterSampleRateConverterQuality` = `kAudioConverterQuality_Max`.
 - Input ASBD: source device's sample rate, float interleaved, channel count = route's source-channel count.
-- Output ASBD: destination device's sample rate, float interleaved, channel count = route's destination-channel count (same as source count in v1).
+- Output ASBD: destination device's sample rate, float interleaved, channel count = `mapping.count` — one converter output slot per edge. Fan-out edges (multiple edges sharing a `src` channel) each get their own slot; the pre-ring scratch copy duplicates the source sample into every such slot.
 
 **Variable-ratio updates:**
 
@@ -322,9 +322,25 @@ uint32_t jbox_engine_abi_version(void);
 
 All functions are safe to call from any non-RT thread. Return codes / `jbox_error_t` communicate failures; the bridge never throws.
 
-### 2.12 Deferred to future versions
+### 2.12 Estimated per-route latency
 
-- **Fan-out mapping** (one source channel → multiple destinations). Data model already supports it; v1 enforces uniqueness on both sides.
+A route's end-to-end latency is the sum of independently reported components, all available without running the audio:
+
+```
+total_frames = src_device_latency + src_safety_offset
+             + src_buffer_size              // one input IOProc tick, at src rate
+             + ring_target_fill             // ring_capacity_frames / 2
+             + converter_prime_input_frames // AudioConverter primeInfo.leadingFrames
+             + dst_buffer_size              // one output IOProc tick, at dst rate
+             + dst_safety_offset + dst_device_latency
+```
+
+Device-side contributions come from `kAudioDevicePropertyLatency` + `kAudioDevicePropertySafetyOffset` (+ `kAudioStreamPropertyLatency` if the device exposes per-stream values). Buffer sizes come from the backend's `buffer_frame_size`. Ring target fill is `ring->usableCapacityFrames() / 2` (matching the drift-sampler setpoint). Converter prime frames come from `AudioConverterGetProperty(kAudioConverterPrimeInfo, …)` — a small handful at mastering quality.
+
+The engine computes this once at `startRoute` (no RT-thread cost) and surfaces it through the route status snapshot. The UI shows an "~NN ms" estimate on the route row; an expanded breakdown is available in the diagnostics view. The number is **indicative, not ground truth** — some drivers (notably USB class-compliant) under-report hardware latency. A loopback-based measurement for authoritative verification is a Phase 9 deliverable.
+
+### 2.13 Deferred to future versions
+
 - **Fan-in / summing mapping** (multiple sources → one destination). Requires mixer-domain decisions (summing attenuation, clipping handling, per-source gain); explicitly out of scope.
 - **Per-route gain and mute.** Would require a small DSP block in the engine; deferred until the user sees a concrete need.
 - **Internal CPU budget telemetry** (percentage of audio cycle used per callback). Nice to have; not required for v1.
@@ -383,10 +399,10 @@ struct Route: Codable, Identifiable, Equatable {
 ```
 
 **v1 invariants** on `mapping`:
-- Each `src` appears at most once.
-- Each `dst` appears at most once.
-- Both are non-empty.
-- `mapping.count` is the route's "width" in channels.
+- Each `dst` appears at most once. (Writing two edges into the same destination channel would be summing / fan-in — deferred per Appendix A.)
+- A `src` may appear on multiple edges — 1:N fan-out is allowed. Each such edge gets its own converter output slot; the scratch copy duplicates the sample into every slot.
+- Non-empty.
+- `mapping.count` is the route's "width" in channels (= converter output channel count).
 
 Runtime state (`stopped` / `waiting` / `running` / `error`) is **not** persisted; it is re-derived at runtime.
 
@@ -565,7 +581,7 @@ Opens as a sheet over the main window when the user adds a new route or edits an
 - **Source channels** — scrollable multi-select list of the source device's input channels. Shows `"ch N — <label if any>"`. ⌘-click for non-contiguous, shift-click for range.
 - **Destination device** — same pattern as source.
 - **Destination channels** — same pattern as source.
-- **Mapping preview** — a small visual panel showing the 1:1 edges derived from the two channel selections, in order:
+- **Mapping preview** — a small visual panel showing the edges derived from the two channel selections, in order (a source channel may appear on multiple edges — fan-out):
 
 ```
     Source (V31)             Destination (Apollo)
@@ -574,7 +590,7 @@ Opens as a sheet over the main window when the user adds a new route or edits an
 ```
 
 - **Reorderable** — drag items inside either channel list to change which source channel pairs with which destination channel.
-- **Validation errors** shown inline: "Source and destination must have the same channel count", "Channel already selected" (v1 uniqueness), etc.
+- **Validation errors** shown inline: "Source and destination must have the same channel count", "Destination channel already in use" (fan-in is deferred per Appendix A), etc. Duplicate source channels are allowed and produce fan-out.
 - **Save** / **Cancel** buttons. No partial saves; the route is committed atomically.
 
 ### 4.4 Scene editor
@@ -605,14 +621,15 @@ Standard macOS settings window (`SwiftUI.Settings` scene) with three tabs:
 
 - **General** — launch-at-login toggle; appearance picker (System / Light / Dark); "Show meters in menu bar" toggle.
 - **Audio** — buffer-size policy: "Use each device's current setting" (default) / "Explicit override" with a numeric field (32 / 64 / 128 / 256 / 512 / 1024 samples) and a warning that the override is device-global. Resampler quality: Mastering (default) / High Quality.
-- **Advanced** — Export Configuration (saves `state.json` to a user-chosen location) / Import Configuration (replaces current state with confirmation) / Reset State (wipes `state.json` with confirmation) / "Open Logs Folder" button.
+- **Advanced** — "Show engine diagnostics" toggle (off by default; when on, the route row exposes the developer-oriented counters `frames_produced / frames_consumed · u<K>` and the per-side estimated-latency breakdown inside the expanded meter panel). Export Configuration (saves `state.json` to a user-chosen location) / Import Configuration (replaces current state with confirmation) / Reset State (wipes `state.json` with confirmation) / "Open Logs Folder" button.
 
 ### 4.7 Key flows
 
 - **First launch.** Empty state in the main window with a "Create your first route" CTA. OS presents microphone permission dialog on first access to any input device.
 - **Add route.** `+ Add Route` → editor sheet → fill in → Save → row appears in list, stopped.
 - **Start route.** Click `▶` in row. If both devices are present, transitions to `running` in under 1 second. If absent, transitions to `waiting`; `⏸` icon appears.
-- **Edit route.** Double-click row, or select and `⌘E` → editor sheet prefilled.
+- **Rename route.** Double-click the route name in the row (or `⌘R`) → inline text field. Engine-side this is a label-only metadata update; the running route is not affected.
+- **Edit route mapping.** Double-click elsewhere on the row, or select and `⌘E` → editor sheet prefilled. Mapping changes on a stopped route are applied in place. For a running route the UI performs a stop → reconfigure → start cycle (confirmed in the sheet's "Apply" button tooltip), since mid-flight mapping mutation is not supported in v1.
 - **Delete route.** Select and `⌫` → confirmation dialog → removed. Stopped first if running.
 - **Create scene.** Sidebar `+` → editor sheet → Save → scene appears in sidebar.
 - **Switch scene.** Click scene in sidebar → engine applies → running-state dots update across the route list.
@@ -641,7 +658,7 @@ Standard macOS settings window (`SwiftUI.Settings` scene) with three tabs:
 - `RingBuffer`: concurrent producer/consumer correctness under stress, wrap-around edges, fill-level tracking, overrun and underrun behavior.
 - `DriftTracker`: given synthetic fill-level time series, verify the PI controller converges within N seconds and holds within a target band; bounded under pathological inputs.
 - `AudioConverterWrapper`: ratio updates do not glitch; quality setting honored; correct samples-per-block computation.
-- `ChannelMapper`: edge-list validation; channel-count matching; duplicate detection (v1 uniqueness invariant).
+- `ChannelMapper`: edge-list validation; channel-count matching; destination-uniqueness detection (sources may repeat — fan-out).
 
 **Engine integration tests (C++).** A deterministic simulation harness — a fake Core Audio device that drives the engine with fully controllable timing and clock drift.
 - Start / stop a single route end-to-end; verify samples pass through with correct ordering and zero loss.
@@ -841,8 +858,7 @@ Before tagging a release:
 Consolidated list of items explicitly deferred from v1, for easy cross-reference:
 
 **Mapping model extensions.**
-- Fan-out (one source channel → multiple destinations).
-- Fan-in / summing (multiple sources → one destination).
+- Fan-in / summing (multiple sources → one destination). Fan-out (one source → multiple destinations) was **promoted out of deferred** and is supported — see § 3.1 mapping invariants and § 4.3 editor validation.
 
 **Mixer-adjacent features.**
 - Per-route gain / trim.

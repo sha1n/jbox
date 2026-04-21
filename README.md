@@ -8,7 +8,7 @@
 
 Jbox is a **generic Core Audio routing tool**. It bridges any input-capable device to any output-capable device, with:
 
-- **Arbitrary 1:1 channel mapping** — pick any N source channels, any N destination channels, map them in any order.
+- **Arbitrary 1:N channel mapping** — pick any source channels, any destination channels, map them in any order. A single source channel may feed multiple destination channels (fan-out); multi-source summing (fan-in) is out of scope.
 - **Multiple simultaneous routes** — more like a patchbay than a single-pair bridge.
 - **Automatic drift correction** between devices with independent hardware clocks.
 - **Automatic sample-rate conversion** when source and destination rates differ.
@@ -29,7 +29,7 @@ A typical example: routing a hardware instrument or external sound module into s
 
 ## What Jbox is not
 
-- **Not a mixer.** No summing, no splitting, no gain, no mute. Pure 1:1 routing.
+- **Not a mixer.** No summing, no gain, no mute. 1:N routing only — a source channel can feed many destinations (fan-out), but two sources cannot combine into one destination (fan-in / summing stays out of scope).
 - **Not a DAW.** No timeline, no plugins, no recording, no MIDI.
 - **Not a virtual audio driver.** Jbox does not create devices that other apps see. It routes between existing devices.
 - **Not a network audio tool.** No Dante, no AVB, no NDI, no IP streaming.
@@ -335,7 +335,7 @@ See [docs/plan.md](./docs/plan.md) for the full phased implementation roadmap.
 
 Scope for **v1.0.0** (what the first release will do):
 
-- Route selected channels of any input-capable device to selected channels of any output-capable device (arbitrary 1:1 mapping).
+- Route selected channels of any input-capable device to selected channels of any output-capable device (arbitrary 1:N mapping; fan-out allowed, fan-in deferred).
 - Multiple simultaneous routes, each independently started / stopped.
 - Named scenes to activate groups of routes together.
 - Auto-resampling when source and destination sample rates differ.
