@@ -98,19 +98,26 @@ public struct RouteStatus: Equatable, Hashable, Sendable {
     public let framesConsumed: UInt64
     public let underrunCount: UInt64
     public let overrunCount: UInt64
+    /// End-to-end estimate computed once at route start, per
+    /// docs/spec.md § 2.12. 0 when the route is not running or the
+    /// engine could not determine a sample rate. Not updated while
+    /// running; a stop + start refreshes the estimate.
+    public let estimatedLatencyUs: UInt64
 
     public init(state: RouteState,
                 lastError: jbox_error_code_t,
                 framesProduced: UInt64,
                 framesConsumed: UInt64,
                 underrunCount: UInt64,
-                overrunCount: UInt64) {
+                overrunCount: UInt64,
+                estimatedLatencyUs: UInt64 = 0) {
         self.state = state
         self.lastError = lastError
         self.framesProduced = framesProduced
         self.framesConsumed = framesConsumed
         self.underrunCount = underrunCount
         self.overrunCount = overrunCount
+        self.estimatedLatencyUs = estimatedLatencyUs
     }
 }
 
@@ -334,7 +341,8 @@ public final class Engine {
             framesProduced: out.frames_produced,
             framesConsumed: out.frames_consumed,
             underrunCount: out.underrun_count,
-            overrunCount: out.overrun_count
+            overrunCount: out.overrun_count,
+            estimatedLatencyUs: out.estimated_latency_us
         )
     }
 

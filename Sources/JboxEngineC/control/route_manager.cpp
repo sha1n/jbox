@@ -280,12 +280,13 @@ jbox_error_code_t RouteManager::pollStatus(jbox_route_id_t id,
     auto it = routes_.find(id);
     if (it == routes_.end()) return JBOX_ERR_INVALID_ARGUMENT;
     const RouteRecord& r = *it->second;
-    out->state           = r.state;
-    out->last_error      = r.last_error;
-    out->frames_produced = r.frames_produced.load(std::memory_order_relaxed);
-    out->frames_consumed = r.frames_consumed.load(std::memory_order_relaxed);
-    out->underrun_count  = r.underrun_count.load(std::memory_order_relaxed);
-    out->overrun_count   = r.overrun_count.load(std::memory_order_relaxed);
+    out->state                = r.state;
+    out->last_error           = r.last_error;
+    out->frames_produced      = r.frames_produced.load(std::memory_order_relaxed);
+    out->frames_consumed      = r.frames_consumed.load(std::memory_order_relaxed);
+    out->underrun_count       = r.underrun_count.load(std::memory_order_relaxed);
+    out->overrun_count        = r.overrun_count.load(std::memory_order_relaxed);
+    out->estimated_latency_us = r.estimated_latency_us;
     return JBOX_OK;
 }
 
@@ -401,6 +402,26 @@ jbox_error_code_t RouteManager::attemptStart(RouteRecord& r) {
     r.last_applied_rate = r.nominal_src_rate;
     r.tracker.reset();
 
+    // Per-route latency estimate — see docs/spec.md § 2.12. Computed
+    // once here, on the control thread, from HAL-reported latency +
+    // safety offset + buffer sizes + the drift-sampler ring setpoint
+    // + the converter's leading prime frames. Not recomputed while
+    // running; stop → start refreshes it if any component changes.
+    LatencyComponents lc{};
+    lc.src_hal_latency_frames   = src->input_device_latency_frames;
+    lc.src_safety_offset_frames = src->input_safety_offset_frames;
+    lc.src_buffer_frames        = src->buffer_frame_size;
+    lc.ring_target_fill_frames  =
+        static_cast<std::uint32_t>(r.ring->usableCapacityFrames() / 2);
+    lc.converter_prime_frames   = r.converter->primeLeadingFrames();
+    lc.dst_buffer_frames        = dst->buffer_frame_size;
+    lc.dst_safety_offset_frames = dst->output_safety_offset_frames;
+    lc.dst_hal_latency_frames   = dst->output_device_latency_frames;
+    lc.src_sample_rate_hz       = r.nominal_src_rate;
+    lc.dst_sample_rate_hz       = r.nominal_dst_rate;
+    r.latency_components   = lc;
+    r.estimated_latency_us = estimateLatencyMicroseconds(lc);
+
     // Attach to the source device's mux (input side). Creates the mux
     // on demand; subsequent routes using this device will share it.
     DeviceIOMux& src_mux = getOrCreateMux(
@@ -468,6 +489,8 @@ void RouteManager::releaseRouteResources(RouteRecord& r) {
     r.ring_storage.clear();
     r.input_scratch.clear();
     r.output_scratch.clear();
+    r.latency_components   = {};
+    r.estimated_latency_us = 0;
     // r.state and r.last_error are intentionally not touched here;
     // callers set them to the appropriate value after this call.
     // Counters are preserved across stop/start cycles for visibility.

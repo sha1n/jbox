@@ -121,6 +121,18 @@ void AudioConverterWrapper::reset() noexcept {
     AudioConverterReset(static_cast<AudioConverterRef>(converter_));
 }
 
+std::uint32_t AudioConverterWrapper::primeLeadingFrames() const noexcept {
+    if (converter_ == nullptr) return 0;
+    AudioConverterPrimeInfo info{};
+    UInt32 size = sizeof(info);
+    const OSStatus status = AudioConverterGetProperty(
+        static_cast<AudioConverterRef>(converter_),
+        kAudioConverterPrimeInfo,
+        &size, &info);
+    if (status != noErr) return 0;
+    return static_cast<std::uint32_t>(info.leadingFrames);
+}
+
 std::size_t AudioConverterWrapper::convert(float* out,
                                            std::size_t frames_requested,
                                            PullInputFn pull_input,

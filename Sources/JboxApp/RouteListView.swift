@@ -175,6 +175,11 @@ struct RouteRow: View {
 
                 Spacer()
 
+                if let latencyText = LatencyFormatter.pillText(
+                    microseconds: route.status.estimatedLatencyUs) {
+                    LatencyPill(text: latencyText)
+                }
+
                 counterLine
                     .font(.caption.monospacedDigit())
                     .foregroundStyle(.secondary)
@@ -231,6 +236,29 @@ struct RouteRow: View {
 
     private var counterLine: some View {
         Text("\(route.status.framesProduced) / \(route.status.framesConsumed) · u\(route.status.underrunCount)")
+    }
+}
+
+/// Faint rounded-rect pill showing the approximate end-to-end route
+/// latency (spec.md § 2.12). The formatter already renders "~" and the
+/// unit; this view is the visual wrapper only.
+struct LatencyPill: View {
+    let text: String
+
+    var body: some View {
+        Text(text)
+            .font(.caption2.monospacedDigit())
+            .foregroundStyle(.secondary)
+            .padding(.horizontal, 6)
+            .padding(.vertical, 2)
+            .background(
+                RoundedRectangle(cornerRadius: 4, style: .continuous)
+                    .fill(Color.secondary.opacity(0.12))
+            )
+            .help("Estimated end-to-end latency (HAL + safety offset + "
+                  + "buffers + ring + SRC). Indicative; some drivers "
+                  + "under-report. See docs/spec.md § 2.12.")
+            .accessibilityLabel("Estimated latency \(text)")
     }
 }
 

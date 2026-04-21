@@ -53,6 +53,17 @@ struct BackendDeviceInfo {
     std::uint32_t output_channel_count = 0;
     double        nominal_sample_rate  = 0.0;
     std::uint32_t buffer_frame_size    = 0;
+
+    // Phase-6 refinement #3: static latency components reported by the
+    // HAL (kAudioDevicePropertyLatency + kAudioDevicePropertySafetyOffset)
+    // on each scope that has channels. Used by the per-route latency
+    // estimator (docs/spec.md § 2.12). All values are in frames at
+    // nominal_sample_rate; 0 means the HAL either did not expose the
+    // property or the device has no channels in that direction.
+    std::uint32_t input_device_latency_frames  = 0;
+    std::uint32_t input_safety_offset_frames  = 0;
+    std::uint32_t output_device_latency_frames = 0;
+    std::uint32_t output_safety_offset_frames = 0;
 };
 
 // Opaque handle for a registered IOProc. 0 is reserved as invalid.

@@ -55,6 +55,13 @@ public:
     // control thread only (e.g., on route stop).
     void reset() noexcept;
 
+    // Leading prime frames reported by AudioConverter — the number of
+    // input frames the polyphase SRC holds in its filter tail at any
+    // point (per kAudioConverterPrimeInfo). Used by the per-route
+    // latency estimator (docs/spec.md § 2.12). Property read is NOT
+    // RT-safe and must be called from the control thread only.
+    std::uint32_t primeLeadingFrames() const noexcept;
+
     std::uint32_t channels() const noexcept { return channels_; }
 
 private:

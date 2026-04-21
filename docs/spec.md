@@ -337,7 +337,19 @@ total_frames = src_device_latency + src_safety_offset
 
 Device-side contributions come from `kAudioDevicePropertyLatency` + `kAudioDevicePropertySafetyOffset` (+ `kAudioStreamPropertyLatency` if the device exposes per-stream values). Buffer sizes come from the backend's `buffer_frame_size`. Ring target fill is `ring->usableCapacityFrames() / 2` (matching the drift-sampler setpoint). Converter prime frames come from `AudioConverterGetProperty(kAudioConverterPrimeInfo, …)` — a small handful at mastering quality.
 
-The engine computes this once at `startRoute` (no RT-thread cost) and surfaces it through the route status snapshot. The UI shows an "~NN ms" estimate on the route row; an expanded breakdown is available in the diagnostics view. The number is **indicative, not ground truth** — some drivers (notably USB class-compliant) under-report hardware latency. A loopback-based measurement for authoritative verification is a Phase 9 deliverable.
+Routes that bridge different device rates compose the sum at each side's native rate and add the two halves in time:
+
+```
+src_side_us = (src_device_latency + src_safety_offset + src_buffer_size + ring_target_fill)
+            * 1e6 / src_sample_rate
+dst_side_us = (converter_prime_input_frames + dst_buffer_size + dst_safety_offset + dst_device_latency)
+            * 1e6 / dst_sample_rate
+estimated_latency_us = src_side_us + dst_side_us
+```
+
+For same-rate routes (the common case) this degenerates to the frame-sum formula above divided by the shared rate.
+
+The engine computes this once at `startRoute` (no RT-thread cost) and surfaces it through the route status snapshot as `jbox_route_status_t::estimated_latency_us` (ABI v2+). The UI shows an "~NN ms" estimate on the route row; an expanded breakdown is available in the diagnostics view. The number is **indicative, not ground truth** — some drivers (notably USB class-compliant) under-report hardware latency. A loopback-based measurement for authoritative verification is a Phase 9 deliverable.
 
 ### 2.13 Deferred to future versions
 

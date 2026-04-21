@@ -30,7 +30,11 @@ extern "C" {
 /*  ABI versioning                                                      */
 /* -------------------------------------------------------------------- */
 
-#define JBOX_ENGINE_ABI_VERSION 1u
+/* ABI history:
+ *   1  initial Phase 3 contract.
+ *   2  MINOR — appended `estimated_latency_us` to jbox_route_status_t.
+ */
+#define JBOX_ENGINE_ABI_VERSION 2u
 
 uint32_t jbox_engine_abi_version(void);
 
@@ -165,7 +169,10 @@ typedef enum {
 
 const char* jbox_route_state_name(jbox_route_state_t state);
 
-/* Snapshot of a route's runtime state. Filled in by poll_route_status. */
+/* Snapshot of a route's runtime state. Filled in by poll_route_status.
+ *
+ * Field additions are ABI-MINOR per the header comment above. Existing
+ * callers that zero-initialise the struct stay compatible. */
 typedef struct {
     jbox_route_state_t state;
     jbox_error_code_t  last_error;    /* JBOX_OK unless state == ERROR */
@@ -173,6 +180,11 @@ typedef struct {
     uint64_t           frames_consumed;
     uint64_t           underrun_count;
     uint64_t           overrun_count;
+    /* Added in ABI v2: end-to-end estimate, computed once at startRoute
+     * per docs/spec.md § 2.12. 0 for non-running routes or when the
+     * sample rate is unknown. Not updated after the route starts; stop +
+     * start refreshes the value. */
+    uint64_t           estimated_latency_us;
 } jbox_route_status_t;
 
 /* -------------------------------------------------------------------- */

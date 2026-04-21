@@ -31,6 +31,7 @@
 #include "device_manager.hpp"
 #include "drift_tracker.hpp"
 #include "jbox_engine.h"
+#include "latency_estimate.hpp"
 #include "ring_buffer.hpp"
 #include "rt_log_queue.hpp"
 
@@ -115,6 +116,13 @@ struct RouteRecord {
     // on the post-converter samples. Cleared on every (re)start.
     jbox::rt::AtomicMeter source_meter;
     jbox::rt::AtomicMeter dest_meter;
+
+    // Per-route estimated-latency components and the pre-computed
+    // microsecond total. Filled in once at a successful startRoute
+    // (not touched on the RT thread). Zeroed on stop. See
+    // latency_estimate.hpp and docs/spec.md § 2.12.
+    LatencyComponents latency_components{};
+    std::uint64_t     estimated_latency_us = 0;
 };
 
 class RouteManager {

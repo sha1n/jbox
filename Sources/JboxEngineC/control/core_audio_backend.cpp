@@ -113,6 +113,37 @@ std::uint32_t getBufferFrameSize(AudioObjectID device) {
     return frames;
 }
 
+// Per-scope HAL latency. kAudioDevicePropertyLatency is the engine-side
+// buffer depth the device reports; most drivers under-report, but the
+// number we do get is a defensible lower bound for the pill in
+// docs/spec.md § 2.12. Returns 0 on query failure or when the device
+// has no channels in this scope.
+std::uint32_t getDeviceLatencyFrames(AudioObjectID device,
+                                     AudioObjectPropertyScope scope) {
+    AudioObjectPropertyAddress addr{kAudioDevicePropertyLatency,
+                                    scope,
+                                    kAudioObjectPropertyElementMain};
+    UInt32 frames = 0;
+    UInt32 size = sizeof(frames);
+    if (AudioObjectGetPropertyData(device, &addr, 0, nullptr, &size, &frames) != noErr) {
+        return 0;
+    }
+    return frames;
+}
+
+std::uint32_t getSafetyOffsetFrames(AudioObjectID device,
+                                    AudioObjectPropertyScope scope) {
+    AudioObjectPropertyAddress addr{kAudioDevicePropertySafetyOffset,
+                                    scope,
+                                    kAudioObjectPropertyElementMain};
+    UInt32 frames = 0;
+    UInt32 size = sizeof(frames);
+    if (AudioObjectGetPropertyData(device, &addr, 0, nullptr, &size, &frames) != noErr) {
+        return 0;
+    }
+    return frames;
+}
+
 // RT thread trampoline. Core Audio invokes this from its audio
 // callback; we must NOT allocate, lock, or syscall here.
 OSStatus ioProcTrampoline(AudioObjectID /*inDevice*/,
@@ -265,6 +296,19 @@ std::vector<BackendDeviceInfo> CoreAudioBackend::enumerate() {
         }
         info.nominal_sample_rate = getNominalSampleRate(id);
         info.buffer_frame_size   = getBufferFrameSize(id);
+
+        if (info.input_channel_count > 0) {
+            info.input_device_latency_frames =
+                getDeviceLatencyFrames(id, kAudioObjectPropertyScopeInput);
+            info.input_safety_offset_frames =
+                getSafetyOffsetFrames(id, kAudioObjectPropertyScopeInput);
+        }
+        if (info.output_channel_count > 0) {
+            info.output_device_latency_frames =
+                getDeviceLatencyFrames(id, kAudioObjectPropertyScopeOutput);
+            info.output_safety_offset_frames =
+                getSafetyOffsetFrames(id, kAudioObjectPropertyScopeOutput);
+        }
 
         device_ids_[info.uid] = id;
         result.push_back(std::move(info));

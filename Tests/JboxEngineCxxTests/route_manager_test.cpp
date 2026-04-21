@@ -342,3 +342,76 @@ TEST_CASE("RouteManager: non-contiguous channel selection",
         REQUIRE(out[fr * 4 + 3] == 0.0f);
     }
 }
+
+TEST_CASE("RouteManager: estimated_latency_us reflects HAL components",
+          "[route_manager][latency]") {
+    // docs/spec.md § 2.12: on startRoute the engine composes HAL
+    // latency + safety offset + buffer sizes + ring setpoint +
+    // converter prime frames into a single estimate, surfaced through
+    // pollStatus. Zero-latency HAL state with known buffer sizes gives
+    // us a lower-bound assertion without hard-coding the converter's
+    // quality-dependent prime frames.
+    auto backend = std::make_unique<SimulatedBackend>();
+    BackendDeviceInfo src = makeInputDevice("src", 2, /*buf*/ 64);
+    src.input_device_latency_frames = 48;
+    src.input_safety_offset_frames  = 32;
+    BackendDeviceInfo dst = makeOutputDevice("dst", 2, /*buf*/ 64);
+    dst.output_device_latency_frames = 96;
+    dst.output_safety_offset_frames  = 24;
+    backend->addDevice(src);
+    backend->addDevice(dst);
+    auto dm = std::make_unique<DeviceManager>(std::move(backend));
+    dm->refresh();
+    RouteManager rm(*dm);
+
+    std::vector<ChannelEdge> m{{0, 0}, {1, 1}};
+    jbox_error_t err{};
+    const auto id = rm.addRoute({"src", "dst", m, "lat"}, &err);
+    REQUIRE(id != JBOX_INVALID_ROUTE_ID);
+
+    // Before start: no estimate.
+    jbox_route_status_t stopped{};
+    REQUIRE(rm.pollStatus(id, &stopped) == JBOX_OK);
+    REQUIRE(stopped.estimated_latency_us == 0);
+
+    REQUIRE(rm.startRoute(id) == JBOX_OK);
+    jbox_route_status_t running{};
+    REQUIRE(rm.pollStatus(id, &running) == JBOX_OK);
+    REQUIRE(running.state == JBOX_ROUTE_STATE_RUNNING);
+
+    // Lower bound: the HAL-reported frames alone at 48 kHz are
+    //   (48 + 32 + 64) src-side + (64 + 24 + 96) dst-side = 328 frames
+    //   328 * 1_000_000 / 48000 ≈ 6833 µs
+    // The full estimate adds ring_target_fill (≈ 2047 frames, ~42 ms)
+    // plus converter prime frames, so the pill must be strictly larger.
+    constexpr std::uint64_t kLowerBoundUs = 6833;
+    REQUIRE(running.estimated_latency_us > kLowerBoundUs);
+    // Upper bound: everything known to contribute is small-to-medium;
+    // a wildly larger number signals a unit mix-up (e.g. ms vs µs).
+    REQUIRE(running.estimated_latency_us < 500'000);
+
+    // Bigger device buffers must produce a bigger estimate — the pill
+    // is monotone in buffer size at a fixed sample rate. Re-plumb a
+    // second manager with 2048-frame buffers on both sides and confirm.
+    auto backend2 = std::make_unique<SimulatedBackend>();
+    BackendDeviceInfo big_src = src;
+    big_src.buffer_frame_size = 2048;
+    BackendDeviceInfo big_dst = dst;
+    big_dst.buffer_frame_size = 2048;
+    backend2->addDevice(big_src);
+    backend2->addDevice(big_dst);
+    auto dm2 = std::make_unique<DeviceManager>(std::move(backend2));
+    dm2->refresh();
+    RouteManager rm2(*dm2);
+    const auto id2 = rm2.addRoute({"src", "dst", m, "lat-big"}, &err);
+    REQUIRE(rm2.startRoute(id2) == JBOX_OK);
+    jbox_route_status_t running2{};
+    REQUIRE(rm2.pollStatus(id2, &running2) == JBOX_OK);
+    REQUIRE(running2.estimated_latency_us > running.estimated_latency_us);
+
+    // After stop: estimate clears.
+    REQUIRE(rm.stopRoute(id) == JBOX_OK);
+    jbox_route_status_t after_stop{};
+    REQUIRE(rm.pollStatus(id, &after_stop) == JBOX_OK);
+    REQUIRE(after_stop.estimated_latency_us == 0);
+}
