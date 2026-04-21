@@ -18,7 +18,7 @@ struct MeterPanel: View {
     var body: some View {
         TimelineView(.animation(minimumInterval: 1.0 / 30.0, paused: false)) { timeline in
             let now = timeline.date.timeIntervalSinceReferenceDate
-            HStack(alignment: .top, spacing: 16) {
+            HStack(alignment: .center, spacing: 12) {
                 BarGroup(
                     title: "SOURCE",
                     labels: sourceLabels,
@@ -31,14 +31,10 @@ struct MeterPanel: View {
                 )
                 .frame(maxWidth: .infinity)
 
-                VStack(spacing: 6) {
-                    Spacer(minLength: 0)
-                    Image(systemName: "arrow.right")
-                        .font(.title2.weight(.light))
-                        .foregroundStyle(.tertiary)
-                    Spacer(minLength: 0)
-                }
-                .frame(width: 32, height: barHeight)
+                Image(systemName: "arrow.right")
+                    .font(.title2.weight(.light))
+                    .foregroundStyle(.tertiary)
+                    .frame(width: 32)
 
                 BarGroup(
                     title: "DEST",
@@ -52,7 +48,7 @@ struct MeterPanel: View {
                 )
                 .frame(maxWidth: .infinity)
             }
-            .padding(.top, 4)
+            .padding(.top, 20)
         }
     }
 
@@ -92,50 +88,68 @@ struct BarGroup: View {
     private let scaleWidth: CGFloat  = 36
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            HStack(alignment: .bottom, spacing: 0) {
-                DbScale()
-                    .frame(width: scaleWidth, height: barHeight)
-
-                HStack(alignment: .bottom, spacing: barSpacing) {
-                    ForEach(Array(peaks.enumerated()), id: \.offset) { i, v in
-                        let hold = store.heldPeak(routeId: routeId,
-                                                  side: side,
-                                                  channel: i,
-                                                  now: now)
-                        ChannelBar(peak: v, hold: hold)
-                            .frame(minWidth: minBarWidth,
-                                   maxWidth: maxBarWidth,
-                                   minHeight: barHeight,
-                                   maxHeight: barHeight)
-                    }
-                }
-                .frame(maxWidth: CGFloat(peaks.count) * maxBarWidth
-                       + CGFloat(max(0, peaks.count - 1)) * barSpacing,
-                       alignment: .leading)
-            }
-
-            HStack(alignment: .center, spacing: 0) {
-                Spacer().frame(width: scaleWidth)
-                HStack(spacing: barSpacing) {
-                    ForEach(Array(labels.enumerated()), id: \.offset) { _, label in
-                        Text(label)
-                            .font(.system(size: 10, weight: .medium).monospaced())
-                            .foregroundStyle(.secondary)
-                            .frame(minWidth: minBarWidth,
-                                   maxWidth: maxBarWidth)
-                    }
-                }
-                .frame(maxWidth: CGFloat(labels.count) * maxBarWidth
-                       + CGFloat(max(0, labels.count - 1)) * barSpacing,
-                       alignment: .leading)
-            }
-
+        VStack(spacing: 10) {
             Text(title)
                 .font(.caption.weight(.semibold))
+                .tracking(0.6)
                 .foregroundStyle(.secondary)
-                .padding(.leading, scaleWidth + 2)
+                .frame(maxWidth: .infinity)
+
+            HStack(spacing: 0) {
+                Spacer(minLength: 0)
+                VStack(spacing: 6) {
+                    HStack(alignment: .bottom, spacing: 0) {
+                        DbScale()
+                            .frame(width: scaleWidth, height: barHeight)
+
+                        HStack(alignment: .bottom, spacing: barSpacing) {
+                            ForEach(Array(peaks.enumerated()), id: \.offset) { i, v in
+                                let hold = store.heldPeak(routeId: routeId,
+                                                          side: side,
+                                                          channel: i,
+                                                          now: now)
+                                ChannelBar(peak: v, hold: hold)
+                                    .frame(minWidth: minBarWidth,
+                                           maxWidth: maxBarWidth,
+                                           minHeight: barHeight,
+                                           maxHeight: barHeight)
+                            }
+                        }
+
+                        // Phantom column mirroring the scale so the bars
+                        // (not the scale+bars block) are what gets
+                        // horizontally centered inside the card.
+                        Spacer().frame(width: scaleWidth)
+                    }
+
+                    HStack(spacing: 0) {
+                        Spacer().frame(width: scaleWidth)
+                        HStack(spacing: barSpacing) {
+                            ForEach(Array(labels.enumerated()), id: \.offset) { _, label in
+                                Text(label)
+                                    .font(.system(size: 10, weight: .medium).monospaced())
+                                    .foregroundStyle(.secondary)
+                                    .frame(minWidth: minBarWidth,
+                                           maxWidth: maxBarWidth)
+                            }
+                        }
+                        Spacer().frame(width: scaleWidth)
+                    }
+                }
+                Spacer(minLength: 0)
+            }
         }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 12)
+        .frame(maxWidth: .infinity)
+        .background(
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .fill(Color.secondary.opacity(0.05))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .strokeBorder(Color.secondary.opacity(0.22), lineWidth: 1)
+        )
     }
 }
 

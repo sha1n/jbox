@@ -109,7 +109,9 @@ struct RouteListView: View {
                         expanded: expandedRoutes.contains(route.id),
                         onToggleExpanded: { toggleExpansion(route.id) }
                     )
-                    .padding(.vertical, 2)
+                    .listRowSeparator(.hidden)
+                    .listRowBackground(Color.clear)
+                    .padding(.vertical, 4)
                 }
             }
             .listStyle(.inset)
@@ -142,9 +144,10 @@ struct RouteRow: View {
             HStack(alignment: .center, spacing: 12) {
                 Button(action: onToggleExpanded) {
                     Image(systemName: expanded ? "chevron.down" : "chevron.right")
-                        .font(.caption)
+                        .font(.system(size: 13, weight: .semibold))
                         .foregroundStyle(canExpand ? .secondary : .tertiary)
-                        .frame(width: 12)
+                        .frame(width: 28, height: 28)
+                        .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
                 .disabled(!canExpand)
@@ -195,11 +198,23 @@ struct RouteRow: View {
 
             if expanded, route.status.state == .running,
                let peaks = store.meters[route.id] {
+                Divider()
+                    .padding(.top, 4)
                 MeterPanel(route: route, store: store, peaks: peaks)
-                    .padding(.leading, 32)
+                    .padding(.bottom, 4)
                     .transition(.opacity.combined(with: .move(edge: .top)))
             }
         }
+        .padding(.vertical, 12)
+        .padding(.horizontal, 14)
+        .background(
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .fill(Color(nsColor: .textBackgroundColor).opacity(0.35))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .strokeBorder(Color.secondary.opacity(0.25), lineWidth: 1)
+        )
         .animation(.easeInOut(duration: 0.15), value: expanded)
     }
 
