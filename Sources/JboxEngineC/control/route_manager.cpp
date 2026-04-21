@@ -2,6 +2,7 @@
 
 #include "route_manager.hpp"
 
+#include "rate_deadband.hpp"
 #include "rt_log_codes.hpp"
 
 #include <algorithm>
@@ -141,9 +142,21 @@ void outputIOProcCallback(float* samples,
     }
 
     // Apply any pending rate update from the control thread. RT-thread-
-    // local `last_applied_rate` suppresses redundant setProperty calls.
+    // local `last_applied_rate` short-circuits repeated proposals.
+    //
+    // Deadband (see rate_deadband.hpp): only push the rate through to
+    // the Apple AudioConverter when the proposed change crosses ~1 ppm
+    // of nominal. Every setInputRate() call flushes the converter's
+    // polyphase filter state, consuming ~16 extra input frames as it
+    // re-primes (characterized in audio_converter_wrapper_test.cpp,
+    // [hypothesis] case). At 100 Hz PI-tick rate that was 1600 extra
+    // frames/sec drained from the ring — the real-hardware origin of
+    // the click artifacts and slow-growing underrun counter we saw on
+    // the V31 → Apollo route. Gating sub-ppm updates eliminates the
+    // flush storm without meaningfully reducing drift-correction
+    // authority (1 ppm ≪ the ~10 ppm audible threshold).
     const double target = r->target_input_rate.load(std::memory_order_relaxed);
-    if (target > 0.0 && target != r->last_applied_rate) {
+    if (shouldApplyRate(target, r->last_applied_rate, r->nominal_src_rate)) {
         r->converter->setInputRate(target);
         r->last_applied_rate = target;
     }

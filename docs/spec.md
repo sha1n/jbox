@@ -209,7 +209,9 @@ Apple's `AudioConverter` is production-grade, supports variable sample-rate rati
 
 **Variable-ratio updates:**
 
-The drift tracker computes a small adjustment (typically within ±100 ppm). The control thread applies it by setting `kAudioConverterSampleRate` to the new effective input rate. `AudioConverter` handles ratio changes smoothly without glitches.
+The drift tracker computes a small adjustment (typically within ±100 ppm). The control thread writes the proposed new rate into an atomic; the RT output IOProc reads it and — if it crosses the deadband (see below) — applies it via `AudioConverterSetProperty(kAudioConverterCurrentInputStreamDescription, …)` with a fresh input ASBD. (The original spec named `kAudioConverterSampleRate`; that property is not consistently writable on our float-interleaved SRC configuration. The full-ASBD re-set is documented by Apple to propagate as a variable-ratio SRC update. See the Phase 4 deviations in `docs/plan.md`.)
+
+**Apply deadband.** Every `setInputRate` call flushes the converter's polyphase filter state — benign in simulation with synthetic ramps, but on real hardware with dynamic content the flush manifests as audible click artifacts on transients, and the converter consumes ~16 extra input frames per flush while re-priming. At the 100 Hz PI sampling rate, that was ~1600 frames/s draining from the ring with no corresponding output — directly observable as a slow-climbing underrun counter on a V31 → Apollo route. The RT path therefore gates apply decisions through a pure `shouldApplyRate(proposed, last_applied, nominal)` helper (`Sources/JboxEngineC/control/rate_deadband.hpp`): `setInputRate` fires only when the proposed rate differs from the last-applied value by more than 1 ppm of nominal (48 mHz at 48 k — about an order of magnitude below the audible rate-error threshold). Sub-ppm PI noise is silently discarded; real drift corrections accumulate through the integrator until they cross the deadband and get applied. Characterization test: `audio_converter_wrapper_test.cpp` tag `[hypothesis]` pins both the flush-cost signature and the deadband's mitigation.
 
 Even when source and destination sample rates are nominally equal, we run through the converter. At ratio 1.0 it's nearly free, and it's our only hook for drift correction.
 
@@ -225,11 +227,11 @@ Let:
 - `integral(t) = integral(t - Δt) + error(t) · Δt`.
 - `adjustment(t) = Kp · error(t) + Ki · integral(t)`, clamped to `[-100 ppm, +100 ppm]`.
 
-The control thread samples `fill_level` at ~100 Hz (nothing time-critical about this — it's not on the RT path). Each sample updates the PI state and writes a new `kAudioConverterSampleRate` value.
+The control thread samples `fill_level` at ~100 Hz (nothing time-critical about this — it's not on the RT path). Each sample updates the PI state and writes a new proposed rate; the RT output IOProc applies it to `AudioConverter` only when it crosses the § 2.5 deadband.
 
-Empirical starting values: `Kp ≈ 1e-6 per-frame`, `Ki ≈ 1e-8 per-frame-second`. These will be tuned during Phase 4 (Drift correction) testing against real hardware.
+Empirical starting values: `Kp ≈ 1e-6 per-frame`, `Ki ≈ 1e-8 per-frame-second`. These were chosen conservatively to avoid oscillation on real hardware; real-hardware gain tuning is a deferred Phase 4 exit item (see `docs/plan.md` Phase 4 deviations). They are several orders of magnitude too weak to hold ring fill bounded by themselves; in the simulated-backend integration tests, ring fill was historically bounded by the converter's per-tick flush side-effect rather than by PI authority. With the § 2.5 deadband gating that flush storm, the integration-test excursion bands widen to match open-loop drift accumulation (~750 frames at +50 ppm over 310 s) until real-hardware gain tuning lands.
 
-**Why it works:** the output is sample-accurate and click-free because `AudioConverter` interpolates continuously. The PI control is slow (response time on the order of seconds), so ordinary fill-level jitter (from context switches, GC-like events) doesn't trigger reactive adjustments.
+**Why it works:** the output is sample-accurate and click-free because `AudioConverter` interpolates continuously — as long as we don't force it to flush its filter state on every tick (see § 2.5 deadband). The PI control is slow (response time on the order of seconds), so ordinary fill-level jitter (from context switches, GC-like events) doesn't trigger reactive adjustments.
 
 **Safety:**
 - Clamp adjustments to ±100 ppm so a pathological device (reporting clock rates drastically off nominal) can't destabilize the controller.
