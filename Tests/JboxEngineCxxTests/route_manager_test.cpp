@@ -191,6 +191,41 @@ TEST_CASE("RouteManager: end-to-end sample flow through the engine",
     REQUIRE(status.overrun_count == 0);
 }
 
+TEST_CASE("RouteManager: absorbs bursty-source USB-style delivery without glitching",
+          "[route_manager][ring_sizing][integration]") {
+    // Real USB devices (e.g. Roland V31) deliver source samples in
+    // bursts, not evenly spaced. This test simulates 8 back-to-back
+    // source callbacks followed by 8 drain callbacks — a realistic
+    // "one USB frame of source, one USB frame of drain" cadence at
+    // small device-buffer sizes. Source and destination rates are
+    // balanced over the full cycle, so any underrun / overrun here
+    // is purely a ring-depth issue (too little headroom for the
+    // burst phase).
+    Fixture f(/*src*/ 2, /*dst*/ 2, /*buf*/ 64);
+    std::vector<ChannelEdge> m{{0, 0}, {1, 1}};
+    RouteManager::RouteConfig cfg{"src", "dst", m, "burst"};
+    jbox_error_t err{};
+    const auto id = f.rm->addRoute(cfg, &err);
+    REQUIRE(id != JBOX_INVALID_ROUTE_ID);
+    REQUIRE(f.rm->startRoute(id) == JBOX_OK);
+
+    constexpr std::uint32_t kFrames = 64;
+    std::vector<float> input(kFrames * 2, 0.10f);  // non-zero so we can see real flow
+    std::vector<float> output(kFrames * 2, 0.0f);
+
+    for (int i = 0; i < 8; ++i) {
+        f.backend->deliverBuffer("src", kFrames, input.data(), nullptr);
+    }
+    for (int i = 0; i < 8; ++i) {
+        f.backend->deliverBuffer("dst", kFrames, nullptr, output.data());
+    }
+
+    jbox_route_status_t status{};
+    f.rm->pollStatus(id, &status);
+    REQUIRE(status.overrun_count  == 0);
+    REQUIRE(status.underrun_count == 0);
+}
+
 TEST_CASE("RouteManager: consumer without producer produces underrun count",
           "[route_manager][integration]") {
     Fixture f(2, 2, /*buf*/ 16);

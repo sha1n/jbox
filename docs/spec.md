@@ -171,7 +171,7 @@ Route {
 **Start sequence** (all on the control thread — never the RT thread):
 
 1. Resolve source and destination `DeviceHandle`s by UID. If either missing, transition the route to `waiting`.
-2. Allocate the ring buffer. Size = `max(source buffer size, destination buffer size) × 4` frames per channel. At 48 kHz with a 64-sample device buffer, this is 256 frames per channel = ~5.3 ms of headroom.
+2. Allocate the ring buffer. Size = `max( max(source_buffer, dest_buffer) × 8 , 4096 )` frames per channel. At 48 kHz with 64-sample device buffers the floor dominates — 4096 frames = ~85 ms of headroom. The headroom is sized to absorb USB-class source-device delivery jitter (buffers can arrive in bursts with multi-ms gaps), which is the dominant source of underrun on real hardware. The original sizing was `max_buffer × 4` with a 256-frame floor (~5 ms); that was tuned against the synchronous simulated backend and produced sustained underruns on a real Roland V31 → Apollo route during Phase 6 testing.
 3. Construct the `AudioConverter` with source rate → destination rate and `kAudioConverterSampleRateConverterComplexity_Mastering`.
 4. If the source device has no input IOProc yet (first route to use it as source), register one and start the device.
 5. Same for destination device and output IOProc.

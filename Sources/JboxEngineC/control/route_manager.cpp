@@ -44,10 +44,29 @@ inline void tryPushLog(jbox::rt::DefaultRtLogQueue* q,
 
 namespace {
 
-// Configuration that keeps the RT path allocation-free:
-//   ring capacity (frames) = 4 * max(source_buf, dest_buf)
-// Per docs/spec.md § 2.3; yields ~5–10 ms headroom at 48k/64-frame buffers.
-constexpr std::uint32_t kRingCapacityBase = 256;
+// Ring-capacity tuning (per docs/spec.md § 2.3).
+//
+// The ring has to absorb short-term imbalance between the source and
+// destination IOProcs. The dominant source of imbalance on real
+// hardware is burst-delivery jitter from USB class-compliant devices
+// (e.g. a Roland V31), which frequently deliver source samples in
+// small bursts with gaps between them rather than one buffer per tick.
+// (Clock drift is handled separately by the drift tracker + the
+// AudioConverter ratio; the ring still has to be large enough for the
+// PI controller to react before an under/overrun.)
+//
+// Phase 4's original sizing (`4 × max_buffer`, floor 256 frames) was
+// tuned against the simulated backend, which delivers synchronously
+// and never bursts. Real-hardware Phase-6 testing (V31 → Apollo, 48 k,
+// 64-frame device buffers) produced u1000+ underruns in under a minute
+// because 4 × 64 = 256 frames ≈ 5 ms is smaller than a typical USB
+// delivery gap. Bumped to `8 × max_buffer`, floor 4096 frames
+// (~85 ms at 48 k) — generous for a routing tool that is not used for
+// live monitoring, still well below any human-perceptible routing
+// latency.
+constexpr std::uint32_t kRingCapacityMultiplier = 8;
+constexpr std::uint32_t kRingCapacityFloor      = 4096;
+
 constexpr std::uint32_t kRtScratchMaxFrames = 8192;
 
 
@@ -329,14 +348,15 @@ jbox_error_code_t RouteManager::attemptStart(RouteRecord& r) {
         }
     }
 
-    // Size the ring buffer: 4x the larger device buffer, capped at a
-    // reasonable maximum. If either device reports 0 buffer size
-    // (e.g., simulated devices that don't set it), fall back to base.
+    // Size the ring buffer. See the ring-capacity note near the top of
+    // this file for the rationale. Tl;dr: 8 × device-buffer with a
+    // 4096-frame floor to absorb USB burst-delivery jitter.
     const std::uint32_t max_buffer =
         std::max(src->buffer_frame_size, dst->buffer_frame_size);
     const std::uint32_t capacity_frames =
-        std::max<std::uint32_t>(kRingCapacityBase,
-                                max_buffer > 0 ? max_buffer * 4 : kRingCapacityBase);
+        std::max<std::uint32_t>(kRingCapacityFloor,
+                                max_buffer > 0 ? max_buffer * kRingCapacityMultiplier
+                                               : kRingCapacityFloor);
 
     r.ring_storage.assign(static_cast<std::size_t>(capacity_frames) * r.channels_count, 0.0f);
     r.ring = std::make_unique<jbox::rt::RingBuffer>(

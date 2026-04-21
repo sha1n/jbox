@@ -265,8 +265,10 @@ TEST_CASE("logging: edge-trigger flags reset on re-start",
 
 // -----------------------------------------------------------------------------
 // Overrun: edge-triggered the same way. Requires flooding the ring
-// buffer, which at 2 channels and default capacity is 256 frames; one
-// deliverBuffer of 257 frames does the trick.
+// buffer past its capacity. Current sizing (see route_manager.cpp) is
+// max(max_buffer_frame_size × 8, 4096 floor); the test fixture uses
+// 32-frame device buffers so the ring is capped at the 4096 floor.
+// Pick kFlood comfortably above that to force the overrun.
 // -----------------------------------------------------------------------------
 
 TEST_CASE("logging: overrun is edge-triggered",
@@ -279,7 +281,7 @@ TEST_CASE("logging: overrun is edge-triggered",
     // Deliver more input frames than the ring can hold without a
     // concurrent output drain — forces the writeFrames short-write
     // path in inputIOProcCallback and bumps overrun_count.
-    constexpr std::uint32_t kFlood = 1024;
+    constexpr std::uint32_t kFlood = 8192;
     std::vector<float> input(static_cast<std::size_t>(kFlood) * 2, 0.5f);
     f.backend->deliverBuffer("src", kFlood, input.data(), nullptr);
 
