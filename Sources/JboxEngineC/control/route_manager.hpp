@@ -94,14 +94,13 @@ struct RouteRecord {
     // yielding drum-monitoring-grade latency. Only set while running.
     bool          duplex_mode                    = false;
     IOProcId      duplex_ioproc_id               = kInvalidIOProcId;
-    // Snapshot of the HAL buffer frame size when we took ownership;
-    // restored on stop. 0 means we did not request a shrink (e.g.,
-    // the device was already at a small buffer).
-    std::uint32_t duplex_original_buffer_frames  = 0;
     // True iff we successfully claimed Core Audio hog mode on the
     // device for this route. Released in releaseRouteResources.
     // Hog mode lets us override a shared buffer size that another
-    // app (e.g. UAD Console holding Apollo at 512) was enforcing.
+    // app was enforcing. The buffer-frame-size snapshots (including
+    // each aggregate member's) live inside the backend's exclusive
+    // state, keyed by device UID — the RouteRecord doesn't track
+    // them here.
     bool          duplex_exclusive_claimed       = false;
 
     std::vector<float> input_scratch;

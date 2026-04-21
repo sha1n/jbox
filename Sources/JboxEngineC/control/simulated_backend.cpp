@@ -13,6 +13,14 @@ void SimulatedBackend::addDevice(const BackendDeviceInfo& info) {
     devices_[info.uid] = slot;
 }
 
+void SimulatedBackend::addAggregateDevice(const BackendDeviceInfo& info,
+                                          std::vector<std::string> sub_device_uids) {
+    DeviceSlot slot;
+    slot.info = info;
+    slot.sub_device_uids = std::move(sub_device_uids);
+    devices_[info.uid] = std::move(slot);
+}
+
 void SimulatedBackend::removeDevice(const std::string& uid) {
     devices_.erase(uid);
 }
@@ -216,15 +224,66 @@ std::uint32_t SimulatedBackend::currentBufferFrameSize(const std::string& uid) {
 bool SimulatedBackend::claimExclusive(const std::string& uid) {
     auto it = devices_.find(uid);
     if (it == devices_.end()) return false;
-    if (it->second.exclusive_claimed) return false;
+
+    ExclusiveSnapshot snap;
+
+    // Fan out to sub-devices first (aggregate semantics), then self.
+    // A member that's already hogged by someone else returns false on
+    // macOS; we mirror that.
+    for (const auto& sub_uid : it->second.sub_device_uids) {
+        auto sub = devices_.find(sub_uid);
+        if (sub == devices_.end() || sub->second.exclusive_claimed) {
+            // Roll back already-hogged members before failing.
+            for (const auto& other : it->second.sub_device_uids) {
+                if (other == sub_uid) break;
+                auto o = devices_.find(other);
+                if (o != devices_.end()) o->second.exclusive_claimed = false;
+            }
+            return false;
+        }
+        sub->second.exclusive_claimed = true;
+        snap.sub_devices.push_back({sub_uid, sub->second.info.buffer_frame_size});
+    }
+    if (it->second.exclusive_claimed) {
+        // Self already claimed — roll back subs and bail.
+        for (const auto& sub_uid : it->second.sub_device_uids) {
+            auto sub = devices_.find(sub_uid);
+            if (sub != devices_.end()) sub->second.exclusive_claimed = false;
+        }
+        return false;
+    }
     it->second.exclusive_claimed = true;
+    snap.self = {uid, it->second.info.buffer_frame_size};
+    exclusive_state_[uid] = std::move(snap);
     return true;
 }
 
 void SimulatedBackend::releaseExclusive(const std::string& uid) {
     auto it = devices_.find(uid);
     if (it == devices_.end()) return;
+
+    // Restore buffer sizes from the snapshot, then release the hog
+    // flag on self + sub-devices. Mirrors CoreAudioBackend's ordering.
+    auto snap_it = exclusive_state_.find(uid);
+    if (snap_it != exclusive_state_.end()) {
+        if (snap_it->second.self.original_buffer_frames > 0) {
+            it->second.info.buffer_frame_size =
+                snap_it->second.self.original_buffer_frames;
+        }
+        for (const auto& sub : snap_it->second.sub_devices) {
+            auto sub_it = devices_.find(sub.uid);
+            if (sub_it != devices_.end() && sub.original_buffer_frames > 0) {
+                sub_it->second.info.buffer_frame_size = sub.original_buffer_frames;
+            }
+        }
+        exclusive_state_.erase(snap_it);
+    }
+
     it->second.exclusive_claimed = false;
+    for (const auto& sub_uid : it->second.sub_device_uids) {
+        auto sub = devices_.find(sub_uid);
+        if (sub != devices_.end()) sub->second.exclusive_claimed = false;
+    }
 }
 
 std::uint32_t SimulatedBackend::requestBufferFrameSize(
@@ -234,9 +293,20 @@ std::uint32_t SimulatedBackend::requestBufferFrameSize(
         buffer_size_requests_.push_back({uid, frames, 0});
         return 0;
     }
-    // No range clamping in the simulated backend — tests supply the
-    // exact frame count they want recorded. The HAL-side clamping
-    // lives in CoreAudioBackend::requestBufferFrameSize.
+    // Aggregate semantics: fan out to each sub-device (recording each
+    // request so tests can assert it happened), then apply to the
+    // aggregate itself. No range clamping in the simulated backend —
+    // tests supply the exact frame count they want recorded. HAL-side
+    // clamping lives in CoreAudioBackend::requestBufferFrameSize.
+    for (const auto& sub_uid : it->second.sub_device_uids) {
+        auto sub = devices_.find(sub_uid);
+        if (sub == devices_.end()) {
+            buffer_size_requests_.push_back({sub_uid, frames, 0});
+            continue;
+        }
+        sub->second.info.buffer_frame_size = frames;
+        buffer_size_requests_.push_back({sub_uid, frames, frames});
+    }
     it->second.info.buffer_frame_size = frames;
     buffer_size_requests_.push_back({uid, frames, frames});
     return frames;

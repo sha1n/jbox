@@ -498,31 +498,26 @@ jbox_error_code_t RouteManager::attemptStart(RouteRecord& r) {
         r.estimated_latency_us = estimateLatencyMicroseconds(lc);
 
         // Try to claim exclusive (hog-mode) ownership of the device
-        // before touching its buffer size — with other apps (UAD
-        // Console, system audio, etc.) disconnected we're the only
-        // client and Core Audio's max-across-clients policy collapses
-        // to just our request. This is how DAWs force the buffer to
-        // their preferred size. Failure is non-fatal: we fall through
-        // to the shared path and accept whatever buffer size the HAL
-        // ends up giving us.
+        // before touching its buffer size — with other apps using the
+        // device disconnected we're the only client and Core Audio's
+        // max-across-clients policy collapses to just our request.
+        // Failure is non-fatal: we fall through to the shared path
+        // and accept whatever buffer size the HAL ends up giving us.
         r.duplex_exclusive_claimed =
             dm_.backend().claimExclusive(r.source_uid);
 
         // Request a small HAL buffer before opening the IOProc — same
         // target the mux uses for low-latency attachments (64 frames).
-        // Snapshot the pre-change value so stopRoute can restore it.
-        // On aggregate devices and most HALs the change propagates to
-        // member devices; if another app is holding the device at a
-        // larger size without hog mode, the buffer stays there and
-        // the actual post-change value surfaces in the pill.
+        // On aggregate devices the change fans out to every member
+        // (that's where the actual HAL buffer lives); if another app
+        // is holding a member at a larger size without hog mode, that
+        // member stays there and the actual post-change value surfaces
+        // in the pill. Pre-change buffer snapshots are kept by the
+        // backend's claimExclusive state and restored in
+        // releaseExclusive — the fast path doesn't track them here.
         constexpr std::uint32_t kDuplexBufferTargetFrames = 64;
-        const std::uint32_t current_buffer =
-            dm_.backend().currentBufferFrameSize(r.source_uid);
-        if (current_buffer > kDuplexBufferTargetFrames) {
-            r.duplex_original_buffer_frames = current_buffer;
-            (void)dm_.backend().requestBufferFrameSize(
-                r.source_uid, kDuplexBufferTargetFrames);
-        }
+        (void)dm_.backend().requestBufferFrameSize(
+            r.source_uid, kDuplexBufferTargetFrames);
 
         // Re-read the device's buffer frame size after the request:
         // the HAL may have clamped to its allowed range, or another
@@ -539,11 +534,8 @@ jbox_error_code_t RouteManager::attemptStart(RouteRecord& r) {
         const IOProcId id = dm_.backend().openDuplexCallback(
             r.source_uid, &duplexIOProcCallback, &r);
         if (id == kInvalidIOProcId) {
-            if (r.duplex_original_buffer_frames > 0) {
-                (void)dm_.backend().requestBufferFrameSize(
-                    r.source_uid, r.duplex_original_buffer_frames);
-                r.duplex_original_buffer_frames = 0;
-            }
+            // releaseExclusive restores buffer sizes *and* hog mode
+            // on both the aggregate and its members.
             if (r.duplex_exclusive_claimed) {
                 dm_.backend().releaseExclusive(r.source_uid);
                 r.duplex_exclusive_claimed = false;
@@ -687,15 +679,12 @@ void RouteManager::releaseRouteResources(RouteRecord& r) {
             r.duplex_ioproc_id = kInvalidIOProcId;
         }
         dm_.backend().stopDevice(r.source_uid);
-        // Order matters: restore the buffer size first so other apps
-        // that reconnect after we release exclusive ownership see the
-        // original number, then release hog mode so they can actually
-        // reconnect.
-        if (r.duplex_original_buffer_frames > 0) {
-            (void)dm_.backend().requestBufferFrameSize(
-                r.source_uid, r.duplex_original_buffer_frames);
-            r.duplex_original_buffer_frames = 0;
-        }
+        // releaseExclusive restores per-device buffer sizes (aggregate
+        // + each member) from the snapshot taken at claimExclusive
+        // time, then releases hog mode on each. Order inside
+        // releaseExclusive: buffers first (while we still own hog
+        // mode, no other client is contending), then hog release so
+        // external apps reconnect and re-read the restored sizes.
         if (r.duplex_exclusive_claimed) {
             dm_.backend().releaseExclusive(r.source_uid);
             r.duplex_exclusive_claimed = false;

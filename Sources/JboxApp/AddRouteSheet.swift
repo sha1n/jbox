@@ -81,13 +81,13 @@ struct AddRouteSheet: View {
                  + "deliver samples in bursts may underrun — step back "
                  + "if you hear clicks."
         case .performance:
-            return "Drum-monitoring tier. Smallest ring + aggressive "
+            return "Lowest latency tier. Smallest ring + aggressive "
                  + "drift setpoint. When source and destination are "
                  + "the same device (e.g. an aggregate), takes "
                  + "exclusive control of the device to force a small "
-                 + "HAL buffer — other apps (UAD Console, DAWs) are "
+                 + "HAL buffer — other apps using the device are "
                  + "disconnected while the route is running. Underruns "
-                 + "are expected on bursty USB sources."
+                 + "are expected on bursty sources."
         }
     }
 

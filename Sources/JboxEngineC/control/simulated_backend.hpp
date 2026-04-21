@@ -35,6 +35,15 @@ public:
     // started state are reset).
     void addDevice(const BackendDeviceInfo& info);
 
+    // Register a simulated aggregate device — a device that wraps
+    // one or more previously-added member UIDs. Aggregate semantics
+    // are the same as macOS's Audio MIDI Setup aggregates:
+    // hog-mode and buffer-size requests on the aggregate fan out to
+    // each member. Members must already exist (addDevice'd) at the
+    // time of registration.
+    void addAggregateDevice(const BackendDeviceInfo& info,
+                            std::vector<std::string> sub_device_uids);
+
     // Remove a simulated device. Equivalent to "unplugging" it:
     // its callbacks are quietly dropped and started state is cleared.
     // Safe to call with an unknown UID (no-op).
@@ -134,6 +143,11 @@ private:
         // device.
         bool                 exclusive_claimed = false;
 
+        // Non-empty iff this device is an aggregate; each UID
+        // references another device in `devices_`. Matches macOS
+        // aggregate-device semantics.
+        std::vector<std::string> sub_device_uids;
+
         // Test-seeded per-channel names; empty until the test populates
         // them via setChannelNames(). Element index i corresponds to
         // channel (i+1) — same 0-indexed convention we use everywhere
@@ -152,6 +166,22 @@ private:
     // Records every requestBufferFrameSize invocation for test
     // inspection. Does not affect behavior.
     std::vector<BufferSizeRequest> buffer_size_requests_;
+
+    // Buffer-size snapshots captured by `claimExclusive` and
+    // restored by `releaseExclusive`. Keyed by the claimed UID; each
+    // entry holds the UID's own pre-claim buffer size plus the same
+    // for every aggregate sub-device. Mirrors CoreAudioBackend's
+    // ExclusiveState so the simulated-path tests and the real-
+    // hardware path share the same contract.
+    struct ExclusiveSnapshot {
+        struct Entry {
+            std::string   uid;
+            std::uint32_t original_buffer_frames = 0;
+        };
+        Entry              self;
+        std::vector<Entry> sub_devices;
+    };
+    std::unordered_map<std::string, ExclusiveSnapshot> exclusive_state_;
 };
 
 }  // namespace jbox::control

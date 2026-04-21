@@ -490,10 +490,13 @@ TEST_CASE("RouteManager: duplex fast path shrinks device buffer and restores on 
 
     REQUIRE(rm.stopRoute(id) == JBOX_OK);
 
-    // Restore request: second entry must return the device to 512.
-    REQUIRE(backend->bufferSizeRequests().size() == 2);
-    REQUIRE(backend->bufferSizeRequests().back().requested == 512);
-    REQUIRE(backend->currentBufferFrameSize("aggregate")   == 512);
+    // Restore happens inside releaseExclusive using the snapshot the
+    // backend captured at claim time — it does NOT go through
+    // requestBufferFrameSize, so the request log still has just the
+    // one shrink entry. The observable outcome is that the device's
+    // current buffer size is back to its original value.
+    REQUIRE(backend->bufferSizeRequests().size() == 1);
+    REQUIRE(backend->currentBufferFrameSize("aggregate") == 512);
 }
 
 TEST_CASE("RouteManager: duplex fast path claims exclusive ownership + releases on stop",
@@ -536,11 +539,105 @@ TEST_CASE("RouteManager: duplex fast path claims exclusive ownership + releases 
     REQUIRE(backend->currentBufferFrameSize("aggregate") == 512);
 }
 
-TEST_CASE("RouteManager: duplex fast path skips buffer shrink when already small",
+TEST_CASE("RouteManager: duplex fast path hogs aggregate sub-devices and shrinks each",
+          "[route_manager][duplex][aggregate]") {
+    // Hogging an aggregate alone doesn't evict other clients from
+    // its members, and the HAL buffer size lives on the members —
+    // so the duplex fast path must claim exclusive on each member
+    // and push the buffer-size request down into each. Stopping the
+    // route restores every member to its own pre-claim buffer size
+    // (not the aggregate's value, which would clobber the smaller
+    // member's original).
+    auto backend_ptr = std::make_unique<SimulatedBackend>();
+    SimulatedBackend* backend = backend_ptr.get();
+
+    BackendDeviceInfo sub_in;
+    sub_in.uid = "sub-input";
+    sub_in.name = "sub-input";
+    sub_in.direction = kBackendDirectionInput;
+    sub_in.input_channel_count  = 2;
+    sub_in.output_channel_count = 0;
+    sub_in.nominal_sample_rate  = 48000.0;
+    sub_in.buffer_frame_size    = 256;
+    backend->addDevice(sub_in);
+
+    BackendDeviceInfo sub_out;
+    sub_out.uid = "sub-output";
+    sub_out.name = "sub-output";
+    sub_out.direction = kBackendDirectionOutput;
+    sub_out.input_channel_count  = 0;
+    sub_out.output_channel_count = 2;
+    sub_out.nominal_sample_rate  = 48000.0;
+    // Larger than sub-input: simulates a device held open by another
+    // app at a bigger buffer size than its sibling.
+    sub_out.buffer_frame_size    = 512;
+    backend->addDevice(sub_out);
+
+    BackendDeviceInfo agg;
+    agg.uid = "aggregate";
+    agg.name = "aggregate";
+    agg.direction = kBackendDirectionInput | kBackendDirectionOutput;
+    agg.input_channel_count  = 2;
+    agg.output_channel_count = 2;
+    agg.nominal_sample_rate  = 48000.0;
+    agg.buffer_frame_size    = 512;  // effective = max(members)
+    backend->addAggregateDevice(agg, {"sub-input", "sub-output"});
+
+    auto dm = std::make_unique<DeviceManager>(std::move(backend_ptr));
+    dm->refresh();
+    RouteManager rm(*dm);
+
+    std::vector<ChannelEdge> m{{0, 0}, {1, 1}};
+    RouteManager::RouteConfig cfg{
+        "aggregate", "aggregate", m, "aggregate-duplex",
+        /*latency_mode*/ 2};
+    jbox_error_t err{};
+    const auto id = rm.addRoute(cfg, &err);
+    REQUIRE(rm.startRoute(id) == JBOX_OK);
+
+    // Every device in the aggregate is hogged.
+    REQUIRE(backend->isExclusive("sub-input"));
+    REQUIRE(backend->isExclusive("sub-output"));
+    REQUIRE(backend->isExclusive("aggregate"));
+
+    // Each sub-device AND the aggregate got a 64-frame request.
+    const auto& reqs = backend->bufferSizeRequests();
+    auto count_for = [&](const std::string& uid) {
+        std::size_t n = 0;
+        for (const auto& r : reqs) {
+            if (r.uid == uid && r.requested == 64) ++n;
+        }
+        return n;
+    };
+    REQUIRE(count_for("sub-input")  >= 1);
+    REQUIRE(count_for("sub-output") >= 1);
+    REQUIRE(count_for("aggregate")  >= 1);
+
+    // Buffer sizes now actually 64 on all three.
+    REQUIRE(backend->currentBufferFrameSize("sub-input")  == 64);
+    REQUIRE(backend->currentBufferFrameSize("sub-output") == 64);
+    REQUIRE(backend->currentBufferFrameSize("aggregate")  == 64);
+
+    REQUIRE(rm.stopRoute(id) == JBOX_OK);
+
+    // Hog released on every member.
+    REQUIRE_FALSE(backend->isExclusive("sub-input"));
+    REQUIRE_FALSE(backend->isExclusive("sub-output"));
+    REQUIRE_FALSE(backend->isExclusive("aggregate"));
+
+    // Buffer sizes restored to each member's own pre-claim value —
+    // critically, sub-input goes back to 256 (its original) and not
+    // 512 (the aggregate's original).
+    REQUIRE(backend->currentBufferFrameSize("sub-input")  == 256);
+    REQUIRE(backend->currentBufferFrameSize("sub-output") == 512);
+    REQUIRE(backend->currentBufferFrameSize("aggregate")  == 512);
+}
+
+TEST_CASE("RouteManager: duplex fast path leaves an already-small device at target",
           "[route_manager][duplex][buffer]") {
-    // If the device is already at or below the target (64 frames),
-    // we shouldn't burn a buffer-size request on it. Start at the
-    // target and verify no request is recorded.
+    // If the device is already at the target (64 frames), the shrink
+    // request is a no-op from the device's perspective — the
+    // buffer stays at 64 and stays at 64 on stop.
     auto backend_ptr = std::make_unique<SimulatedBackend>();
     SimulatedBackend* backend = backend_ptr.get();
     BackendDeviceInfo info;
@@ -563,11 +660,13 @@ TEST_CASE("RouteManager: duplex fast path skips buffer shrink when already small
     jbox_error_t err{};
     const auto id = rm.addRoute(cfg, &err);
     REQUIRE(rm.startRoute(id) == JBOX_OK);
-    REQUIRE(backend->bufferSizeRequests().empty());
+
+    // Buffer stays at 64 through start ...
+    REQUIRE(backend->currentBufferFrameSize("aggregate") == 64);
 
     REQUIRE(rm.stopRoute(id) == JBOX_OK);
-    // Still no requests — nothing to restore either.
-    REQUIRE(backend->bufferSizeRequests().empty());
+    // ... and through stop (restore target == original == 64).
+    REQUIRE(backend->currentBufferFrameSize("aggregate") == 64);
 }
 
 TEST_CASE("RouteManager: fan-out replicates one source into multiple destinations",
