@@ -685,10 +685,11 @@ After installing Xcode.app for the first time, the license must be accepted once
 
 **App bundle production.** SPM produces a plain executable. A shell script `scripts/bundle_app.sh` wraps the executable into a valid `Jbox.app`:
 1. Create the bundle skeleton: `Jbox.app/Contents/{MacOS,Resources}`.
-2. Copy the built executable to `Jbox.app/Contents/MacOS/Jbox`.
-3. Generate `Jbox.app/Contents/Info.plist` from a template (`Sources/JboxApp/Resources/Info.plist.in`) with version / build-number substitution.
-4. Copy the icon asset to `Jbox.app/Contents/Resources/Jbox.icns`.
-5. Run `codesign --sign - --force --options runtime Jbox.app` for ad-hoc signing with the Hardened Runtime flag.
+2. Copy the built executable to `Jbox.app/Contents/MacOS/Jbox` (and the CLI alongside at `Contents/MacOS/JboxEngineCLI`).
+3. Generate `Jbox.app/Contents/Info.plist` inline via heredoc with version / build-number substitution and the `NSMicrophoneUsageDescription` key.
+4. Emit a minimal `Jbox.entitlements` plist (also inline via heredoc) that claims `com.apple.security.device.audio-input` — required under Hardened Runtime per § 1.5. **Without this entitlement, Core Audio silently delivers zero-filled input buffers: IOProcs still fire, frame counters still advance, and the bug is invisible except through signal meters.**
+5. Run `codesign --sign - --force --options runtime --entitlements build/Jbox.entitlements Jbox.app` for ad-hoc signing with the Hardened Runtime flag and the audio-input entitlement attached.
+6. Post-sign verification: dump the bundle's attached entitlements via `codesign -d --entitlements -` and fail the script if `com.apple.security.device.audio-input` is absent. This CI-visible guard prevents a future edit to the signing line from reintroducing the silent-buffer bug. Copy the icon asset to `Jbox.app/Contents/Resources/Jbox.icns` if present.
 
 **Dependencies.** v1 uses only the macOS SDK and the C++ standard library. No third-party audio libraries, no Swift packages. If resampler quality or performance ever disappoints, libsamplerate or SoXr can be added as a Swift Package dependency.
 

@@ -100,9 +100,42 @@ cat > "${APP_BUNDLE}/Contents/Info.plist" <<PLIST
 </plist>
 PLIST
 
+# Entitlements plist — required under Hardened Runtime for Core Audio
+# input access. Emitted inline via heredoc, same pattern as Info.plist
+# above; if this ever grows past a single key, move it to a template
+# file under Sources/JboxApp/Resources/. See docs/spec.md § 1.5.
+ENTITLEMENTS_PATH="${BUILD_DIR}/Jbox.entitlements"
+cat > "${ENTITLEMENTS_PATH}" <<ENTITLEMENTS
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>com.apple.security.device.audio-input</key>
+    <true/>
+</dict>
+</plist>
+ENTITLEMENTS
+
 # Ad-hoc sign with Hardened Runtime so the bundle runs cleanly on the
 # user's own Mac. For distribution, a Developer ID signature would
 # replace the `-` with an identity name.
-codesign --sign - --force --options runtime "${APP_BUNDLE}" >/dev/null
+codesign --sign - --force --options runtime \
+    --entitlements "${ENTITLEMENTS_PATH}" \
+    "${APP_BUNDLE}" >/dev/null
+
+# Post-sign verification. Under Hardened Runtime, Core Audio silently
+# delivers zero-filled buffers when the bundle doesn't claim
+# `com.apple.security.device.audio-input` — the IOProc still fires and
+# frames_produced still advances, so the bug is invisible except via
+# signal meters. Fail loudly here instead so a future edit to the
+# signing line can't reintroduce the all-silent bug. See docs/spec.md
+# § 1.5.
+REQUIRED_ENTITLEMENT="com.apple.security.device.audio-input"
+ENTITLEMENTS_DUMP=$(codesign -d --entitlements - --xml "${APP_BUNDLE}" 2>/dev/null || true)
+if ! printf '%s' "${ENTITLEMENTS_DUMP}" | grep -q "${REQUIRED_ENTITLEMENT}"; then
+    echo "bundle_app: post-sign check failed — ${REQUIRED_ENTITLEMENT} is not claimed." >&2
+    echo "            Hardened Runtime will silence audio input. Fix codesign args." >&2
+    exit 1
+fi
 
 echo "bundle_app: done — ${APP_BUNDLE}"
