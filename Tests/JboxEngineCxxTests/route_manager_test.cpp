@@ -439,6 +439,97 @@ TEST_CASE("RouteManager: duplex fast path routes same-device Performance directl
     REQUIRE(stopped_status.state == JBOX_ROUTE_STATE_STOPPED);
 }
 
+TEST_CASE("RouteManager: duplex fast path shrinks device buffer and restores on stop",
+          "[route_manager][duplex][buffer]") {
+    // Regression test for the fast-path buffer-shrink fix. The
+    // duplex path bypasses the mux, so it has to issue its own
+    // requestBufferFrameSize when starting and a matching restore
+    // when stopping. Exercises three observable outcomes:
+    //   - a request-with-frames=64 call was recorded on attemptStart
+    //     when the device's buffer was larger
+    //   - the device's post-change buffer is honoured (64 in the
+    //     simulated backend, which doesn't clamp)
+    //   - stopRoute issues a restore-to-original request
+    auto backend_ptr = std::make_unique<SimulatedBackend>();
+    SimulatedBackend* backend = backend_ptr.get();
+    BackendDeviceInfo info;
+    info.uid = "aggregate";
+    info.name = "aggregate";
+    info.direction = kBackendDirectionInput | kBackendDirectionOutput;
+    info.input_channel_count  = 2;
+    info.output_channel_count = 2;
+    info.nominal_sample_rate  = 48000.0;
+    info.buffer_frame_size    = 512;  // large starting buffer
+    backend->addDevice(info);
+    auto dm = std::make_unique<DeviceManager>(std::move(backend_ptr));
+    dm->refresh();
+    RouteManager rm(*dm);
+
+    std::vector<ChannelEdge> m{{0, 0}, {1, 1}};
+    RouteManager::RouteConfig cfg{
+        "aggregate", "aggregate", m, "duplex-buffer",
+        /*latency_mode*/ 2};
+    jbox_error_t err{};
+    const auto id = rm.addRoute(cfg, &err);
+    REQUIRE(id != JBOX_INVALID_ROUTE_ID);
+    REQUIRE(backend->bufferSizeRequests().empty());  // not started yet
+
+    REQUIRE(rm.startRoute(id) == JBOX_OK);
+
+    // Shrink request: first entry must be 64 against this device.
+    REQUIRE(backend->bufferSizeRequests().size() == 1);
+    REQUIRE(backend->bufferSizeRequests().front().uid       == "aggregate");
+    REQUIRE(backend->bufferSizeRequests().front().requested == 64);
+    REQUIRE(backend->currentBufferFrameSize("aggregate")    == 64);
+
+    // The pill must reflect the post-shrink value, not the 512 we
+    // started with.
+    jbox_route_latency_components_t components{};
+    REQUIRE(rm.pollLatencyComponents(id, &components) == JBOX_OK);
+    REQUIRE(components.src_buffer_frames == 64);
+
+    REQUIRE(rm.stopRoute(id) == JBOX_OK);
+
+    // Restore request: second entry must return the device to 512.
+    REQUIRE(backend->bufferSizeRequests().size() == 2);
+    REQUIRE(backend->bufferSizeRequests().back().requested == 512);
+    REQUIRE(backend->currentBufferFrameSize("aggregate")   == 512);
+}
+
+TEST_CASE("RouteManager: duplex fast path skips buffer shrink when already small",
+          "[route_manager][duplex][buffer]") {
+    // If the device is already at or below the target (64 frames),
+    // we shouldn't burn a buffer-size request on it. Start at the
+    // target and verify no request is recorded.
+    auto backend_ptr = std::make_unique<SimulatedBackend>();
+    SimulatedBackend* backend = backend_ptr.get();
+    BackendDeviceInfo info;
+    info.uid = "aggregate";
+    info.name = "aggregate";
+    info.direction = kBackendDirectionInput | kBackendDirectionOutput;
+    info.input_channel_count  = 2;
+    info.output_channel_count = 2;
+    info.nominal_sample_rate  = 48000.0;
+    info.buffer_frame_size    = 64;  // already at target
+    backend->addDevice(info);
+    auto dm = std::make_unique<DeviceManager>(std::move(backend_ptr));
+    dm->refresh();
+    RouteManager rm(*dm);
+
+    std::vector<ChannelEdge> m{{0, 0}};
+    RouteManager::RouteConfig cfg{
+        "aggregate", "aggregate", m, "duplex-small",
+        /*latency_mode*/ 2};
+    jbox_error_t err{};
+    const auto id = rm.addRoute(cfg, &err);
+    REQUIRE(rm.startRoute(id) == JBOX_OK);
+    REQUIRE(backend->bufferSizeRequests().empty());
+
+    REQUIRE(rm.stopRoute(id) == JBOX_OK);
+    // Still no requests — nothing to restore either.
+    REQUIRE(backend->bufferSizeRequests().empty());
+}
+
 TEST_CASE("RouteManager: fan-out replicates one source into multiple destinations",
           "[route_manager][fan_out][integration]") {
     // Phase 6 refinement #1 end-to-end check: a single source channel

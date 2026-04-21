@@ -92,8 +92,12 @@ struct RouteRecord {
     // bypasses the mux, ring, and AudioConverter entirely. A single
     // duplex IOProc copies input samples to output in one callback,
     // yielding drum-monitoring-grade latency. Only set while running.
-    bool     duplex_mode       = false;
-    IOProcId duplex_ioproc_id  = kInvalidIOProcId;
+    bool          duplex_mode                    = false;
+    IOProcId      duplex_ioproc_id               = kInvalidIOProcId;
+    // Snapshot of the HAL buffer frame size when we took ownership;
+    // restored on stop. 0 means we did not request a shrink (e.g.,
+    // the device was already at a small buffer).
+    std::uint32_t duplex_original_buffer_frames  = 0;
 
     std::vector<float> input_scratch;
     std::vector<float> output_scratch;

@@ -497,9 +497,43 @@ jbox_error_code_t RouteManager::attemptStart(RouteRecord& r) {
         r.latency_components   = lc;
         r.estimated_latency_us = estimateLatencyMicroseconds(lc);
 
+        // Request a small HAL buffer before opening the IOProc — same
+        // target the mux uses for low-latency attachments (64 frames).
+        // Snapshot the pre-change value so stopRoute can restore it.
+        // On aggregate devices and most HALs the change propagates to
+        // member devices; if another app is holding the device at a
+        // larger size Core Audio's max-across-clients policy keeps
+        // the buffer there, and the actual post-change value surfaces
+        // in the latency-component pill.
+        constexpr std::uint32_t kDuplexBufferTargetFrames = 64;
+        const std::uint32_t current_buffer =
+            dm_.backend().currentBufferFrameSize(r.source_uid);
+        if (current_buffer > kDuplexBufferTargetFrames) {
+            r.duplex_original_buffer_frames = current_buffer;
+            (void)dm_.backend().requestBufferFrameSize(
+                r.source_uid, kDuplexBufferTargetFrames);
+        }
+
+        // Re-read the device's buffer frame size after the request:
+        // the HAL may have clamped to its allowed range, or another
+        // client may be holding it larger. Use the post-set value in
+        // the latency pill so the user sees the honest number.
+        const std::uint32_t applied_buffer =
+            dm_.backend().currentBufferFrameSize(r.source_uid);
+        if (applied_buffer > 0) {
+            lc.src_buffer_frames = applied_buffer;
+            r.latency_components   = lc;
+            r.estimated_latency_us = estimateLatencyMicroseconds(lc);
+        }
+
         const IOProcId id = dm_.backend().openDuplexCallback(
             r.source_uid, &duplexIOProcCallback, &r);
         if (id == kInvalidIOProcId) {
+            if (r.duplex_original_buffer_frames > 0) {
+                (void)dm_.backend().requestBufferFrameSize(
+                    r.source_uid, r.duplex_original_buffer_frames);
+                r.duplex_original_buffer_frames = 0;
+            }
             r.state = JBOX_ROUTE_STATE_ERROR;
             r.last_error = JBOX_ERR_DEVICE_BUSY;
             return JBOX_ERR_DEVICE_BUSY;
@@ -639,6 +673,11 @@ void RouteManager::releaseRouteResources(RouteRecord& r) {
             r.duplex_ioproc_id = kInvalidIOProcId;
         }
         dm_.backend().stopDevice(r.source_uid);
+        if (r.duplex_original_buffer_frames > 0) {
+            (void)dm_.backend().requestBufferFrameSize(
+                r.source_uid, r.duplex_original_buffer_frames);
+            r.duplex_original_buffer_frames = 0;
+        }
         r.duplex_mode = false;
     }
 
