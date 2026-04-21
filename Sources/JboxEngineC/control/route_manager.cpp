@@ -143,6 +143,55 @@ void inputIOProcCallback(const float* samples,
     r->frames_produced.fetch_add(written, std::memory_order_relaxed);
 }
 
+// Direct-monitor fast-path callback. Fires once per device IOProc
+// tick on an aggregate / duplex device with both input and output
+// buffers populated. Copies the mapped source channels straight into
+// the matching destination channels with no ring, no SRC, no drift
+// correction — latency = HAL + one buffer period. RT-safe.
+void duplexIOProcCallback(const float* input_samples,
+                          std::uint32_t input_frame_count,
+                          std::uint32_t input_channel_count,
+                          float*        output_samples,
+                          std::uint32_t output_frame_count,
+                          std::uint32_t /*output_channel_count_hint*/,
+                          void* user_data) {
+    auto* r = static_cast<RouteRecord*>(user_data);
+    if (input_samples == nullptr || output_samples == nullptr) return;
+    if (input_channel_count != r->source_total_channels ||
+        /*output_channel_count_hint*/ r->dest_total_channels == 0) {
+        if (!r->reported_channel_mismatch.exchange(true, std::memory_order_relaxed)) {
+            tryPushLog(r->log_queue, jbox::rt::kLogChannelMismatch, r->id,
+                       static_cast<std::uint64_t>(r->source_total_channels),
+                       static_cast<std::uint64_t>(input_channel_count));
+        }
+        return;
+    }
+
+    const std::uint32_t out_ch_count = r->dest_total_channels;
+    const std::uint32_t frames =
+        input_frame_count < output_frame_count ? input_frame_count
+                                               : output_frame_count;
+
+    for (std::uint32_t i = 0; i < r->channels_count; ++i) {
+        const std::uint32_t src_ch = r->mapping[i].src;
+        const std::uint32_t dst_ch = r->mapping[i].dst;
+        float peak_in  = 0.0f;
+        float peak_out = 0.0f;
+        for (std::uint32_t f = 0; f < frames; ++f) {
+            const float s = input_samples[f * input_channel_count + src_ch];
+            output_samples[f * out_ch_count + dst_ch] = s;
+            const float a = std::fabs(s);
+            if (a > peak_in)  peak_in  = a;
+            if (a > peak_out) peak_out = a;
+        }
+        r->source_meter.updateMax(i, peak_in);
+        r->dest_meter.updateMax(i, peak_out);
+    }
+
+    r->frames_produced.fetch_add(frames, std::memory_order_relaxed);
+    r->frames_consumed.fetch_add(frames, std::memory_order_relaxed);
+}
+
 // Pull callback handed to AudioConverterWrapper::convert. Reads from
 // the route's ring buffer into the converter's scratch.
 std::size_t ringPullCallback(float* dst, std::size_t frames, void* user) {
@@ -410,6 +459,66 @@ jbox_error_code_t RouteManager::attemptStart(RouteRecord& r) {
         }
     }
 
+    // Direct-monitor fast path. When Performance mode is selected and
+    // source and destination are the same device UID (typically an
+    // aggregate device wrapping both physical interfaces), we bypass
+    // the ring buffer and AudioConverter entirely: a single duplex
+    // IOProc copies input samples to output in one callback. Latency
+    // collapses to HAL + one buffer period. Exclusive: the backend
+    // refuses the duplex attach if any IOProc already targets the
+    // device, so a pre-existing mux on this UID is a hard block.
+    if (r.latency_mode == 2 && r.source_uid == r.dest_uid) {
+        // Exclusivity: no other route on this device.
+        if (muxes_.find(r.source_uid) != muxes_.end()) {
+            r.state = JBOX_ROUTE_STATE_ERROR;
+            r.last_error = JBOX_ERR_DEVICE_BUSY;
+            return JBOX_ERR_DEVICE_BUSY;
+        }
+
+        r.nominal_src_rate = src->nominal_sample_rate > 0.0
+                                 ? src->nominal_sample_rate
+                                 : 48000.0;
+        r.nominal_dst_rate = r.nominal_src_rate;
+
+        // Latency components for the fast path: no ring, no converter.
+        // The device buffer contributes exactly once (one callback
+        // carries both directions), so we drop dst_buffer_frames.
+        LatencyComponents lc{};
+        lc.src_hal_latency_frames   = src->input_device_latency_frames;
+        lc.src_safety_offset_frames = src->input_safety_offset_frames;
+        lc.src_buffer_frames        = src->buffer_frame_size;
+        lc.ring_target_fill_frames  = 0;
+        lc.converter_prime_frames   = 0;
+        lc.dst_buffer_frames        = 0;
+        lc.dst_safety_offset_frames = dst->output_safety_offset_frames;
+        lc.dst_hal_latency_frames   = dst->output_device_latency_frames;
+        lc.src_sample_rate_hz       = r.nominal_src_rate;
+        lc.dst_sample_rate_hz       = r.nominal_dst_rate;
+        r.latency_components   = lc;
+        r.estimated_latency_us = estimateLatencyMicroseconds(lc);
+
+        const IOProcId id = dm_.backend().openDuplexCallback(
+            r.source_uid, &duplexIOProcCallback, &r);
+        if (id == kInvalidIOProcId) {
+            r.state = JBOX_ROUTE_STATE_ERROR;
+            r.last_error = JBOX_ERR_DEVICE_BUSY;
+            return JBOX_ERR_DEVICE_BUSY;
+        }
+        if (!dm_.backend().startDevice(r.source_uid)) {
+            // startDevice returns false if already started; that's
+            // fine — the IOProc will still receive callbacks.
+        }
+
+        r.duplex_ioproc_id = id;
+        r.duplex_mode      = true;
+        r.state            = JBOX_ROUTE_STATE_RUNNING;
+        r.last_error       = JBOX_OK;
+        tryPushLog(log_queue_, jbox::rt::kLogRouteStarted, r.id,
+                   static_cast<std::uint64_t>(r.source_total_channels),
+                   static_cast<std::uint64_t>(r.dest_total_channels));
+        return JBOX_OK;
+    }
+
     // Size the ring buffer. See the ring-capacity note near the top of
     // this file for the three presets and their trade-offs. The tier
     // is chosen by r.latency_mode (0=safe, 1=low, 2=performance).
@@ -519,6 +628,20 @@ jbox_error_code_t RouteManager::attemptStart(RouteRecord& r) {
 }
 
 void RouteManager::releaseRouteResources(RouteRecord& r) {
+    // Duplex fast-path teardown runs first and is mutually exclusive
+    // with the mux-based path (the fast path never registers with a
+    // mux). closeCallback is synchronous on Core Audio — it stops the
+    // IOProc and blocks until the last in-flight callback returns,
+    // so any RT reference to `r` is gone before we release resources.
+    if (r.duplex_mode) {
+        if (r.duplex_ioproc_id != kInvalidIOProcId) {
+            dm_.backend().closeCallback(r.duplex_ioproc_id);
+            r.duplex_ioproc_id = kInvalidIOProcId;
+        }
+        dm_.backend().stopDevice(r.source_uid);
+        r.duplex_mode = false;
+    }
+
     // Detach from muxes first. Each detach blocks for one grace period
     // after the atomic swap, after which no RT callback can still be
     // referencing r's RT resources and it is safe to release them.

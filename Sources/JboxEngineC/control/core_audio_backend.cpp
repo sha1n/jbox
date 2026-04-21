@@ -18,17 +18,26 @@ struct CoreAudioBackend::IOProcRecord {
     AudioDeviceID       device_id      = kAudioObjectUnknown;
     AudioDeviceIOProcID ca_proc_id     = nullptr;
 
-    bool is_input = false;
-    std::uint32_t channels = 0;
+    enum class Mode { kInput, kOutput, kDuplex };
+    Mode mode = Mode::kInput;
+
+    // For kInput  : channels = input channel count.
+    // For kOutput : channels = output channel count.
+    // For kDuplex : unused; input_channels + output_channels hold both.
+    std::uint32_t channels        = 0;
+    std::uint32_t input_channels  = 0;
+    std::uint32_t output_channels = 0;
 
     InputIOProcCallback  input_cb  = nullptr;
     OutputIOProcCallback output_cb = nullptr;
+    DuplexIOProcCallback duplex_cb = nullptr;
     void*                user_data = nullptr;
 
     // Pre-allocated interleave / de-interleave scratch, sized at open
     // time. Capacity covers any plausible buffer size the device can
     // be set to; no growth happens at RT.
-    std::vector<float> scratch;
+    std::vector<float> scratch;         // input (kInput / kDuplex) or output (kOutput)
+    std::vector<float> output_scratch;  // kDuplex only: interleaved output staging
 };
 
 namespace {
@@ -146,6 +155,55 @@ std::uint32_t getSafetyOffsetFrames(AudioObjectID device,
 
 // RT thread trampoline. Core Audio invokes this from its audio
 // callback; we must NOT allocate, lock, or syscall here.
+// Read `frame_count` input frames into `scratch` (interleaved) from
+// `inInputData`, interleaving if the device presents non-interleaved
+// per-channel buffers. Returns the frame count actually available.
+std::uint32_t readInputInterleaved(const AudioBufferList* inInputData,
+                                   std::uint32_t channels,
+                                   float* scratch) {
+    if (inInputData == nullptr || inInputData->mNumberBuffers == 0) return 0;
+    if (inInputData->mNumberBuffers == 1 &&
+        inInputData->mBuffers[0].mNumberChannels == channels) {
+        const std::uint32_t frame_count =
+            inInputData->mBuffers[0].mDataByteSize /
+            (sizeof(float) * channels);
+        std::memcpy(scratch, inInputData->mBuffers[0].mData,
+                    frame_count * channels * sizeof(float));
+        return frame_count;
+    }
+    const std::uint32_t per_ch_bytes = inInputData->mBuffers[0].mDataByteSize;
+    const std::uint32_t frame_count = per_ch_bytes / sizeof(float);
+    for (std::uint32_t ch = 0; ch < channels && ch < inInputData->mNumberBuffers; ++ch) {
+        const auto* src = static_cast<const float*>(inInputData->mBuffers[ch].mData);
+        for (std::uint32_t f = 0; f < frame_count; ++f) {
+            scratch[f * channels + ch] = src[f];
+        }
+    }
+    return frame_count;
+}
+
+// De-interleave `frame_count` interleaved frames in `scratch` into
+// `outOutputData`'s per-channel buffers, or memcpy if the device uses
+// interleaved output.
+void writeOutputFromInterleaved(AudioBufferList* outOutputData,
+                                std::uint32_t channels,
+                                std::uint32_t frame_count,
+                                const float* scratch) {
+    if (outOutputData == nullptr || outOutputData->mNumberBuffers == 0) return;
+    if (outOutputData->mNumberBuffers == 1 &&
+        outOutputData->mBuffers[0].mNumberChannels == channels) {
+        std::memcpy(outOutputData->mBuffers[0].mData, scratch,
+                    frame_count * channels * sizeof(float));
+        return;
+    }
+    for (std::uint32_t ch = 0; ch < channels && ch < outOutputData->mNumberBuffers; ++ch) {
+        auto* dst = static_cast<float*>(outOutputData->mBuffers[ch].mData);
+        for (std::uint32_t f = 0; f < frame_count; ++f) {
+            dst[f] = scratch[f * channels + ch];
+        }
+    }
+}
+
 OSStatus ioProcTrampoline(AudioObjectID /*inDevice*/,
                           const AudioTimeStamp* /*inNow*/,
                           const AudioBufferList* inInputData,
@@ -153,9 +211,49 @@ OSStatus ioProcTrampoline(AudioObjectID /*inDevice*/,
                           AudioBufferList* outOutputData,
                           const AudioTimeStamp* /*inOutputTime*/,
                           void* inClientData) {
+    using Mode = CoreAudioBackend::IOProcRecord::Mode;
     auto* rec = static_cast<CoreAudioBackend::IOProcRecord*>(inClientData);
 
-    if (rec->is_input) {
+    if (rec->mode == Mode::kDuplex) {
+        if (rec->duplex_cb == nullptr) return noErr;
+        if (inInputData == nullptr || outOutputData == nullptr) return noErr;
+        if (inInputData->mNumberBuffers == 0 ||
+            outOutputData->mNumberBuffers == 0) return noErr;
+
+        float* in_scratch  = rec->scratch.data();
+        float* out_scratch = rec->output_scratch.data();
+        const std::uint32_t in_ch  = rec->input_channels;
+        const std::uint32_t out_ch = rec->output_channels;
+
+        const std::uint32_t in_frames =
+            readInputInterleaved(inInputData, in_ch, in_scratch);
+
+        // Compute output frame count from the device's output buffer.
+        const std::uint32_t out_per_ch_bytes =
+            outOutputData->mBuffers[0].mDataByteSize;
+        const std::uint32_t out_frames_linear =
+            out_per_ch_bytes / (sizeof(float) * out_ch);
+        const std::uint32_t out_frames_planar =
+            out_per_ch_bytes / sizeof(float);
+        const bool interleaved_out =
+            outOutputData->mNumberBuffers == 1 &&
+            outOutputData->mBuffers[0].mNumberChannels == out_ch;
+        const std::uint32_t out_frames =
+            interleaved_out ? out_frames_linear : out_frames_planar;
+
+        // Zero the output scratch before handing it to the callback.
+        std::memset(out_scratch, 0,
+                    sizeof(float) * out_frames * out_ch);
+
+        rec->duplex_cb(in_scratch, in_frames, in_ch,
+                       out_scratch, out_frames, out_ch,
+                       rec->user_data);
+
+        writeOutputFromInterleaved(outOutputData, out_ch, out_frames, out_scratch);
+        return noErr;
+    }
+
+    if (rec->mode == Mode::kInput) {
         if (rec->input_cb == nullptr || inInputData == nullptr ||
             inInputData->mNumberBuffers == 0) {
             return noErr;
@@ -185,7 +283,7 @@ OSStatus ioProcTrampoline(AudioObjectID /*inDevice*/,
             }
             rec->input_cb(scratch, frame_count, channels, rec->user_data);
         }
-    } else {
+    } else {  // Mode::kOutput
         if (rec->output_cb == nullptr || outOutputData == nullptr ||
             outOutputData->mNumberBuffers == 0) {
             return noErr;
@@ -410,13 +508,17 @@ IOProcId CoreAudioBackend::openInputCallback(const std::string& uid,
     // One input IOProc per device — matches the simulated backend
     // contract and the engine's multiplexing model.
     for (const auto& [proc_id, rec] : ioprocs_) {
-        if (rec->device_uid == uid && rec->is_input) return kInvalidIOProcId;
+        if (rec->device_uid != uid) continue;
+        if (rec->mode == IOProcRecord::Mode::kInput ||
+            rec->mode == IOProcRecord::Mode::kDuplex) {
+            return kInvalidIOProcId;
+        }
     }
 
     auto rec = std::make_unique<IOProcRecord>();
     rec->device_uid = uid;
     rec->device_id  = id;
-    rec->is_input   = true;
+    rec->mode       = IOProcRecord::Mode::kInput;
     rec->channels   = channels;
     rec->input_cb   = callback;
     rec->user_data  = user_data;
@@ -440,17 +542,57 @@ IOProcId CoreAudioBackend::openOutputCallback(const std::string& uid,
     if (channels == 0) return kInvalidIOProcId;
 
     for (const auto& [proc_id, rec] : ioprocs_) {
-        if (rec->device_uid == uid && !rec->is_input) return kInvalidIOProcId;
+        if (rec->device_uid != uid) continue;
+        if (rec->mode == IOProcRecord::Mode::kOutput ||
+            rec->mode == IOProcRecord::Mode::kDuplex) {
+            return kInvalidIOProcId;
+        }
     }
 
     auto rec = std::make_unique<IOProcRecord>();
     rec->device_uid = uid;
     rec->device_id  = id;
-    rec->is_input   = false;
+    rec->mode       = IOProcRecord::Mode::kOutput;
     rec->channels   = channels;
     rec->output_cb  = callback;
     rec->user_data  = user_data;
     rec->scratch.assign(kScratchMaxFrames * kScratchMaxChannels, 0.0f);
+
+    if (!registerIOProc(*rec)) return kInvalidIOProcId;
+
+    const IOProcId id_out = next_id_++;
+    ioprocs_[id_out] = std::move(rec);
+    return id_out;
+}
+
+IOProcId CoreAudioBackend::openDuplexCallback(const std::string& uid,
+                                              DuplexIOProcCallback callback,
+                                              void* user_data) {
+    if (callback == nullptr) return kInvalidIOProcId;
+    auto it = device_ids_.find(uid);
+    if (it == device_ids_.end()) return kInvalidIOProcId;
+    const AudioDeviceID id = it->second;
+    const std::uint32_t in_channels  = getChannelCount(id, kAudioObjectPropertyScopeInput);
+    const std::uint32_t out_channels = getChannelCount(id, kAudioObjectPropertyScopeOutput);
+    if (in_channels == 0 || out_channels == 0) return kInvalidIOProcId;
+
+    // Exclusive: refuse if any IOProc (input, output, or another duplex)
+    // already targets this device. Duplex is the direct-monitor fast
+    // path and takes over the device while running.
+    for (const auto& [proc_id, rec] : ioprocs_) {
+        if (rec->device_uid == uid) return kInvalidIOProcId;
+    }
+
+    auto rec = std::make_unique<IOProcRecord>();
+    rec->device_uid      = uid;
+    rec->device_id       = id;
+    rec->mode            = IOProcRecord::Mode::kDuplex;
+    rec->input_channels  = in_channels;
+    rec->output_channels = out_channels;
+    rec->duplex_cb       = callback;
+    rec->user_data       = user_data;
+    rec->scratch.assign(kScratchMaxFrames * kScratchMaxChannels, 0.0f);
+    rec->output_scratch.assign(kScratchMaxFrames * kScratchMaxChannels, 0.0f);
 
     if (!registerIOProc(*rec)) return kInvalidIOProcId;
 

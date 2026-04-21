@@ -86,6 +86,23 @@ using OutputIOProcCallback = void (*)(float* samples,
                                       std::uint32_t channel_count,
                                       void* user_data);
 
+// Callback invoked by the backend once per RT tick on a duplex-
+// configured device (typically an aggregate device, or any device
+// opened for both input and output). `input_samples` and
+// `output_samples` are interleaved. `output_samples` is zero-
+// initialised on entry so the callback only needs to write channels
+// it actually fills. Used by the Phase 6 direct-monitor fast path
+// to skip the ring buffer and AudioConverter entirely when a route's
+// source and destination devices are the same UID and the user has
+// opted into Performance latency mode. MUST be RT-safe.
+using DuplexIOProcCallback = void (*)(const float* input_samples,
+                                      std::uint32_t input_frame_count,
+                                      std::uint32_t input_channel_count,
+                                      float*        output_samples,
+                                      std::uint32_t output_frame_count,
+                                      std::uint32_t output_channel_count,
+                                      void* user_data);
+
 class IDeviceBackend {
 public:
     virtual ~IDeviceBackend() = default;
@@ -118,6 +135,15 @@ public:
     // Returns kInvalidIOProcId on failure.
     virtual IOProcId openOutputCallback(const std::string& uid,
                                         OutputIOProcCallback callback,
+                                        void* user_data) = 0;
+
+    // Register a duplex IOProc that handles both directions in one
+    // RT callback. Used by the direct-monitor fast path on aggregate
+    // devices. Fails (returns kInvalidIOProcId) if the device has no
+    // input channels, no output channels, or already has an IOProc
+    // registered in either direction.
+    virtual IOProcId openDuplexCallback(const std::string& uid,
+                                        DuplexIOProcCallback callback,
                                         void* user_data) = 0;
 
     // Unregister a previously-registered callback. Safe with

@@ -80,6 +80,32 @@ void SimulatedBackend::deliverBuffer(const std::string& uid,
                         total_samples * sizeof(float));
         }
     }
+
+    // Duplex direction. Runs once with both directions' buffers so
+    // tests can exercise the direct-monitor fast path against the
+    // simulated backend. The output buffer is zero-initialised before
+    // the callback — matching Core Audio's IOProc contract.
+    if (slot.duplex_cb != nullptr && input_source != nullptr) {
+        const std::size_t out_total =
+            static_cast<std::size_t>(frame_count) * slot.info.output_channel_count;
+        if (output_scratch_.size() < out_total) {
+            output_scratch_.assign(out_total, 0.0f);
+        } else {
+            std::fill_n(output_scratch_.begin(), out_total, 0.0f);
+        }
+        slot.duplex_cb(input_source,
+                       frame_count,
+                       slot.info.input_channel_count,
+                       output_scratch_.data(),
+                       frame_count,
+                       slot.info.output_channel_count,
+                       slot.duplex_ud);
+        if (output_capture != nullptr) {
+            std::memcpy(output_capture,
+                        output_scratch_.data(),
+                        out_total * sizeof(float));
+        }
+    }
 }
 
 std::vector<BackendDeviceInfo> SimulatedBackend::enumerate() {
@@ -121,6 +147,26 @@ IOProcId SimulatedBackend::openOutputCallback(const std::string& uid,
     return slot.output_id;
 }
 
+IOProcId SimulatedBackend::openDuplexCallback(const std::string& uid,
+                                              DuplexIOProcCallback callback,
+                                              void* user_data) {
+    if (callback == nullptr) return kInvalidIOProcId;
+    auto it = devices_.find(uid);
+    if (it == devices_.end()) return kInvalidIOProcId;
+    DeviceSlot& slot = it->second;
+    const bool duplex_capable =
+        (slot.info.direction & kBackendDirectionInput)  != 0 &&
+        (slot.info.direction & kBackendDirectionOutput) != 0;
+    if (!duplex_capable) return kInvalidIOProcId;
+    if (slot.duplex_cb != nullptr) return kInvalidIOProcId;  // already registered
+    if (slot.input_cb  != nullptr) return kInvalidIOProcId;
+    if (slot.output_cb != nullptr) return kInvalidIOProcId;
+    slot.duplex_cb = callback;
+    slot.duplex_ud = user_data;
+    slot.duplex_id = next_id_++;
+    return slot.duplex_id;
+}
+
 void SimulatedBackend::closeCallback(IOProcId id) {
     if (id == kInvalidIOProcId) return;
     for (auto& [uid, slot] : devices_) {
@@ -134,6 +180,12 @@ void SimulatedBackend::closeCallback(IOProcId id) {
             slot.output_cb = nullptr;
             slot.output_ud = nullptr;
             slot.output_id = kInvalidIOProcId;
+            return;
+        }
+        if (slot.duplex_id == id) {
+            slot.duplex_cb = nullptr;
+            slot.duplex_ud = nullptr;
+            slot.duplex_id = kInvalidIOProcId;
             return;
         }
     }

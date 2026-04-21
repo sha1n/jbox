@@ -80,6 +80,9 @@ public:
     IOProcId openOutputCallback(const std::string& uid,
                                 OutputIOProcCallback callback,
                                 void* user_data) override;
+    IOProcId openDuplexCallback(const std::string& uid,
+                                DuplexIOProcCallback callback,
+                                void* user_data) override;
     void closeCallback(IOProcId id) override;
     bool startDevice(const std::string& uid) override;
     void stopDevice(const std::string& uid) override;
@@ -112,6 +115,10 @@ private:
         OutputIOProcCallback output_cb = nullptr;
         void*                output_ud = nullptr;
         IOProcId             output_id = kInvalidIOProcId;
+
+        DuplexIOProcCallback duplex_cb = nullptr;
+        void*                duplex_ud = nullptr;
+        IOProcId             duplex_id = kInvalidIOProcId;
 
         // Test-seeded per-channel names; empty until the test populates
         // them via setChannelNames(). Element index i corresponds to

@@ -53,6 +53,9 @@ public:
     IOProcId openOutputCallback(const std::string& uid,
                                 OutputIOProcCallback callback,
                                 void* user_data) override;
+    IOProcId openDuplexCallback(const std::string& uid,
+                                DuplexIOProcCallback callback,
+                                void* user_data) override;
     void closeCallback(IOProcId id) override;
     bool startDevice(const std::string& uid) override;
     void stopDevice(const std::string& uid) override;

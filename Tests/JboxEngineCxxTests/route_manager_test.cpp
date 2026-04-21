@@ -356,6 +356,89 @@ TEST_CASE("RouteManager: non-contiguous channel selection",
     }
 }
 
+TEST_CASE("RouteManager: duplex fast path routes same-device Performance directly",
+          "[route_manager][duplex][integration]") {
+    // Phase 6 refinement #6 direct-monitor fast path. A route where
+    // source_uid == dest_uid and latency_mode == 2 bypasses the ring
+    // buffer and AudioConverter and copies input straight to output
+    // in a single duplex IOProc. Verifies:
+    //   - addRoute + startRoute succeed
+    //   - the state is RUNNING (no waiting / error)
+    //   - delivering one buffer through SimulatedBackend routes the
+    //     input samples into the mapped output channels
+    //   - the latency estimate drops ring + converter contributions
+    //     to zero and the dst buffer is not double-counted
+    auto backend_ptr = std::make_unique<SimulatedBackend>();
+    SimulatedBackend* backend = backend_ptr.get();
+    BackendDeviceInfo info;
+    info.uid = "aggregate";
+    info.name = "aggregate";
+    info.direction = kBackendDirectionInput | kBackendDirectionOutput;
+    info.input_channel_count  = 2;
+    info.output_channel_count = 4;
+    info.nominal_sample_rate  = 48000.0;
+    info.buffer_frame_size    = 64;
+    info.input_device_latency_frames  = 24;
+    info.input_safety_offset_frames   = 16;
+    info.output_device_latency_frames = 24;
+    info.output_safety_offset_frames  = 16;
+    backend->addDevice(info);
+    auto dm = std::make_unique<DeviceManager>(std::move(backend_ptr));
+    dm->refresh();
+    RouteManager rm(*dm);
+
+    // src channel 0 → dst channels 1 AND 3 (fan-out also exercised).
+    std::vector<ChannelEdge> m{{0, 1}, {0, 3}};
+    RouteManager::RouteConfig cfg{
+        "aggregate", "aggregate", m, "duplex",
+        /*latency_mode*/ 2};
+    jbox_error_t err{};
+    const auto id = rm.addRoute(cfg, &err);
+    REQUIRE(id != JBOX_INVALID_ROUTE_ID);
+    REQUIRE(rm.startRoute(id) == JBOX_OK);
+
+    jbox_route_status_t status{};
+    REQUIRE(rm.pollStatus(id, &status) == JBOX_OK);
+    REQUIRE(status.state == JBOX_ROUTE_STATE_RUNNING);
+
+    // The pill should NOT contain ring or converter contributions and
+    // should NOT double-count the device buffer. Total ≈
+    // src_hal + src_safety + src_buffer + dst_safety + dst_hal frames
+    // at 48 k = (24 + 16 + 64 + 16 + 24) = 144 → 3000 µs.
+    jbox_route_latency_components_t components{};
+    REQUIRE(rm.pollLatencyComponents(id, &components) == JBOX_OK);
+    REQUIRE(components.ring_target_fill_frames == 0);
+    REQUIRE(components.converter_prime_frames  == 0);
+    REQUIRE(components.dst_buffer_frames       == 0);
+    REQUIRE(components.src_buffer_frames       == 64);
+    REQUIRE(status.estimated_latency_us > 2500);
+    REQUIRE(status.estimated_latency_us < 3500);
+
+    // Drive one buffer through the duplex path.
+    constexpr std::uint32_t kFrames = 64;
+    std::vector<float> input(kFrames * 2);
+    for (std::uint32_t i = 0; i < kFrames; ++i) {
+        input[i * 2 + 0] = static_cast<float>(i) * 0.01f;  // src ch 0
+        input[i * 2 + 1] = 99.0f;                          // src ch 1 (unmapped)
+    }
+    std::vector<float> output(kFrames * 4, 0.0f);
+    backend->deliverBuffer("aggregate", kFrames, input.data(), output.data());
+
+    for (std::uint32_t i = 0; i < kFrames; ++i) {
+        const float expected = static_cast<float>(i) * 0.01f;
+        REQUIRE(output[i * 4 + 0] == 0.0f);      // unmapped
+        REQUIRE(output[i * 4 + 1] == expected);  // dst ch 1 ← src ch 0
+        REQUIRE(output[i * 4 + 2] == 0.0f);      // unmapped
+        REQUIRE(output[i * 4 + 3] == expected);  // dst ch 3 ← src ch 0 (fan-out)
+    }
+
+    // Stop should tear down cleanly.
+    REQUIRE(rm.stopRoute(id) == JBOX_OK);
+    jbox_route_status_t stopped_status{};
+    REQUIRE(rm.pollStatus(id, &stopped_status) == JBOX_OK);
+    REQUIRE(stopped_status.state == JBOX_ROUTE_STATE_STOPPED);
+}
+
 TEST_CASE("RouteManager: fan-out replicates one source into multiple destinations",
           "[route_manager][fan_out][integration]") {
     // Phase 6 refinement #1 end-to-end check: a single source channel

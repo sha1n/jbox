@@ -87,6 +87,14 @@ struct RouteRecord {
     DeviceIOMux* attached_src_mux = nullptr;
     DeviceIOMux* attached_dst_mux = nullptr;
 
+    // Direct-monitor fast path: when source and destination are the
+    // same device UID and Performance mode is active, the route
+    // bypasses the mux, ring, and AudioConverter entirely. A single
+    // duplex IOProc copies input samples to output in one callback,
+    // yielding drum-monitoring-grade latency. Only set while running.
+    bool     duplex_mode       = false;
+    IOProcId duplex_ioproc_id  = kInvalidIOProcId;
+
     std::vector<float> input_scratch;
     std::vector<float> output_scratch;
 
