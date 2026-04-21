@@ -369,6 +369,20 @@ jbox_error_code_t jbox_engine_poll_route_status(jbox_engine_t* engine,
     }
 }
 
+jbox_error_code_t jbox_engine_poll_route_latency_components(
+    jbox_engine_t* engine,
+    jbox_route_id_t route_id,
+    jbox_route_latency_components_t* out_components) {
+    if (engine == nullptr || out_components == nullptr) {
+        return JBOX_ERR_INVALID_ARGUMENT;
+    }
+    try {
+        return engine->impl->pollLatencyComponents(route_id, out_components);
+    } catch (...) {
+        return JBOX_ERR_INTERNAL;
+    }
+}
+
 size_t jbox_engine_poll_meters(jbox_engine_t*    engine,
                                jbox_route_id_t   route_id,
                                jbox_meter_side_t side,

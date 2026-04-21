@@ -125,6 +125,12 @@ public final class EngineStore {
     /// array, one linear peak per mapped channel.
     public private(set) var meters: [UInt32: MeterPeaks] = [:]
 
+    /// Per-route latency component breakdown, populated by the engine
+    /// at route start. Refreshed by `pollStatuses()` so the UI sees a
+    /// zeroed entry immediately on stop and the current values on a
+    /// fresh start. Keyed by route id; absent for never-started routes.
+    public private(set) var latencyComponents: [UInt32: LatencyComponents] = [:]
+
     /// Per-channel peak-hold tracker driven by `pollMeters()`. Not
     /// `@Observable` — the UI re-reads `heldPeak(...)` on each
     /// `TimelineView` tick with a fresh `now`, and the decay is
@@ -266,6 +272,7 @@ public final class EngineStore {
             try engine.removeRoute(id)
             routes.removeAll(where: { $0.id == id })
             meters.removeValue(forKey: id)
+            latencyComponents.removeValue(forKey: id)
             peakHolds.forget(routeId: id)
             lastError = nil
             JboxLog.engine.notice("removeRoute id=\(id) ok")
@@ -276,11 +283,17 @@ public final class EngineStore {
     }
 
     /// Refresh `status` on every known route. Meant to be driven by a
-    /// ~4 Hz timer from the app layer (Phase 6 #4).
+    /// ~4 Hz timer from the app layer (Phase 6 #4). Also refreshes the
+    /// cached `latencyComponents` so the diagnostics panel sees the
+    /// current breakdown as routes start / stop.
     public func pollStatuses() {
         for i in routes.indices {
-            if let status = try? engine.pollStatus(routes[i].id) {
+            let id = routes[i].id
+            if let status = try? engine.pollStatus(id) {
                 routes[i].status = status
+            }
+            if let components = try? engine.pollLatencyComponents(id) {
+                latencyComponents[id] = components
             }
         }
     }

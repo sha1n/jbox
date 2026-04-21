@@ -13,40 +13,50 @@ struct MeterPanel: View {
     let store: EngineStore
     let peaks: MeterPeaks
 
+    @AppStorage(JboxPreferences.showDiagnosticsKey) private var showDiagnostics = false
+
     private let barHeight: CGFloat = 200
 
     var body: some View {
         TimelineView(.animation(minimumInterval: 1.0 / 30.0, paused: false)) { timeline in
             let now = timeline.date.timeIntervalSinceReferenceDate
-            HStack(alignment: .center, spacing: 12) {
-                BarGroup(
-                    title: "SOURCE",
-                    labels: sourceLabels,
-                    peaks: peaks.source,
-                    routeId: route.id,
-                    side: .source,
-                    store: store,
-                    now: now,
-                    barHeight: barHeight
-                )
-                .frame(maxWidth: .infinity)
+            VStack(alignment: .leading, spacing: 16) {
+                HStack(alignment: .center, spacing: 12) {
+                    BarGroup(
+                        title: "SOURCE",
+                        labels: sourceLabels,
+                        peaks: peaks.source,
+                        routeId: route.id,
+                        side: .source,
+                        store: store,
+                        now: now,
+                        barHeight: barHeight
+                    )
+                    .frame(maxWidth: .infinity)
 
-                Image(systemName: "arrow.right")
-                    .font(.title2.weight(.light))
-                    .foregroundStyle(.tertiary)
-                    .frame(width: 32)
+                    Image(systemName: "arrow.right")
+                        .font(.title2.weight(.light))
+                        .foregroundStyle(.tertiary)
+                        .frame(width: 32)
 
-                BarGroup(
-                    title: "DEST",
-                    labels: destLabels,
-                    peaks: peaks.destination,
-                    routeId: route.id,
-                    side: .destination,
-                    store: store,
-                    now: now,
-                    barHeight: barHeight
-                )
-                .frame(maxWidth: .infinity)
+                    BarGroup(
+                        title: "DEST",
+                        labels: destLabels,
+                        peaks: peaks.destination,
+                        routeId: route.id,
+                        side: .destination,
+                        store: store,
+                        now: now,
+                        barHeight: barHeight
+                    )
+                    .frame(maxWidth: .infinity)
+                }
+
+                if showDiagnostics {
+                    DiagnosticsBlock(
+                        route: route,
+                        components: store.latencyComponents[route.id])
+                }
             }
             .padding(.top, 20)
         }
@@ -225,6 +235,120 @@ struct ChannelBar: View {
         case .normal: return .green
         case .near:   return .yellow
         case .clip:   return .red
+        }
+    }
+}
+
+/// Advanced-only block shown at the bottom of the expanded meter panel
+/// when the "Show engine diagnostics" preference is on. Surfaces the
+/// engine-internal counters and the per-component latency breakdown
+/// cached in the store — the collapsed row stays uncluttered.
+struct DiagnosticsBlock: View {
+    let route: Route
+    let components: LatencyComponents?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Divider()
+
+            HStack(alignment: .top, spacing: 24) {
+                CountersColumn(status: route.status)
+                if let components {
+                    LatencyBreakdown(components: components)
+                } else {
+                    Text("Latency breakdown unavailable")
+                        .font(.caption2)
+                        .foregroundStyle(.tertiary)
+                }
+                Spacer(minLength: 0)
+            }
+        }
+    }
+}
+
+private struct CountersColumn: View {
+    let status: RouteStatus
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text("COUNTERS")
+                .font(.caption.weight(.semibold))
+                .tracking(0.6)
+                .foregroundStyle(.secondary)
+            Grid(alignment: .leading, horizontalSpacing: 10, verticalSpacing: 2) {
+                GridRow {
+                    Text("Produced").foregroundStyle(.secondary)
+                    Text("\(status.framesProduced)").monospacedDigit()
+                }
+                GridRow {
+                    Text("Consumed").foregroundStyle(.secondary)
+                    Text("\(status.framesConsumed)").monospacedDigit()
+                }
+                GridRow {
+                    Text("Underruns").foregroundStyle(.secondary)
+                    Text("\(status.underrunCount)").monospacedDigit()
+                }
+                GridRow {
+                    Text("Overruns").foregroundStyle(.secondary)
+                    Text("\(status.overrunCount)").monospacedDigit()
+                }
+            }
+            .font(.caption2)
+        }
+    }
+}
+
+private struct LatencyBreakdown: View {
+    let components: LatencyComponents
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text("LATENCY BREAKDOWN")
+                .font(.caption.weight(.semibold))
+                .tracking(0.6)
+                .foregroundStyle(.secondary)
+            Grid(alignment: .leading, horizontalSpacing: 10, verticalSpacing: 2) {
+                row("Src HAL",       frames: components.sourceHalLatencyFrames,
+                    rate: components.sourceSampleRateHz)
+                row("Src safety",    frames: components.sourceSafetyOffsetFrames,
+                    rate: components.sourceSampleRateHz)
+                row("Src buffer",    frames: components.sourceBufferFrames,
+                    rate: components.sourceSampleRateHz)
+                row("Ring setpoint", frames: components.ringTargetFillFrames,
+                    rate: components.sourceSampleRateHz)
+                row("SRC prime",     frames: components.converterPrimeFrames,
+                    rate: components.destSampleRateHz)
+                row("Dst buffer",    frames: components.destBufferFrames,
+                    rate: components.destSampleRateHz)
+                row("Dst safety",    frames: components.destSafetyOffsetFrames,
+                    rate: components.destSampleRateHz)
+                row("Dst HAL",       frames: components.destHalLatencyFrames,
+                    rate: components.destSampleRateHz)
+                Divider().gridCellColumns(3)
+                GridRow {
+                    Text("Total")
+                        .font(.caption2.weight(.semibold))
+                    Text("")
+                    Text(LatencyFormatter.pillText(
+                            microseconds: components.totalUs) ?? "—")
+                        .font(.caption2.monospacedDigit().weight(.semibold))
+                }
+            }
+            .font(.caption2)
+        }
+    }
+
+    @ViewBuilder
+    private func row(_ label: String,
+                     frames: UInt32,
+                     rate: Double) -> some View {
+        GridRow {
+            Text(label).foregroundStyle(.secondary)
+            Text("\(frames) fr")
+                .monospacedDigit()
+                .foregroundStyle(.secondary)
+            Text(LatencyFormatter.breakdownLabel(frames: frames, rate: rate))
+                .monospacedDigit()
         }
     }
 }

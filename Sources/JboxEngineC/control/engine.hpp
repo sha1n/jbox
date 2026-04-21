@@ -53,6 +53,9 @@ public:
     jbox_error_code_t stopRoute(jbox_route_id_t id);
     jbox_error_code_t pollStatus(jbox_route_id_t id,
                                  jbox_route_status_t* out) const;
+    jbox_error_code_t pollLatencyComponents(
+        jbox_route_id_t id,
+        jbox_route_latency_components_t* out) const;
     std::size_t       pollMeters(jbox_route_id_t id,
                                  jbox_meter_side_t side,
                                  float* out_peaks,

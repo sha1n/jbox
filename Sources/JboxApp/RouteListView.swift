@@ -180,11 +180,6 @@ struct RouteRow: View {
                     LatencyPill(text: latencyText)
                 }
 
-                counterLine
-                    .font(.caption.monospacedDigit())
-                    .foregroundStyle(.secondary)
-                    .help("frames produced / consumed / underruns")
-
                 if route.status.state == .running || route.status.state == .starting {
                     Button("Stop") { store.stopRoute(route.id) }
                 } else {
@@ -232,10 +227,6 @@ struct RouteRow: View {
     private var errorText: String? {
         guard route.status.state == .error else { return nil }
         return String(cString: jbox_error_code_name(route.status.lastError))
-    }
-
-    private var counterLine: some View {
-        Text("\(route.status.framesProduced) / \(route.status.framesConsumed) · u\(route.status.underrunCount)")
     }
 }
 

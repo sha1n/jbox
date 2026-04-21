@@ -301,6 +301,28 @@ jbox_error_code_t RouteManager::pollStatus(jbox_route_id_t id,
     return JBOX_OK;
 }
 
+jbox_error_code_t RouteManager::pollLatencyComponents(
+    jbox_route_id_t id,
+    jbox_route_latency_components_t* out) const {
+    if (out == nullptr) return JBOX_ERR_INVALID_ARGUMENT;
+    auto it = routes_.find(id);
+    if (it == routes_.end()) return JBOX_ERR_INVALID_ARGUMENT;
+    const RouteRecord& r = *it->second;
+    const LatencyComponents& c = r.latency_components;
+    out->src_hal_latency_frames   = c.src_hal_latency_frames;
+    out->src_safety_offset_frames = c.src_safety_offset_frames;
+    out->src_buffer_frames        = c.src_buffer_frames;
+    out->ring_target_fill_frames  = c.ring_target_fill_frames;
+    out->converter_prime_frames   = c.converter_prime_frames;
+    out->dst_buffer_frames        = c.dst_buffer_frames;
+    out->dst_safety_offset_frames = c.dst_safety_offset_frames;
+    out->dst_hal_latency_frames   = c.dst_hal_latency_frames;
+    out->src_sample_rate_hz       = c.src_sample_rate_hz;
+    out->dst_sample_rate_hz       = c.dst_sample_rate_hz;
+    out->total_us                 = r.estimated_latency_us;
+    return JBOX_OK;
+}
+
 std::size_t RouteManager::pollMeters(jbox_route_id_t   id,
                                      jbox_meter_side_t side,
                                      float*            out_peaks,

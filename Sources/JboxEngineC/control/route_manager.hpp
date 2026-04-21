@@ -174,6 +174,13 @@ public:
     // are atomics; state is mutated only on the control thread.
     jbox_error_code_t pollStatus(jbox_route_id_t id, jbox_route_status_t* out) const;
 
+    // Fill in the cached latency-component breakdown for `id` (all
+    // zeros on a non-running route). Control-thread only; no RT
+    // coupling since the cache is populated at attemptStart.
+    jbox_error_code_t pollLatencyComponents(
+        jbox_route_id_t id,
+        jbox_route_latency_components_t* out) const;
+
     // Drain peak meters for `id` (read-and-reset) on the requested
     // side. Fills up to `max_channels` values into `out_peaks`; returns
     // the number actually written. Returns 0 for unknown ids,

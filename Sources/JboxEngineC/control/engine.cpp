@@ -56,6 +56,12 @@ jbox_error_code_t Engine::pollStatus(jbox_route_id_t id,
     return rm_.pollStatus(id, out);
 }
 
+jbox_error_code_t Engine::pollLatencyComponents(
+    jbox_route_id_t id,
+    jbox_route_latency_components_t* out) const {
+    return rm_.pollLatencyComponents(id, out);
+}
+
 std::size_t Engine::pollMeters(jbox_route_id_t id,
                                jbox_meter_side_t side,
                                float* out_peaks,

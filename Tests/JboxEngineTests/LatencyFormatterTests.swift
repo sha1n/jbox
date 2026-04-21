@@ -41,6 +41,31 @@ struct LatencyFormatterTests {
         #expect(LatencyFormatter.pillText(microseconds: 55_000_000) == "~55.0 s")
     }
 
+    @Test("breakdownLabel reports '—' when frames or rate is zero")
+    func breakdownZero() {
+        #expect(LatencyFormatter.breakdownLabel(frames: 0, rate: 48000) == "—")
+        #expect(LatencyFormatter.breakdownLabel(frames: 100, rate: 0) == "—")
+        #expect(LatencyFormatter.breakdownLabel(frames: 0, rate: 0)   == "—")
+    }
+
+    @Test("breakdownLabel picks two-decimal form under 1 ms")
+    func breakdownSubMs() {
+        // 24 frames at 48 kHz = 0.5 ms → "0.50 ms"
+        #expect(LatencyFormatter.breakdownLabel(frames: 24, rate: 48000) == "0.50 ms")
+    }
+
+    @Test("breakdownLabel picks one-decimal form between 1 and 10 ms")
+    func breakdownMidMs() {
+        // 240 frames at 48 kHz = 5.0 ms → "5.0 ms"
+        #expect(LatencyFormatter.breakdownLabel(frames: 240, rate: 48000) == "5.0 ms")
+    }
+
+    @Test("breakdownLabel picks integer form at 10 ms or more")
+    func breakdownIntegerMs() {
+        // 2048 frames at 48 kHz = 42.67 ms → "43 ms" (rounds half-up)
+        #expect(LatencyFormatter.breakdownLabel(frames: 2048, rate: 48000) == "43 ms")
+    }
+
     @Test("transition points pick the cleaner bucket at boundaries")
     func bucketTransitions() {
         // 9999 µs is just under 10 ms — still in the one-decimal bucket

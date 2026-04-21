@@ -14,6 +14,25 @@ import Foundation
 ///  - 10 000 ..< 1 000 000 → `"~N ms"` (integer, rounded half-up)
 ///  - ≥ 1 000 000 µs       → `"~N.N s"` (one decimal, rounded)
 public enum LatencyFormatter {
+    /// Short text for a single `LatencyComponents` row in the
+    /// diagnostics breakdown (Phase 6 refinement #4). Converts the
+    /// given frame count at the given sample rate and renders one of
+    /// three bands:
+    ///   - 0 frames or 0 rate           → `"—"`
+    ///   - < 1 ms                       → `"%.2f ms"`
+    ///   - < 10 ms                      → `"%.1f ms"`
+    ///   - ≥ 10 ms                      → `"%.0f ms"`
+    /// The thresholds mirror `pillText` so adjacent rows look
+    /// consistent; per-row values are component contributions, not
+    /// the end-to-end total, so sub-millisecond precision is useful.
+    public static func breakdownLabel(frames: UInt32, rate: Double) -> String {
+        guard rate > 0, frames > 0 else { return "—" }
+        let ms = Double(frames) * 1000.0 / rate
+        if ms < 1.0  { return String(format: "%.2f ms", ms) }
+        if ms < 10.0 { return String(format: "%.1f ms", ms) }
+        return String(format: "%.0f ms", ms)
+    }
+
     public static func pillText(microseconds: UInt64) -> String? {
         guard microseconds > 0 else { return nil }
         if microseconds < 1_000 {

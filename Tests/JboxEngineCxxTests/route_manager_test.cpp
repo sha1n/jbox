@@ -416,6 +416,64 @@ TEST_CASE("RouteManager: estimated_latency_us reflects HAL components",
     REQUIRE(after_stop.estimated_latency_us == 0);
 }
 
+TEST_CASE("RouteManager: pollLatencyComponents reflects cached components",
+          "[route_manager][latency][components]") {
+    // New in ABI v4: the engine surfaces the full per-component
+    // breakdown, not just the total. Zeros on STOPPED, populated on
+    // RUNNING, zeroed again on STOPPED. Values round-trip the HAL
+    // numbers SimulatedBackend hands us.
+    auto backend = std::make_unique<SimulatedBackend>();
+    BackendDeviceInfo src = makeInputDevice("src", 2, /*buf*/ 128);
+    src.input_device_latency_frames = 48;
+    src.input_safety_offset_frames  = 32;
+    BackendDeviceInfo dst = makeOutputDevice("dst", 2, /*buf*/ 128);
+    dst.output_device_latency_frames = 96;
+    dst.output_safety_offset_frames  = 24;
+    backend->addDevice(src);
+    backend->addDevice(dst);
+    auto dm = std::make_unique<DeviceManager>(std::move(backend));
+    dm->refresh();
+    RouteManager rm(*dm);
+
+    std::vector<ChannelEdge> m{{0, 0}, {1, 1}};
+    jbox_error_t err{};
+    const auto id = rm.addRoute({"src", "dst", m, "components"}, &err);
+    REQUIRE(id != JBOX_INVALID_ROUTE_ID);
+
+    jbox_route_latency_components_t stopped{};
+    stopped.src_hal_latency_frames = 0xDEADBEEF;  // sentinel to prove zeroing
+    REQUIRE(rm.pollLatencyComponents(id, &stopped) == JBOX_OK);
+    REQUIRE(stopped.src_hal_latency_frames == 0);
+    REQUIRE(stopped.total_us == 0);
+
+    REQUIRE(rm.startRoute(id) == JBOX_OK);
+    jbox_route_latency_components_t running{};
+    REQUIRE(rm.pollLatencyComponents(id, &running) == JBOX_OK);
+
+    REQUIRE(running.src_hal_latency_frames   == 48);
+    REQUIRE(running.src_safety_offset_frames == 32);
+    REQUIRE(running.src_buffer_frames        == 128);
+    REQUIRE(running.dst_buffer_frames        == 128);
+    REQUIRE(running.dst_safety_offset_frames == 24);
+    REQUIRE(running.dst_hal_latency_frames   == 96);
+    REQUIRE(running.ring_target_fill_frames  > 0);
+    REQUIRE(running.src_sample_rate_hz == 48000.0);
+    REQUIRE(running.dst_sample_rate_hz == 48000.0);
+    REQUIRE(running.total_us > 0);
+
+    // The total_us surfaced here must equal the one in
+    // jbox_route_status_t — both come from the same cached computation.
+    jbox_route_status_t status{};
+    REQUIRE(rm.pollStatus(id, &status) == JBOX_OK);
+    REQUIRE(running.total_us == status.estimated_latency_us);
+
+    REQUIRE(rm.stopRoute(id) == JBOX_OK);
+    jbox_route_latency_components_t after_stop{};
+    REQUIRE(rm.pollLatencyComponents(id, &after_stop) == JBOX_OK);
+    REQUIRE(after_stop.src_hal_latency_frames == 0);
+    REQUIRE(after_stop.total_us == 0);
+}
+
 TEST_CASE("RouteManager: low_latency mode shrinks estimated_latency_us",
           "[route_manager][low_latency]") {
     // Phase 6 refinement #6. With 64-frame device buffers:

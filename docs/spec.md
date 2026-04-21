@@ -355,7 +355,7 @@ estimated_latency_us = src_side_us + dst_side_us
 
 For same-rate routes (the common case) this degenerates to the frame-sum formula above divided by the shared rate.
 
-The engine computes this once at `startRoute` (no RT-thread cost) and surfaces it through the route status snapshot as `jbox_route_status_t::estimated_latency_us` (ABI v2+). The UI shows an "~NN ms" estimate on the route row; an expanded breakdown is available in the diagnostics view. The number is **indicative, not ground truth** — some drivers (notably USB class-compliant) under-report hardware latency. A loopback-based measurement for authoritative verification is a Phase 9 deliverable.
+The engine computes this once at `startRoute` (no RT-thread cost) and surfaces it through the route status snapshot as `jbox_route_status_t::estimated_latency_us` (ABI v2+). Clients that need the per-component breakdown (Advanced / diagnostics UI) call `jbox_engine_poll_route_latency_components` (ABI v4+) which returns the frame counts + sample rates for each contributor alongside the same `total_us`. The UI shows an "~NN ms" estimate on the route row; an expanded breakdown is available in the diagnostics view when the user enables Advanced → "Show engine diagnostics". The number is **indicative, not ground truth** — some drivers (notably USB class-compliant) under-report hardware latency. A loopback-based measurement for authoritative verification is a Phase 9 deliverable.
 
 ### 2.13 Deferred to future versions
 

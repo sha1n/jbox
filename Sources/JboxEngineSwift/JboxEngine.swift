@@ -121,6 +121,57 @@ public struct RouteStatus: Equatable, Hashable, Sendable {
     }
 }
 
+/// Per-component breakdown of a route's end-to-end latency, mirroring
+/// `jbox_route_latency_components_t` (ABI v4+). All frame counts are
+/// expressed at the sample rate of the side they belong to — `src*`
+/// at `sourceSampleRateHz`, `dst*` + `converterPrimeFrames` at
+/// `destSampleRateHz`, `ringTargetFillFrames` at `sourceSampleRateHz`.
+/// All values are 0 for routes that are not currently running.
+public struct LatencyComponents: Equatable, Hashable, Sendable {
+    public let sourceHalLatencyFrames:   UInt32
+    public let sourceSafetyOffsetFrames: UInt32
+    public let sourceBufferFrames:       UInt32
+    public let ringTargetFillFrames:     UInt32
+    public let converterPrimeFrames:     UInt32
+    public let destBufferFrames:         UInt32
+    public let destSafetyOffsetFrames:   UInt32
+    public let destHalLatencyFrames:     UInt32
+    public let sourceSampleRateHz:       Double
+    public let destSampleRateHz:         Double
+    public let totalUs:                  UInt64
+
+    public static let zero = LatencyComponents(
+        sourceHalLatencyFrames: 0, sourceSafetyOffsetFrames: 0,
+        sourceBufferFrames: 0, ringTargetFillFrames: 0,
+        converterPrimeFrames: 0, destBufferFrames: 0,
+        destSafetyOffsetFrames: 0, destHalLatencyFrames: 0,
+        sourceSampleRateHz: 0, destSampleRateHz: 0, totalUs: 0)
+
+    public init(sourceHalLatencyFrames: UInt32,
+                sourceSafetyOffsetFrames: UInt32,
+                sourceBufferFrames: UInt32,
+                ringTargetFillFrames: UInt32,
+                converterPrimeFrames: UInt32,
+                destBufferFrames: UInt32,
+                destSafetyOffsetFrames: UInt32,
+                destHalLatencyFrames: UInt32,
+                sourceSampleRateHz: Double,
+                destSampleRateHz: Double,
+                totalUs: UInt64) {
+        self.sourceHalLatencyFrames   = sourceHalLatencyFrames
+        self.sourceSafetyOffsetFrames = sourceSafetyOffsetFrames
+        self.sourceBufferFrames       = sourceBufferFrames
+        self.ringTargetFillFrames     = ringTargetFillFrames
+        self.converterPrimeFrames     = converterPrimeFrames
+        self.destBufferFrames         = destBufferFrames
+        self.destSafetyOffsetFrames   = destSafetyOffsetFrames
+        self.destHalLatencyFrames     = destHalLatencyFrames
+        self.sourceSampleRateHz       = sourceSampleRateHz
+        self.destSampleRateHz         = destSampleRateHz
+        self.totalUs                  = totalUs
+    }
+}
+
 // MARK: - Engine
 
 public final class Engine {
@@ -346,6 +397,31 @@ public final class Engine {
             overrunCount: out.overrun_count,
             estimatedLatencyUs: out.estimated_latency_us
         )
+    }
+
+    /// Latency component breakdown for `id`. Returns `.zero` for
+    /// non-running routes (all fields 0).
+    public func pollLatencyComponents(_ id: UInt32) throws -> LatencyComponents {
+        guard let h = handle else {
+            throw JboxError(code: JBOX_ERR_INTERNAL, message: "engine not initialised")
+        }
+        var out = jbox_route_latency_components_t()
+        let code = jbox_engine_poll_route_latency_components(h, id, &out)
+        if code != JBOX_OK {
+            throw JboxError(code: code)
+        }
+        return LatencyComponents(
+            sourceHalLatencyFrames:   out.src_hal_latency_frames,
+            sourceSafetyOffsetFrames: out.src_safety_offset_frames,
+            sourceBufferFrames:       out.src_buffer_frames,
+            ringTargetFillFrames:     out.ring_target_fill_frames,
+            converterPrimeFrames:     out.converter_prime_frames,
+            destBufferFrames:         out.dst_buffer_frames,
+            destSafetyOffsetFrames:   out.dst_safety_offset_frames,
+            destHalLatencyFrames:     out.dst_hal_latency_frames,
+            sourceSampleRateHz:       out.src_sample_rate_hz,
+            destSampleRateHz:         out.dst_sample_rate_hz,
+            totalUs:                  out.total_us)
     }
 
     private func callRouteAction(_ id: UInt32,

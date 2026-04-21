@@ -34,8 +34,10 @@ extern "C" {
  *   1  initial Phase 3 contract.
  *   2  MINOR — appended `estimated_latency_us` to jbox_route_status_t.
  *   3  MINOR — appended `low_latency` to jbox_route_config_t.
+ *   4  MINOR — added jbox_route_latency_components_t and
+ *              jbox_engine_poll_route_latency_components.
  */
-#define JBOX_ENGINE_ABI_VERSION 3u
+#define JBOX_ENGINE_ABI_VERSION 4u
 
 uint32_t jbox_engine_abi_version(void);
 
@@ -269,6 +271,41 @@ jbox_error_code_t jbox_engine_stop_route(jbox_engine_t*  engine,
 jbox_error_code_t jbox_engine_poll_route_status(jbox_engine_t*       engine,
                                                 jbox_route_id_t      route_id,
                                                 jbox_route_status_t* out_status);
+
+/*
+ * Per-route latency component breakdown (ABI v4+).
+ *
+ * All frame counts are expressed at the sample rate of the side they
+ * belong to: the `src_*` fields are in frames at `src_sample_rate_hz`,
+ * the `dst_*` fields and `converter_prime_frames` are at
+ * `dst_sample_rate_hz`. `ring_target_fill_frames` is counted at the
+ * source rate (the ring is written by the source IOProc).
+ *
+ * `total_us` matches the value surfaced through
+ * `jbox_route_status_t::estimated_latency_us` — exposed here for
+ * callers that only need one call to render the diagnostics view.
+ *
+ * All fields are 0 when the route is not currently running.
+ */
+typedef struct {
+    uint32_t src_hal_latency_frames;
+    uint32_t src_safety_offset_frames;
+    uint32_t src_buffer_frames;
+    uint32_t ring_target_fill_frames;
+    uint32_t converter_prime_frames;
+    uint32_t dst_buffer_frames;
+    uint32_t dst_safety_offset_frames;
+    uint32_t dst_hal_latency_frames;
+    double   src_sample_rate_hz;
+    double   dst_sample_rate_hz;
+    uint64_t total_us;
+} jbox_route_latency_components_t;
+
+/* Fill in the latency component breakdown for the given route. */
+jbox_error_code_t jbox_engine_poll_route_latency_components(
+    jbox_engine_t*                   engine,
+    jbox_route_id_t                  route_id,
+    jbox_route_latency_components_t* out_components);
 
 /* -------------------------------------------------------------------- */
 /*  Metering                                                            */
