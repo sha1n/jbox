@@ -680,6 +680,30 @@ jbox_error_code_t RouteManager::attemptStart(RouteRecord& r) {
     }
     r.attached_dst_mux = &dst_mux;
 
+    // Re-read each device's post-attach buffer frame size and fold
+    // it into the latency-component snapshot. The mux's buffer-shrink
+    // request (driven by `mux_buffer_target`) runs inside
+    // attachInput / attachOutput above, so the values populated
+    // pre-attach are stale by the time we get here; without this
+    // refresh the pill would read the pre-shrink buffer size even
+    // when the HAL actually landed at a smaller value, and a HAL-
+    // rejected shrink would look indistinguishable from a successful
+    // one. The ring's `usableCapacityFrames` doesn't change mid-
+    // route (ring allocation happened above, before the attach), so
+    // ring_target_fill_frames stays correct and we don't need to
+    // recompute it here. Non-running or unknown-UID lookups return 0
+    // — in that case we leave the pre-attach value in place.
+    if (mux_buffer_target > 0) {
+        const std::uint32_t applied_src =
+            dm_.backend().currentBufferFrameSize(r.source_uid);
+        if (applied_src > 0) lc.src_buffer_frames = applied_src;
+        const std::uint32_t applied_dst =
+            dm_.backend().currentBufferFrameSize(r.dest_uid);
+        if (applied_dst > 0) lc.dst_buffer_frames = applied_dst;
+        r.latency_components   = lc;
+        r.estimated_latency_us = estimateLatencyMicroseconds(lc);
+    }
+
     r.state      = JBOX_ROUTE_STATE_RUNNING;
     r.last_error = JBOX_OK;
     tryPushLog(log_queue_, jbox::rt::kLogRouteStarted, r.id,
