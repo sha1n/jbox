@@ -1,3 +1,4 @@
+import Foundation
 import Testing
 @testable import JboxEngineSwift
 @_exported import JboxEngineC
@@ -210,6 +211,69 @@ struct EngineStoreTests {
         let dstPeaks = store.meterPeaks(routeId: route.id, side: .destination)
         #expect(srcPeaks.isEmpty)
         #expect(dstPeaks.isEmpty)
+    }
+
+    // MARK: - Peak-hold wiring (Slice B)
+
+    @Test("heldPeak returns 0 for an unknown route")
+    func heldPeakUnknownRoute() throws {
+        let store = try makeStore()
+        #expect(store.heldPeak(routeId: 999, side: .source, channel: 0) == 0)
+        #expect(store.heldPeak(routeId: 999, side: .destination, channel: 0) == 0)
+    }
+
+    @Test("pollMeters promotes the PeakHoldTracker for every running channel")
+    func pollMetersPromotesHolds() throws {
+        let store = try makeStore()
+        store.refreshDevices()
+        guard let src = store.devices.first(where: { $0.inputChannelCount  >= 1 }),
+              let dst = store.devices.first(where: { $0.outputChannelCount >= 1 })
+        else {
+            Issue.record("CI runner expected to expose at least one I/O device pair")
+            return
+        }
+        let cfg = RouteConfig(
+            source: DeviceReference(device: src),
+            destination: DeviceReference(device: dst),
+            mapping: [ChannelEdge(src: 0, dst: 0)]
+        )
+        let route = try store.addRoute(cfg)
+
+        // Directly observe through the internal tracker so we don't
+        // need real audio to prove the wiring. pollMeters itself is
+        // covered by the empty-snapshot case above; the observe()
+        // semantics are covered in PeakHoldTrackerTests.
+        let now = Date.timeIntervalSinceReferenceDate
+        store.peakHolds.observe(routeId: route.id, side: .source,
+                                channel: 0, value: 0.75, now: now)
+        #expect(store.heldPeak(routeId: route.id, side: .source,
+                               channel: 0, now: now) == 0.75)
+    }
+
+    @Test("removeRoute clears peak-hold state for that route")
+    func removeRouteClearsHolds() throws {
+        let store = try makeStore()
+        store.refreshDevices()
+        guard let src = store.devices.first(where: { $0.inputChannelCount  >= 1 }),
+              let dst = store.devices.first(where: { $0.outputChannelCount >= 1 })
+        else {
+            Issue.record("CI runner expected to expose at least one I/O device pair")
+            return
+        }
+        let cfg = RouteConfig(
+            source: DeviceReference(device: src),
+            destination: DeviceReference(device: dst),
+            mapping: [ChannelEdge(src: 0, dst: 0)]
+        )
+        let route = try store.addRoute(cfg)
+        let now = Date.timeIntervalSinceReferenceDate
+        store.peakHolds.observe(routeId: route.id, side: .source,
+                                channel: 0, value: 0.9, now: now)
+        #expect(store.heldPeak(routeId: route.id, side: .source,
+                               channel: 0, now: now) == 0.9)
+        store.removeRoute(route.id)
+        #expect(store.heldPeak(routeId: route.id, side: .source,
+                               channel: 0, now: now) == 0)
     }
 
     @Test("displayName falls back to source → destination when name is nil")

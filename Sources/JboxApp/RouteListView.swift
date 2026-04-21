@@ -8,6 +8,11 @@ struct RouteListView: View {
     let store: EngineStore
     @State private var showingAddSheet = false
 
+    /// Per-route expansion state for the meter panel. Lives in view
+    /// state for now; a Phase 7 persistence pass can migrate this onto
+    /// the store so expansion survives relaunch.
+    @State private var expandedRoutes: Set<UInt32> = []
+
     /// How often to re-poll route statuses while the view is visible.
     /// 4 Hz is plenty for state transitions and counters.
     private static let pollInterval: Duration = .milliseconds(250)
@@ -98,11 +103,24 @@ struct RouteListView: View {
         } else {
             List {
                 ForEach(store.routes) { route in
-                    RouteRow(route: route, store: store)
-                        .padding(.vertical, 2)
+                    RouteRow(
+                        route: route,
+                        store: store,
+                        expanded: expandedRoutes.contains(route.id),
+                        onToggleExpanded: { toggleExpansion(route.id) }
+                    )
+                    .padding(.vertical, 2)
                 }
             }
             .listStyle(.inset)
+        }
+    }
+
+    private func toggleExpansion(_ id: UInt32) {
+        if expandedRoutes.contains(id) {
+            expandedRoutes.remove(id)
+        } else {
+            expandedRoutes.insert(id)
         }
     }
 }
@@ -112,49 +130,77 @@ struct RouteListView: View {
 struct RouteRow: View {
     let route: Route
     let store: EngineStore
+    let expanded: Bool
+    let onToggleExpanded: () -> Void
+
+    private var canExpand: Bool {
+        route.status.state == .running
+    }
 
     var body: some View {
-        HStack(alignment: .center, spacing: 12) {
-            StatusGlyph(state: route.status.state)
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(alignment: .center, spacing: 12) {
+                Button(action: onToggleExpanded) {
+                    Image(systemName: expanded ? "chevron.down" : "chevron.right")
+                        .font(.caption)
+                        .foregroundStyle(canExpand ? .secondary : .tertiary)
+                        .frame(width: 12)
+                }
+                .buttonStyle(.plain)
+                .disabled(!canExpand)
+                .help(canExpand
+                      ? (expanded ? "Collapse meter view" : "Expand meter view")
+                      : "Meters are available while the route is running")
 
-            VStack(alignment: .leading, spacing: 2) {
-                Text(route.config.displayName)
-                    .font(.headline)
-                Text(mappingSummary)
-                    .font(.caption)
+                StatusGlyph(state: route.status.state)
+
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(route.config.displayName)
+                        .font(.headline)
+                    Text(mappingSummary)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    if route.status.state == .running && !expanded {
+                        SignalDotRow(peaks: store.meters[route.id])
+                    }
+                    if let errorText = errorText {
+                        Text(errorText)
+                            .font(.caption2)
+                            .foregroundStyle(.red)
+                    }
+                }
+
+                Spacer()
+
+                counterLine
+                    .font(.caption.monospacedDigit())
                     .foregroundStyle(.secondary)
-                if route.status.state == .running {
-                    SignalDotRow(peaks: store.meters[route.id])
+                    .help("frames produced / consumed / underruns")
+
+                if route.status.state == .running || route.status.state == .starting {
+                    Button("Stop") { store.stopRoute(route.id) }
+                } else {
+                    Button("Start") { store.startRoute(route.id) }
+                        .disabled(route.status.state == .starting)
                 }
-                if let errorText = errorText {
-                    Text(errorText)
-                        .font(.caption2)
-                        .foregroundStyle(.red)
+
+                Button(role: .destructive) {
+                    store.removeRoute(route.id)
+                } label: {
+                    Image(systemName: "trash")
                 }
+                .buttonStyle(.borderless)
+                .help("Remove route")
             }
 
-            Spacer()
-
-            counterLine
-                .font(.caption.monospacedDigit())
-                .foregroundStyle(.secondary)
-                .help("frames produced / consumed / underruns")
-
-            if route.status.state == .running || route.status.state == .starting {
-                Button("Stop") { store.stopRoute(route.id) }
-            } else {
-                Button("Start") { store.startRoute(route.id) }
-                    .disabled(route.status.state == .starting)
+            if expanded, route.status.state == .running,
+               let peaks = store.meters[route.id] {
+                MeterPanel(route: route, store: store, peaks: peaks)
+                    .padding(.leading, 32)
+                    .transition(.opacity.combined(with: .move(edge: .top)))
             }
-
-            Button(role: .destructive) {
-                store.removeRoute(route.id)
-            } label: {
-                Image(systemName: "trash")
-            }
-            .buttonStyle(.borderless)
-            .help("Remove route")
         }
+        .animation(.easeInOut(duration: 0.15), value: expanded)
     }
 
     private var mappingSummary: String {

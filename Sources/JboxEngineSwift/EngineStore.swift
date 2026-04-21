@@ -118,6 +118,13 @@ public final class EngineStore {
     /// array, one linear peak per mapped channel.
     public private(set) var meters: [UInt32: MeterPeaks] = [:]
 
+    /// Per-channel peak-hold tracker driven by `pollMeters()`. Not
+    /// `@Observable` — the UI re-reads `heldPeak(...)` on each
+    /// `TimelineView` tick with a fresh `now`, and the decay is
+    /// computed purely on read. Held values are cleared when the
+    /// owning route is removed (see `removeRoute`).
+    internal var peakHolds = PeakHoldTracker()
+
     /// Human-readable description of the most recent engine error, or
     /// nil when the last action succeeded. Cleared by successful calls.
     public private(set) var lastError: String?
@@ -250,6 +257,8 @@ public final class EngineStore {
         do {
             try engine.removeRoute(id)
             routes.removeAll(where: { $0.id == id })
+            meters.removeValue(forKey: id)
+            peakHolds.forget(routeId: id)
             lastError = nil
             JboxLog.engine.notice("removeRoute id=\(id) ok")
         } catch {
@@ -282,12 +291,35 @@ public final class EngineStore {
     public func pollMeters() {
         var next: [UInt32: MeterPeaks] = [:]
         next.reserveCapacity(routes.count)
+        let now = Date.timeIntervalSinceReferenceDate
         for route in routes where route.status.state == .running {
             let src = engine.pollMeters(routeId: route.id, side: .source)
             let dst = engine.pollMeters(routeId: route.id, side: .destination)
             next[route.id] = MeterPeaks(source: src, destination: dst)
+            for (i, v) in src.enumerated() {
+                peakHolds.observe(routeId: route.id, side: .source,
+                                  channel: i, value: v, now: now)
+            }
+            for (i, v) in dst.enumerated() {
+                peakHolds.observe(routeId: route.id, side: .dest,
+                                  channel: i, value: v, now: now)
+            }
         }
         meters = next
+    }
+
+    /// Current decayed peak-hold value for one channel on one side of
+    /// a running route. Returns 0 for unknown routes / channels / after
+    /// the hold has decayed. Spec § 4.5.
+    public func heldPeak(routeId: UInt32,
+                         side: Engine.MeterSide,
+                         channel: Int,
+                         now: TimeInterval = Date.timeIntervalSinceReferenceDate) -> Float {
+        let trackerSide: PeakHoldTracker.Side = (side == .source ? .source : .dest)
+        return peakHolds.heldValue(routeId: routeId,
+                                   side: trackerSide,
+                                   channel: channel,
+                                   now: now)
     }
 
     /// Convenience accessor for one side of a route's last published

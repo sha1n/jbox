@@ -319,7 +319,7 @@ A **logging pipeline slice** also landed alongside the UI first-slice (unplanned
 - [x] User can add / edit / delete routes through the main window route editor. *(Add/delete done in first slice; "edit" of an existing route is not yet wired — re-create workflow works.)*
 - [x] User can start / stop routes; status (running / stopped / waiting / error) reflects correctly. Row-level Start/Stop buttons and `StatusGlyph` render all five states; live polling keeps them up to date.
 - [x] Per-channel signal indication — **Slice A (signal-present dots)**: landed. See the Meters task block below for the landing commit hashes.
-- [ ] Per-channel bar meters with color thresholds — **Slice B (full meters)**: pending; follows Slice A once the polling model is exercised.
+- [x] Per-channel bar meters with color thresholds — **Slice B (full meters)**: landed. Dots stay as the glanceable collapsed summary; a chevron per route toggles the expanded `MeterPanel` with `Canvas`-drawn vertical bars, dB gridlines, and decaying peak-hold ticks. See the Meters task block below.
 - [ ] Menu bar extra shows overall state and exposes toggles for each route. **Pending.**
 - [ ] Preferences window exposes buffer-size policy, resampler quality, and appearance. **Pending.**
 - [x] UI works without Xcode IDE (builds via `swift build`); SwiftUI previews work when opened in Xcode. The entire first slice was built and launched from the command line via `swift run JboxApp`.
@@ -367,9 +367,13 @@ Meters — split into two slices so the diagnostic dots land first:
     - C++ bridge test (`bridge_api_test.cpp`) — round-trip through the C entry point; null-engine and bad-args guards.
     - Swift test (`EngineStoreTests.swift`) — wrapper returns `[]` for unknown routes, stopped routes, and `maxChannels == 0`; `EngineStore.pollMeters()` publishes an empty snapshot when no routes are running.
 
-**Slice B — full bar meters + color thresholds + accessibility.** Deferred. Picks up once Slice A has been exercised enough to know the polling model is right.
-  - [ ] SwiftUI `Canvas`-based meter view; single ~30 Hz timer drives the whole app.
-  - [ ] Color thresholds (gray / green / yellow / red per [spec.md § 4.5](./spec.md#45-meters)) and VoiceOver-friendly accessibility labels.
+**Slice B — full bar meters + color thresholds + accessibility.** Landed on top of Slice A.
+  - [x] Pure-logic types in `JboxEngineSwift`: `MeterLevel` (dB-to-fraction math + color-zone classification) and `PeakHoldTracker` (per-`(routeId, side, channel)` hold state with linear decay). Both TDD'd — `Tests/JboxEngineTests/MeterLevelTests.swift` (16 cases pinning spec § 4.5 thresholds) and `Tests/JboxEngineTests/PeakHoldTrackerTests.swift` (14 cases: cold-start, promote/ignore/decay, per-route/side/channel independence, `forget`).
+  - [x] `EngineStore.pollMeters()` now also feeds `PeakHoldTracker`; `removeRoute()` calls `forget(routeId:)` so holds don't survive a deleted route. New public `heldPeak(routeId:side:channel:now:)` reader returns the decayed hold. `EngineStoreTests` gains three cases pinning the wiring.
+  - [x] SwiftUI views (`Sources/JboxApp/MeterBar.swift`): `MeterPanel` composes source-side `BarGroup` + arrow + dest-side `BarGroup`. `BarGroup` draws per-channel `ChannelBar` via `Canvas` (frame + zone-coloured fill + peak-hold tick) alongside a shared `DbScale` strip (0 / -3 / -6 / -20 / -40 / -60 dBFS gridlines). Bars flex between a 10 pt floor and a 36 pt cap so small routes (1–2 ch) spread comfortably and 8+ ch routes stay inside the row. A 30 Hz `TimelineView` inside the expanded body redraws the hold-tick decay between polls.
+  - [x] `RouteRow` gains a chevron to toggle expansion; collapsed rows keep today's `SignalDotRow`, expanded rows swap it for the `MeterPanel`. Expansion state lives in `@State private var expandedRoutes: Set<UInt32>` on `RouteListView`; Phase 7 persistence can migrate it onto `EngineStore`.
+  - [x] Color thresholds match [spec.md § 4.5](./spec.md#45-meters): gray below -60 dBFS, green below -6, yellow to -3, red above. Bar height is a second, color-independent cue for accessibility.
+  - [ ] VoiceOver-friendly labels on the expanded panel. **Pending** — `SignalDotRow` already carries one; `MeterPanel` still needs a comparable composite label. Deferred to a follow-up since it's additive.
 
 UI tests (minimal):
 - [x] Swift Testing cases for `EngineStore` against the live Core Audio engine (`Tests/JboxEngineTests/EngineStoreTests.swift`, Phase 6 #1).
