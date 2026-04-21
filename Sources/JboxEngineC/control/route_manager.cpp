@@ -569,6 +569,15 @@ jbox_error_code_t RouteManager::attemptStart(RouteRecord& r) {
     // Size the ring buffer. See the ring-capacity note near the top of
     // this file for the three presets and their trade-offs. The tier
     // is chosen by r.latency_mode (0=safe, 1=low, 2=performance).
+    // Note: the ring is sized from the pre-shrink cached buffer
+    // values because the ring is allocated here, before the mux
+    // attach runs the shrink. Re-sizing post-shrink is not worth it:
+    // ring *capacity* only affects burst-overflow headroom, and a
+    // larger-than-strictly-necessary ring gives us *more* protection
+    // against source bursts, not less. What actually determines
+    // steady-state latency is the drift-sampler setpoint
+    // (`ring_target_fill_frames`), which we compute from the
+    // post-shrink buffer sizes after the attach below.
     const RingSizing sizing = [&]() {
         switch (r.latency_mode) {
             case 2: return kRingPerformance;
@@ -614,10 +623,9 @@ jbox_error_code_t RouteManager::attemptStart(RouteRecord& r) {
     r.tracker.reset();
 
     // Per-route latency estimate — see docs/spec.md § 2.12. Computed
-    // once here, on the control thread, from HAL-reported latency +
-    // safety offset + buffer sizes + the drift-sampler ring setpoint
-    // + the converter's leading prime frames. Not recomputed while
-    // running; stop → start refreshes it if any component changes.
+    // once here, on the control thread. The `src_buffer_frames` /
+    // `dst_buffer_frames` / `ring_target_fill_frames` fields are
+    // refreshed below, after the mux attach runs the buffer shrink.
     LatencyComponents lc{};
     lc.src_hal_latency_frames   = src->input_device_latency_frames;
     lc.src_safety_offset_frames = src->input_safety_offset_frames;
@@ -681,18 +689,19 @@ jbox_error_code_t RouteManager::attemptStart(RouteRecord& r) {
     r.attached_dst_mux = &dst_mux;
 
     // Re-read each device's post-attach buffer frame size and fold
-    // it into the latency-component snapshot. The mux's buffer-shrink
-    // request (driven by `mux_buffer_target`) runs inside
-    // attachInput / attachOutput above, so the values populated
-    // pre-attach are stale by the time we get here; without this
-    // refresh the pill would read the pre-shrink buffer size even
-    // when the HAL actually landed at a smaller value, and a HAL-
-    // rejected shrink would look indistinguishable from a successful
-    // one. The ring's `usableCapacityFrames` doesn't change mid-
-    // route (ring allocation happened above, before the attach), so
-    // ring_target_fill_frames stays correct and we don't need to
-    // recompute it here. Non-running or unknown-UID lookups return 0
-    // — in that case we leave the pre-attach value in place.
+    // both the buffers and the drift-sampler setpoint into the
+    // pill. The mux's buffer-shrink request (driven by
+    // `mux_buffer_target`) runs inside attachInput / attachOutput
+    // above, so the pre-attach pill is stale; without this refresh
+    // the pill would report the pre-shrink buffer size AND the
+    // drift setpoint would still be derived from the pre-shrink
+    // ring sizing, both of which inflate the reported latency
+    // (and the second one actually inflates the *real* steady-state
+    // residency the sampler aims for — see drift_sampler.cpp).
+    //
+    // The ring *capacity* itself stays pre-shrink-sized; that just
+    // means more burst-overflow headroom than strictly necessary,
+    // which we happily keep. Only the setpoint changes.
     if (mux_buffer_target > 0) {
         const std::uint32_t applied_src =
             dm_.backend().currentBufferFrameSize(r.source_uid);
@@ -700,6 +709,16 @@ jbox_error_code_t RouteManager::attemptStart(RouteRecord& r) {
         const std::uint32_t applied_dst =
             dm_.backend().currentBufferFrameSize(r.dest_uid);
         if (applied_dst > 0) lc.dst_buffer_frames = applied_dst;
+        const std::uint32_t applied_max =
+            std::max(lc.src_buffer_frames, lc.dst_buffer_frames);
+        const std::uint32_t effective_capacity =
+            std::max<std::uint32_t>(sizing.floor,
+                                    applied_max > 0
+                                        ? applied_max * sizing.multiplier
+                                        : sizing.floor);
+        lc.ring_target_fill_frames = static_cast<std::uint32_t>(
+            static_cast<double>(effective_capacity) *
+            sizing.target_fill_fraction);
         r.latency_components   = lc;
         r.estimated_latency_us = estimateLatencyMicroseconds(lc);
     }

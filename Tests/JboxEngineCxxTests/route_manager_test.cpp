@@ -1027,6 +1027,104 @@ TEST_CASE("RouteManager: mux path re-reads buffer sizes into the pill after shri
     REQUIRE(components.ring_target_fill_frames > 0);
 }
 
+TEST_CASE("RouteManager: mux path sizes the ring from post-shrink buffer values",
+          "[route_manager][latency_mode][mux][ring]") {
+    // Load-bearing Performance-mode invariant: on a cross-device
+    // route, the ring is sized from the POST-shrink device buffer,
+    // not the pre-shrink cached value. If we size it pre-shrink, the
+    // ring is ~1024 frames on a 64-frame target (from 512-frame
+    // starting buffers) and the drift-sampler setpoint lands at
+    // ~256 frames — 5.3 ms residency on top of the buffers. Sizing
+    // post-shrink gives a 256-frame ring and a ~64-frame setpoint
+    // (~1.3 ms), which is what Performance mode is supposed to
+    // deliver.
+    //
+    // RingSizing for Performance: multiplier=2, floor=256. With a
+    // 64-frame post-shrink buffer: capacity = max(256, 2*64) = 256;
+    // target_fill = capacity * 0.25 ≈ 64 frames. Assert the actual
+    // target-fill value is ≤ 128 so this test catches the pre-shrink
+    // regression (which would give ~256) without over-pinning the
+    // exact preset values.
+    auto backend = std::make_unique<SimulatedBackend>();
+    BackendDeviceInfo src = makeInputDevice("src", 2, /*buf*/ 512);
+    BackendDeviceInfo dst = makeOutputDevice("dst", 2, /*buf*/ 512);
+    backend->addDevice(src);
+    backend->addDevice(dst);
+    auto dm = std::make_unique<DeviceManager>(std::move(backend));
+    dm->refresh();
+    RouteManager rm(*dm);
+
+    std::vector<ChannelEdge> mapping{{0, 0}, {1, 1}};
+    RouteManager::RouteConfig cfg{
+        "src", "dst", mapping, "mux-ring-post-shrink",
+        /*latency_mode*/ 2,
+        /*buffer_frames*/ 64};
+    jbox_error_t err{};
+    const auto id = rm.addRoute(cfg, &err);
+    REQUIRE(rm.startRoute(id) == JBOX_OK);
+
+    jbox_route_latency_components_t components{};
+    REQUIRE(rm.pollLatencyComponents(id, &components) == JBOX_OK);
+
+    // Post-shrink ring: target_fill ≤ 128 frames (~2.7 ms at 48 k).
+    // Pre-shrink ring would give ~256 (5.3 ms) and fail this bound.
+    REQUIRE(components.ring_target_fill_frames <= 128);
+    REQUIRE(components.ring_target_fill_frames > 0);
+
+    // The corresponding pill is dominated by the two 64-frame
+    // buffers + the tight setpoint; it must come in well under the
+    // pre-shrink-ring ~11 ms (11 000 µs) that motivated this change.
+    jbox_route_status_t status{};
+    REQUIRE(rm.pollStatus(id, &status) == JBOX_OK);
+    REQUIRE(status.estimated_latency_us < 8'000);
+}
+
+TEST_CASE("RouteManager: Low-latency tier setpoint is refreshed from post-shrink buffers",
+          "[route_manager][latency_mode][mux][ring]") {
+    // Companion to the Performance-tier case above: Low latency
+    // (tier 1) also benefits from the post-attach setpoint refresh
+    // when the user picks a buffer override smaller than the
+    // device's starting buffer. Without the refresh, Low on a
+    // 512-frame device with a 64-frame override would land the
+    // setpoint at ~767 frames (ring sized pre-shrink: max(512,
+    // 3*512) = 1536 → 0.5 × 1535 ≈ 767). With the refresh, it
+    // lands at ~256 frames (post-shrink: max(512, 3*64) = 512 →
+    // 0.5 × 512 = 256). This test pins the post-shrink value so a
+    // regression in the refresh logic would be caught on the Low
+    // tier, not just Performance.
+    auto backend = std::make_unique<SimulatedBackend>();
+    BackendDeviceInfo src = makeInputDevice("src", 2, /*buf*/ 512);
+    BackendDeviceInfo dst = makeOutputDevice("dst", 2, /*buf*/ 512);
+    backend->addDevice(src);
+    backend->addDevice(dst);
+    auto dm = std::make_unique<DeviceManager>(std::move(backend));
+    dm->refresh();
+    RouteManager rm(*dm);
+
+    std::vector<ChannelEdge> mapping{{0, 0}, {1, 1}};
+    RouteManager::RouteConfig cfg{
+        "src", "dst", mapping, "mux-low-ring",
+        /*latency_mode*/ 1,
+        /*buffer_frames*/ 64};
+    jbox_error_t err{};
+    const auto id = rm.addRoute(cfg, &err);
+    REQUIRE(rm.startRoute(id) == JBOX_OK);
+
+    jbox_route_latency_components_t components{};
+    REQUIRE(rm.pollLatencyComponents(id, &components) == JBOX_OK);
+
+    // Post-shrink Low-tier setpoint: ≤ 300 frames leaves ample slack
+    // above the expected 256, well below the pre-refresh 767.
+    REQUIRE(components.ring_target_fill_frames <= 300);
+    REQUIRE(components.ring_target_fill_frames > 0);
+    // Low tier keeps ring/2 drain headroom, so the pill is higher
+    // than Performance's ~6–7 ms but still well under the ~29 ms
+    // pre-shrink ceiling.
+    jbox_route_status_t status{};
+    REQUIRE(rm.pollStatus(id, &status) == JBOX_OK);
+    REQUIRE(status.estimated_latency_us < 12'000);
+}
+
 TEST_CASE("RouteManager: mux path reads each device independently after shrink",
           "[route_manager][latency_mode][mux]") {
     // Realistic failure mode on real hardware: hog succeeds on one
