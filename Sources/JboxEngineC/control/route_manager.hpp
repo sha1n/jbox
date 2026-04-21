@@ -24,6 +24,7 @@
 #ifndef JBOX_CONTROL_ROUTE_MANAGER_HPP
 #define JBOX_CONTROL_ROUTE_MANAGER_HPP
 
+#include "atomic_meter.hpp"
 #include "audio_converter_wrapper.hpp"
 #include "channel_mapper.hpp"
 #include "device_io_mux.hpp"
@@ -107,6 +108,13 @@ struct RouteRecord {
     std::atomic<std::uint64_t> frames_consumed{0};
     std::atomic<std::uint64_t> underrun_count{0};
     std::atomic<std::uint64_t> overrun_count{0};
+
+    // Per-route peak meters, indexed by route-internal channel
+    // (0..channels_count-1). Source is updated by the input IOProc on
+    // the pre-ring-buffer samples; dest is updated by the output IOProc
+    // on the post-converter samples. Cleared on every (re)start.
+    jbox::rt::AtomicMeter source_meter;
+    jbox::rt::AtomicMeter dest_meter;
 };
 
 class RouteManager {
@@ -150,6 +158,17 @@ public:
     // Fill in the status snapshot. Thread-safe insofar as counters
     // are atomics; state is mutated only on the control thread.
     jbox_error_code_t pollStatus(jbox_route_id_t id, jbox_route_status_t* out) const;
+
+    // Drain peak meters for `id` (read-and-reset) on the requested
+    // side. Fills up to `max_channels` values into `out_peaks`; returns
+    // the number actually written. Returns 0 for unknown ids,
+    // non-running routes, invalid side, null buffer, or max_channels
+    // == 0. See docs/spec.md § 2.8 and the jbox_engine_poll_meters
+    // bridge entry point.
+    std::size_t pollMeters(jbox_route_id_t   id,
+                           jbox_meter_side_t side,
+                           float*            out_peaks,
+                           std::size_t       max_channels);
 
     // Number of routes currently known to the manager (in any state).
     std::size_t routeCount() const { return routes_.size(); }

@@ -318,7 +318,8 @@ A **logging pipeline slice** also landed alongside the UI first-slice (unplanned
 **Exit criteria.**
 - [x] User can add / edit / delete routes through the main window route editor. *(Add/delete done in first slice; "edit" of an existing route is not yet wired — re-create workflow works.)*
 - [x] User can start / stop routes; status (running / stopped / waiting / error) reflects correctly. Row-level Start/Stop buttons and `StatusGlyph` render all five states; live polling keeps them up to date.
-- [ ] Per-channel meters update live while routes run. **Pending** — requires a new `jbox_engine_poll_meters` bridge entry point + a `Canvas`-based meter view on a 30 Hz timer.
+- [x] Per-channel signal indication — **Slice A (signal-present dots)**: landed. See the Meters task block below for the landing commit hashes.
+- [ ] Per-channel bar meters with color thresholds — **Slice B (full meters)**: pending; follows Slice A once the polling model is exercised.
 - [ ] Menu bar extra shows overall state and exposes toggles for each route. **Pending.**
 - [ ] Preferences window exposes buffer-size policy, resampler quality, and appearance. **Pending.**
 - [x] UI works without Xcode IDE (builds via `swift build`); SwiftUI previews work when opened in Xcode. The entire first slice was built and launched from the command line via `swift run JboxApp`.
@@ -350,9 +351,25 @@ Menu bar extra:
 - [ ] `MenuBarExtra` scene with dynamic icon. **Pending.**
 - [ ] Popover content: per-route toggles, scene picker, Start All / Stop All, menu items. **Pending.**
 
-Meters:
-- [ ] SwiftUI `Canvas`-based meter view; single 30 Hz timer drives the whole app. **Pending — depends on bridge work (`jbox_engine_poll_meters`).**
-- [ ] Color thresholds and accessibility labels. **Pending.**
+Meters — split into two slices so the diagnostic dots land first:
+
+**Slice A — per-channel signal-present dots (source + dest).** ✅ Landed. The cheapest thing that answers "is the break upstream or downstream?": one filled/empty dot per source channel and per destination channel, updated at ~30 Hz. No colors, no bars, no dBFS readout — just "signal vs. silence." Tasks:
+  - [x] `RouteRecord` gains a source-side `jbox::rt::AtomicMeter` and a dest-side one, each covering `channels_count` mapped channels.
+  - [x] Input IOProc updates the source meter with per-mapped-channel peak-over-block from the selected source-device channels (before ring-buffer write). Channel-outer extraction loop keeps this to O(channels) atomic compare-exchanges per block instead of O(frames × channels).
+  - [x] Output IOProc updates the dest meter with per-mapped-channel peak-over-block from the post-resample data being written to the device output buffer.
+  - [x] Both meters are reset (all `kAtomicMeterMaxChannels` slots zeroed) in `attemptStart` alongside the edge-triggered log flags.
+  - [x] Bridge: `jbox_meter_side_t { JBOX_METER_SIDE_SOURCE = 0, JBOX_METER_SIDE_DEST = 1 }` + `jbox_engine_poll_meters(engine, route_id, side, out_peaks, max_channels) -> size_t` added to `jbox_engine.h` and implemented in `bridge_api.cpp`. Additive symbol; matches the ABI policy already followed by `jbox_engine_enumerate_device_channels`.
+  - [x] Swift wrapper: `Engine.MeterSide { .source, .destination }` + `Engine.pollMeters(routeId:side:maxChannels:) -> [Float]` (non-throwing — meter polling is a high-frequency UI path).
+  - [x] `EngineStore.pollMeters()` drains every running route's source + dest peaks into `meters: [UInt32: MeterPeaks]`. Non-running routes are absent from the snapshot so stopping a route clears its dots on the next pass. A separate `~30 Hz` `.task` in `RouteListView` drives it while the main window is visible.
+  - [x] `RouteListView` row: `SignalDotRow` shows `in` dots left of an arrow, `out` dots right. Filled dot when peak > `MeterPeaks.signalThreshold` (0.001, ~-60 dBFS); outline otherwise. Accessibility label summarises "source signal on N of M; destination signal on P of Q".
+  - [x] Tests:
+    - C++ integration test (`meters_test.cpp`, 9 cases) — through `SimulatedBackend`, inject known samples and verify `pollMeters` reports the expected per-channel peaks on both sides, truncates cleanly when `max_channels < channels_count`, resets on re-read, and rejects unknown ids / invalid side / null buffer / zero capacity.
+    - C++ bridge test (`bridge_api_test.cpp`) — round-trip through the C entry point; null-engine and bad-args guards.
+    - Swift test (`EngineStoreTests.swift`) — wrapper returns `[]` for unknown routes, stopped routes, and `maxChannels == 0`; `EngineStore.pollMeters()` publishes an empty snapshot when no routes are running.
+
+**Slice B — full bar meters + color thresholds + accessibility.** Deferred. Picks up once Slice A has been exercised enough to know the polling model is right.
+  - [ ] SwiftUI `Canvas`-based meter view; single ~30 Hz timer drives the whole app.
+  - [ ] Color thresholds (gray / green / yellow / red per [spec.md § 4.5](./spec.md#45-meters)) and VoiceOver-friendly accessibility labels.
 
 UI tests (minimal):
 - [x] Swift Testing cases for `EngineStore` against the live Core Audio engine (`Tests/JboxEngineTests/EngineStoreTests.swift`, Phase 6 #1).

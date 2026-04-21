@@ -368,4 +368,19 @@ jbox_error_code_t jbox_engine_poll_route_status(jbox_engine_t* engine,
     }
 }
 
+size_t jbox_engine_poll_meters(jbox_engine_t*    engine,
+                               jbox_route_id_t   route_id,
+                               jbox_meter_side_t side,
+                               float*            out_peaks,
+                               size_t            max_channels) {
+    if (engine == nullptr) return 0;
+    try {
+        return engine->impl->pollMeters(route_id, side, out_peaks, max_channels);
+    } catch (...) {
+        // pollMeters is called from the UI at ~30 Hz; a thrown
+        // exception must not surface to Swift. Treat as "no data."
+        return 0;
+    }
+}
+
 }  // extern "C"

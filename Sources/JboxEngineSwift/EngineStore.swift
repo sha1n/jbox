@@ -63,6 +63,33 @@ public struct Route: Identifiable, Equatable, Sendable {
     }
 }
 
+/// Peak snapshot for a single route, one linear peak per mapped
+/// channel on each side. Read-and-reset: each `pollMeters()` pass on
+/// the store replaces this with the peak since the previous pass.
+public struct MeterPeaks: Equatable, Sendable {
+    public var source: [Float]
+    public var destination: [Float]
+
+    public init(source: [Float] = [], destination: [Float] = []) {
+        self.source = source
+        self.destination = destination
+    }
+
+    /// "Signal present" threshold, chosen to sit just above the typical
+    /// digital noise floor (~-60 dBFS = 10^(-60/20) ≈ 0.001). Values
+    /// strictly greater count as active in the UI dot renderer.
+    public static let signalThreshold: Float = 0.001
+
+    public func hasSignal(at index: Int) -> Bool {
+        guard index >= 0, index < source.count || index < destination.count else {
+            return false
+        }
+        let s = index < source.count      ? source[index]      : 0
+        let d = index < destination.count ? destination[index] : 0
+        return s > Self.signalThreshold || d > Self.signalThreshold
+    }
+}
+
 // MARK: - Store
 
 /// UI-facing façade over `Engine`. SwiftUI views bind to `devices`,
@@ -83,6 +110,13 @@ public final class EngineStore {
 
     public private(set) var devices: [Device] = []
     public private(set) var routes: [Route] = []
+
+    /// Latest per-route peak snapshot, keyed by engine-assigned route
+    /// id. Entries are present only for running routes; stopping /
+    /// removing a route clears its entry on the next `pollMeters()`
+    /// pass. Each entry carries a source-side and a destination-side
+    /// array, one linear peak per mapped channel.
+    public private(set) var meters: [UInt32: MeterPeaks] = [:]
 
     /// Human-readable description of the most recent engine error, or
     /// nil when the last action succeeded. Cleared by successful calls.
@@ -231,6 +265,41 @@ public final class EngineStore {
             if let status = try? engine.pollStatus(routes[i].id) {
                 routes[i].status = status
             }
+        }
+    }
+
+    // MARK: Meters (Phase 6 Slice A)
+
+    /// Drain peak meters from every currently-running route and publish
+    /// them into `meters`. Routes that are not running are absent from
+    /// the new snapshot (so stopping a route clears its dots on the
+    /// next pass). Non-throwing; a mid-pass engine failure leaves any
+    /// already-collected entries in place and silently skips the rest.
+    ///
+    /// Driven by a ~30 Hz task in the app layer while the main window
+    /// is visible. Called on the main actor; the underlying C call is
+    /// a sequence of atomic exchanges — cheap enough at this cadence.
+    public func pollMeters() {
+        var next: [UInt32: MeterPeaks] = [:]
+        next.reserveCapacity(routes.count)
+        for route in routes where route.status.state == .running {
+            let src = engine.pollMeters(routeId: route.id, side: .source)
+            let dst = engine.pollMeters(routeId: route.id, side: .destination)
+            next[route.id] = MeterPeaks(source: src, destination: dst)
+        }
+        meters = next
+    }
+
+    /// Convenience accessor for one side of a route's last published
+    /// peak snapshot. Reads from `meters`, so values are only as fresh
+    /// as the most recent `pollMeters()` pass. Returns an empty array
+    /// for routes that are not running (and therefore absent from the
+    /// snapshot) or that have never been polled.
+    public func meterPeaks(routeId: UInt32, side: Engine.MeterSide) -> [Float] {
+        guard let p = meters[routeId] else { return [] }
+        switch side {
+        case .source:      return p.source
+        case .destination: return p.destination
         }
     }
 

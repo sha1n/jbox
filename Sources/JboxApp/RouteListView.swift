@@ -9,9 +9,14 @@ struct RouteListView: View {
     @State private var showingAddSheet = false
 
     /// How often to re-poll route statuses while the view is visible.
-    /// 4 Hz is plenty for state transitions and counters; meters
-    /// (when they land) will likely want a separate 30 Hz timer.
+    /// 4 Hz is plenty for state transitions and counters.
     private static let pollInterval: Duration = .milliseconds(250)
+
+    /// Meter polling cadence — ~30 Hz. Spec §4.5 lands on 30 Hz for the
+    /// full bar meters in Slice B; we match it now so Slice A's dots
+    /// feel live under transient signal and we don't have to retune
+    /// when bars arrive.
+    private static let meterInterval: Duration = .milliseconds(33)
 
     var body: some View {
         NavigationSplitView {
@@ -27,6 +32,21 @@ struct RouteListView: View {
                             store.pollStatuses()
                         }
                         try? await Task.sleep(for: Self.pollInterval)
+                    }
+                }
+                .task {
+                    // Separate, faster loop for meters — at ~30 Hz this
+                    // is one atomic-exchange-per-channel per running
+                    // route, cheap even with many routes.
+                    while !Task.isCancelled {
+                        if store.routes.contains(where: { $0.status.state == .running }) {
+                            store.pollMeters()
+                        } else if !store.meters.isEmpty {
+                            // Clear stale peaks when nothing is running
+                            // so the UI doesn't hang on an old snapshot.
+                            store.pollMeters()
+                        }
+                        try? await Task.sleep(for: Self.meterInterval)
                     }
                 }
                 .toolbar {
@@ -103,6 +123,9 @@ struct RouteRow: View {
                 Text(mappingSummary)
                     .font(.caption)
                     .foregroundStyle(.secondary)
+                if route.status.state == .running {
+                    SignalDotRow(peaks: store.meters[route.id])
+                }
                 if let errorText = errorText {
                     Text(errorText)
                         .font(.caption2)
@@ -147,6 +170,73 @@ struct RouteRow: View {
 
     private var counterLine: some View {
         Text("\(route.status.framesProduced) / \(route.status.framesConsumed) · u\(route.status.underrunCount)")
+    }
+}
+
+/// Phase 6 Slice A signal indicator: one small dot per mapped channel
+/// on each side of the route. Filled when the last polled peak for
+/// that channel exceeded `MeterPeaks.signalThreshold`, outline when
+/// silent. Absent peaks (route not yet polled) render as outlines —
+/// nothing to show, but the channel slots are preserved so the row
+/// height doesn't twitch mid-poll. Bar meters with dB thresholds land
+/// in Slice B; see [spec.md § 4.5](../../docs/spec.md#45-meters).
+struct SignalDotRow: View {
+    let peaks: MeterPeaks?
+
+    var body: some View {
+        HStack(spacing: 6) {
+            DotGroup(label: "in",  values: peaks?.source      ?? [])
+            Image(systemName: "arrow.right")
+                .font(.caption2)
+                .foregroundStyle(.tertiary)
+            DotGroup(label: "out", values: peaks?.destination ?? [])
+        }
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(accessibilityLabel)
+    }
+
+    private var accessibilityLabel: String {
+        let src = peaks?.source ?? []
+        let dst = peaks?.destination ?? []
+        let srcActive = src.filter { $0 > MeterPeaks.signalThreshold }.count
+        let dstActive = dst.filter { $0 > MeterPeaks.signalThreshold }.count
+        return "Source signal on \(srcActive) of \(src.count); destination signal on \(dstActive) of \(dst.count)"
+    }
+}
+
+private struct DotGroup: View {
+    let label: String
+    let values: [Float]
+
+    var body: some View {
+        HStack(spacing: 4) {
+            Text(label)
+                .font(.caption2)
+                .foregroundStyle(.tertiary)
+            if values.isEmpty {
+                // Keep a sliver of space so the row doesn't collapse
+                // vertically while the first poll is in flight.
+                Text("—")
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+            } else {
+                HStack(spacing: 3) {
+                    ForEach(Array(values.enumerated()), id: \.offset) { _, v in
+                        Dot(active: v > MeterPeaks.signalThreshold)
+                    }
+                }
+            }
+        }
+    }
+}
+
+private struct Dot: View {
+    let active: Bool
+
+    var body: some View {
+        Image(systemName: active ? "circle.fill" : "circle")
+            .font(.system(size: 7))
+            .foregroundStyle(active ? Color.green : Color.secondary.opacity(0.5))
     }
 }
 

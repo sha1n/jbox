@@ -56,4 +56,11 @@ jbox_error_code_t Engine::pollStatus(jbox_route_id_t id,
     return rm_.pollStatus(id, out);
 }
 
+std::size_t Engine::pollMeters(jbox_route_id_t id,
+                               jbox_meter_side_t side,
+                               float* out_peaks,
+                               std::size_t max_channels) {
+    return rm_.pollMeters(id, side, out_peaks, max_channels);
+}
+
 }  // namespace jbox::control

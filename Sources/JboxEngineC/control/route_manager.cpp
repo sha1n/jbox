@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <cstring>
 #include <utility>
 
@@ -68,13 +69,22 @@ void inputIOProcCallback(const float* samples,
     const std::uint32_t out_channels = r->channels_count;
     float* scratch = r->input_scratch.data();
 
-    // Extract selected source channels into interleaved scratch.
-    for (std::uint32_t f = 0; f < frame_count; ++f) {
-        const float* src_frame = samples + f * channel_count;
-        float*       dst_frame = scratch + f * out_channels;
-        for (std::uint32_t i = 0; i < out_channels; ++i) {
-            dst_frame[i] = src_frame[r->mapping[i].src];
+    // Extract selected source channels into interleaved scratch, and
+    // track per-channel peak in one pass. Per-channel outer loop gives
+    // us O(channels_count) atomic meter updates rather than
+    // O(frames × channels), at the cost of a strided read of `samples`
+    // — acceptable given typical block sizes (32–256 frames) and small
+    // channel counts keep both buffers in L1.
+    for (std::uint32_t i = 0; i < out_channels; ++i) {
+        const std::uint32_t src_ch = r->mapping[i].src;
+        float peak = 0.0f;
+        for (std::uint32_t f = 0; f < frame_count; ++f) {
+            const float s = samples[f * channel_count + src_ch];
+            scratch[f * out_channels + i] = s;
+            const float a = std::fabs(s);
+            if (a > peak) peak = a;
         }
+        r->source_meter.updateMax(i, peak);
     }
 
     const std::size_t written = r->ring->writeFrames(scratch, frame_count);
@@ -134,12 +144,20 @@ void outputIOProcCallback(float* samples,
                     (frame_count - produced) * in_channels * sizeof(float));
     }
 
-    for (std::uint32_t f = 0; f < frame_count; ++f) {
-        const float* src_frame = scratch + f * in_channels;
-        float*       dst_frame = samples + f * channel_count;
-        for (std::uint32_t i = 0; i < in_channels; ++i) {
-            dst_frame[r->mapping[i].dst] = src_frame[i];
+    // Place converted samples on the destination device's selected
+    // output channels and track per-channel peak in one pass. Same
+    // channel-outer pattern as the input side to keep the atomic cost
+    // at O(channels_count) instead of O(frames × channels).
+    for (std::uint32_t i = 0; i < in_channels; ++i) {
+        const std::uint32_t dst_ch = r->mapping[i].dst;
+        float peak = 0.0f;
+        for (std::uint32_t f = 0; f < frame_count; ++f) {
+            const float s = scratch[f * in_channels + i];
+            samples[f * channel_count + dst_ch] = s;
+            const float a = std::fabs(s);
+            if (a > peak) peak = a;
         }
+        r->dest_meter.updateMax(i, peak);
     }
 
     r->frames_consumed.fetch_add(produced, std::memory_order_relaxed);
@@ -239,6 +257,25 @@ jbox_error_code_t RouteManager::pollStatus(jbox_route_id_t id,
     return JBOX_OK;
 }
 
+std::size_t RouteManager::pollMeters(jbox_route_id_t   id,
+                                     jbox_meter_side_t side,
+                                     float*            out_peaks,
+                                     std::size_t       max_channels) {
+    if (out_peaks == nullptr || max_channels == 0) return 0;
+    if (side != JBOX_METER_SIDE_SOURCE && side != JBOX_METER_SIDE_DEST) return 0;
+    auto it = routes_.find(id);
+    if (it == routes_.end()) return 0;
+    RouteRecord& r = *it->second;
+    if (r.state != JBOX_ROUTE_STATE_RUNNING) return 0;
+
+    auto& meter = (side == JBOX_METER_SIDE_SOURCE) ? r.source_meter : r.dest_meter;
+    const std::size_t n = std::min<std::size_t>(r.channels_count, max_channels);
+    for (std::size_t i = 0; i < n; ++i) {
+        out_peaks[i] = meter.readAndReset(i);
+    }
+    return n;
+}
+
 std::vector<RouteRecord*> RouteManager::runningRoutes() {
     std::vector<RouteRecord*> out;
     out.reserve(routes_.size());
@@ -258,6 +295,13 @@ jbox_error_code_t RouteManager::attemptStart(RouteRecord& r) {
     r.reported_underrun.store(false, std::memory_order_relaxed);
     r.reported_overrun.store(false, std::memory_order_relaxed);
     r.reported_channel_mismatch.store(false, std::memory_order_relaxed);
+
+    // Clear any stale meter peaks from a previous run. readAndReset
+    // both reads (discarded) and atomically zeroes the stored peak.
+    for (std::size_t i = 0; i < jbox::rt::kAtomicMeterMaxChannels; ++i) {
+        (void)r.source_meter.readAndReset(i);
+        (void)r.dest_meter.readAndReset(i);
+    }
 
     // Resolve devices.
     const BackendDeviceInfo* src = dm_.findByUid(r.source_uid);

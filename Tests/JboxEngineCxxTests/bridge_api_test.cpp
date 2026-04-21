@@ -429,3 +429,123 @@ TEST_CASE("bridge: setLogSink on a drainer-less engine returns false",
 
     jbox_engine_destroy(e);
 }
+
+// -----------------------------------------------------------------------------
+// jbox_engine_poll_meters
+// -----------------------------------------------------------------------------
+
+TEST_CASE("bridge: poll_meters with null engine returns 0", "[bridge_api][meters]") {
+    float peaks[2] = {7.0f, 7.0f};
+    REQUIRE(jbox_engine_poll_meters(nullptr, 1, JBOX_METER_SIDE_SOURCE, peaks, 2) == 0);
+    REQUIRE(peaks[0] == 7.0f);
+    REQUIRE(peaks[1] == 7.0f);
+}
+
+TEST_CASE("bridge: poll_meters forwards to the running route on both sides",
+          "[bridge_api][meters][integration]") {
+    auto backend_holder = std::make_unique<SimulatedBackend>();
+    auto* backend = backend_holder.get();
+    backend->addDevice(makeDev("src", kBackendDirectionInput,  2, 0));
+    backend->addDevice(makeDev("dst", kBackendDirectionOutput, 0, 2));
+
+    jbox_engine_t* e = jbox::internal::createEngineWithBackend(
+        std::move(backend_holder), /*spawn_sampler_thread=*/false);
+    REQUIRE(e != nullptr);
+
+    jbox_error_t err{};
+    if (auto* l = jbox_engine_enumerate_devices(e, &err)) {
+        jbox_device_list_free(l);
+    }
+
+    const jbox_channel_edge_t mapping[] = {{0, 0}, {1, 1}};
+    jbox_route_config_t rcfg{
+        .source_uid    = "src",
+        .dest_uid      = "dst",
+        .mapping       = mapping,
+        .mapping_count = 2,
+        .name          = "meters-bridge"
+    };
+    const jbox_route_id_t id = jbox_engine_add_route(e, &rcfg, &err);
+    REQUIRE(id != JBOX_INVALID_ROUTE_ID);
+    REQUIRE(jbox_engine_start_route(e, id) == JBOX_OK);
+
+    // Known peaks per channel: ch0 = 0.25, ch1 = 0.75.
+    const float in[] = {
+        0.00f, 0.00f,
+        0.25f, 0.00f,
+        0.00f, 0.75f,
+        0.10f, 0.20f,
+    };
+    backend->deliverBuffer("src", 4, in, nullptr);
+
+    float src_peaks[2] = {0.0f, 0.0f};
+    REQUIRE(jbox_engine_poll_meters(e, id, JBOX_METER_SIDE_SOURCE, src_peaks, 2) == 2);
+    REQUIRE(src_peaks[0] == Catch::Approx(0.25f));
+    REQUIRE(src_peaks[1] == Catch::Approx(0.75f));
+
+    // Drain through the output side so the dest meter registers.
+    float out[8] = {};
+    backend->deliverBuffer("dst", 4, nullptr, out);
+
+    float dst_peaks[2] = {0.0f, 0.0f};
+    REQUIRE(jbox_engine_poll_meters(e, id, JBOX_METER_SIDE_DEST, dst_peaks, 2) == 2);
+    REQUIRE(dst_peaks[0] == Catch::Approx(0.25f).margin(1e-4f));
+    REQUIRE(dst_peaks[1] == Catch::Approx(0.75f).margin(1e-4f));
+
+    // Read-and-reset: second poll with no new samples reads zero.
+    src_peaks[0] = src_peaks[1] = 9.0f;
+    REQUIRE(jbox_engine_poll_meters(e, id, JBOX_METER_SIDE_SOURCE, src_peaks, 2) == 2);
+    REQUIRE(src_peaks[0] == 0.0f);
+    REQUIRE(src_peaks[1] == 0.0f);
+
+    jbox_engine_destroy(e);
+}
+
+TEST_CASE("bridge: poll_meters rejects bad args and non-running routes",
+          "[bridge_api][meters][integration]") {
+    auto backend_holder = std::make_unique<SimulatedBackend>();
+    auto* backend = backend_holder.get();
+    backend->addDevice(makeDev("src", kBackendDirectionInput,  2, 0));
+    backend->addDevice(makeDev("dst", kBackendDirectionOutput, 0, 2));
+
+    jbox_engine_t* e = jbox::internal::createEngineWithBackend(
+        std::move(backend_holder), /*spawn_sampler_thread=*/false);
+    jbox_error_t err{};
+    if (auto* l = jbox_engine_enumerate_devices(e, &err)) {
+        jbox_device_list_free(l);
+    }
+
+    const jbox_channel_edge_t mapping[] = {{0, 0}, {1, 1}};
+    jbox_route_config_t rcfg{
+        .source_uid    = "src",
+        .dest_uid      = "dst",
+        .mapping       = mapping,
+        .mapping_count = 2,
+        .name          = "meters-bad-args"
+    };
+    const jbox_route_id_t id = jbox_engine_add_route(e, &rcfg, &err);
+    REQUIRE(id != JBOX_INVALID_ROUTE_ID);
+
+    float peaks[2] = {7.0f, 7.0f};
+
+    // Route is STOPPED → 0.
+    REQUIRE(jbox_engine_poll_meters(e, id, JBOX_METER_SIDE_SOURCE, peaks, 2) == 0);
+    REQUIRE(peaks[0] == 7.0f);
+
+    REQUIRE(jbox_engine_start_route(e, id) == JBOX_OK);
+
+    // Unknown route id.
+    REQUIRE(jbox_engine_poll_meters(e, 99999, JBOX_METER_SIDE_SOURCE, peaks, 2) == 0);
+    REQUIRE(peaks[0] == 7.0f);
+
+    // Null buffer, zero capacity, bogus side.
+    REQUIRE(jbox_engine_poll_meters(e, id, JBOX_METER_SIDE_SOURCE, nullptr, 2) == 0);
+    REQUIRE(jbox_engine_poll_meters(e, id, JBOX_METER_SIDE_SOURCE, peaks, 0) == 0);
+    REQUIRE(peaks[0] == 7.0f);
+
+    const auto bogus_side = static_cast<jbox_meter_side_t>(99);
+    REQUIRE(jbox_engine_poll_meters(e, id, bogus_side, peaks, 2) == 0);
+    REQUIRE(peaks[0] == 7.0f);
+
+    jbox_engine_destroy(e);
+}

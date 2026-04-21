@@ -149,6 +149,50 @@ public final class Engine {
         }
     }
 
+    /// Which side of a route to meter. Source reflects the pre-ring-
+    /// buffer peaks of the mapped source channels; destination reflects
+    /// the post-converter peaks of the mapped destination channels.
+    /// Mirrors `jbox_meter_side_t` in the C bridge.
+    public enum MeterSide: Sendable, Hashable {
+        case source, destination
+
+        fileprivate var cValue: jbox_meter_side_t {
+            switch self {
+            case .source:      return JBOX_METER_SIDE_SOURCE
+            case .destination: return JBOX_METER_SIDE_DEST
+            }
+        }
+    }
+
+    /// Drain peak meters for a route. Returns an array of linear peak-
+    /// amplitude values (|sample|) with read-and-reset semantics —
+    /// each call yields the peak since the previous call and resets
+    /// the underlying atomic to zero.
+    ///
+    /// Returns an empty array when:
+    ///   - the engine handle is gone
+    ///   - `maxChannels` is zero
+    ///   - the route is unknown or not currently `.running`
+    ///
+    /// Non-throwing: meter polling is a high-frequency UI path; a
+    /// thrown exception on the hot loop is not appropriate, and any
+    /// engine-side failure maps to "no data".
+    public func pollMeters(routeId: UInt32,
+                           side: MeterSide,
+                           maxChannels: Int = 64) -> [Float] {
+        guard let h = handle, maxChannels > 0 else { return [] }
+        var buf = [Float](repeating: 0, count: maxChannels)
+        let written = buf.withUnsafeMutableBufferPointer { ptr -> Int in
+            Int(jbox_engine_poll_meters(h, routeId, side.cValue,
+                                        ptr.baseAddress, maxChannels))
+        }
+        if written == 0 { return [] }
+        if written < maxChannels {
+            buf.removeLast(maxChannels - written)
+        }
+        return buf
+    }
+
     /// Per-channel names for a device. The returned array has one
     /// entry per channel in the requested direction; entries are empty
     /// strings when the driver does not publish a label. Callers

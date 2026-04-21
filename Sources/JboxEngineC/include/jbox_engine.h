@@ -252,6 +252,41 @@ jbox_error_code_t jbox_engine_poll_route_status(jbox_engine_t*       engine,
                                                 jbox_route_id_t      route_id,
                                                 jbox_route_status_t* out_status);
 
+/* -------------------------------------------------------------------- */
+/*  Metering                                                            */
+/* -------------------------------------------------------------------- */
+
+/*
+ * Which side of a route to meter. Source = pre-ring-buffer peaks of
+ * the mapped source channels; dest = post-converter peaks of the
+ * mapped destination channels. Indexed in route-internal order (0..N-1
+ * where N is the route's mapping count), not device channel indices.
+ */
+typedef enum {
+    JBOX_METER_SIDE_SOURCE = 0,
+    JBOX_METER_SIDE_DEST   = 1
+} jbox_meter_side_t;
+
+/*
+ * Drain peak meters for a route. Fills up to `max_channels` linear
+ * peak-amplitude values (|sample|, range [0.0, 1.0] for well-formed
+ * audio) into `out_peaks`. Returns the number of values written.
+ *
+ * Read-and-reset semantics: each call returns the peak since the
+ * previous call and atomically resets the stored peak to zero.
+ *
+ * Returns 0 (without touching `out_peaks`) when:
+ *   - `engine` or `out_peaks` is NULL, or `max_channels` is 0
+ *   - `route_id` is unknown
+ *   - the route is not RUNNING
+ *   - `side` is neither JBOX_METER_SIDE_SOURCE nor JBOX_METER_SIDE_DEST
+ */
+size_t jbox_engine_poll_meters(jbox_engine_t*    engine,
+                               jbox_route_id_t   route_id,
+                               jbox_meter_side_t side,
+                               float*            out_peaks,
+                               size_t            max_channels);
+
 #ifdef __cplusplus
 }  /* extern "C" */
 #endif
