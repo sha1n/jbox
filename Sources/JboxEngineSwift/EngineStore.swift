@@ -258,6 +258,28 @@ public final class EngineStore {
         (try? engine.supportedBufferFrameSizeRange(forDeviceUid: uid)) ?? nil
     }
 
+    // MARK: Engine-wide preferences
+
+    /// Push the engine-wide resampler quality preset (ABI v8+). The
+    /// change applies to newly-started routes only — already-running
+    /// routes keep the preset their converter was built with until
+    /// stopped and started again. Non-throwing: a preference push on
+    /// an otherwise-healthy engine should never surface errors to the
+    /// UI, so we log and move on.
+    public func setResamplerQuality(_ quality: Engine.ResamplerQuality) {
+        do {
+            try engine.setResamplerQuality(quality)
+            JboxLog.engine.info("resampler quality set: \(String(describing: quality), privacy: .public)")
+        } catch {
+            JboxLog.engine.error("setResamplerQuality failed: \(String(describing: error), privacy: .public)")
+        }
+    }
+
+    /// Current engine-wide resampler quality preset.
+    public var resamplerQuality: Engine.ResamplerQuality {
+        engine.resamplerQuality
+    }
+
     // MARK: Routes
 
     /// Add a route; returns the new live `Route` value (also appended

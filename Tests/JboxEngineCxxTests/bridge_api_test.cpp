@@ -352,6 +352,70 @@ TEST_CASE("bridge: struct sizes document the ABI shape", "[bridge_api]") {
 }
 
 // -----------------------------------------------------------------------------
+// Resampler quality (ABI v8+)
+// -----------------------------------------------------------------------------
+
+TEST_CASE("bridge: resampler_quality defaults to Mastering",
+          "[bridge_api][resampler_quality]") {
+    auto backend = std::make_unique<SimulatedBackend>();
+    jbox_engine_t* e = jbox::internal::createEngineWithBackend(
+        std::move(backend), /*spawn_sampler_thread=*/false);
+
+    REQUIRE(jbox_engine_resampler_quality(e) == JBOX_RESAMPLER_QUALITY_MASTERING);
+
+    jbox_engine_destroy(e);
+}
+
+TEST_CASE("bridge: resampler_quality round-trips through set + get",
+          "[bridge_api][resampler_quality]") {
+    auto backend = std::make_unique<SimulatedBackend>();
+    jbox_engine_t* e = jbox::internal::createEngineWithBackend(
+        std::move(backend), /*spawn_sampler_thread=*/false);
+
+    REQUIRE(jbox_engine_set_resampler_quality(e, JBOX_RESAMPLER_QUALITY_HIGH_QUALITY)
+            == JBOX_OK);
+    REQUIRE(jbox_engine_resampler_quality(e) == JBOX_RESAMPLER_QUALITY_HIGH_QUALITY);
+
+    // Flip back to the default.
+    REQUIRE(jbox_engine_set_resampler_quality(e, JBOX_RESAMPLER_QUALITY_MASTERING)
+            == JBOX_OK);
+    REQUIRE(jbox_engine_resampler_quality(e) == JBOX_RESAMPLER_QUALITY_MASTERING);
+
+    jbox_engine_destroy(e);
+}
+
+TEST_CASE("bridge: set_resampler_quality rejects null engine",
+          "[bridge_api][resampler_quality]") {
+    REQUIRE(jbox_engine_set_resampler_quality(nullptr,
+                                              JBOX_RESAMPLER_QUALITY_HIGH_QUALITY)
+            == JBOX_ERR_INVALID_ARGUMENT);
+    // Getter on NULL returns the default rather than erroring — the
+    // call site is a high-frequency UI path that can't surface errors.
+    REQUIRE(jbox_engine_resampler_quality(nullptr)
+            == JBOX_RESAMPLER_QUALITY_MASTERING);
+}
+
+TEST_CASE("bridge: set_resampler_quality clamps unknown values to Mastering",
+          "[bridge_api][resampler_quality]") {
+    auto backend = std::make_unique<SimulatedBackend>();
+    jbox_engine_t* e = jbox::internal::createEngineWithBackend(
+        std::move(backend), /*spawn_sampler_thread=*/false);
+
+    // Start by setting to High Quality so we can see the clamp move us.
+    REQUIRE(jbox_engine_set_resampler_quality(e, JBOX_RESAMPLER_QUALITY_HIGH_QUALITY)
+            == JBOX_OK);
+    REQUIRE(jbox_engine_resampler_quality(e) == JBOX_RESAMPLER_QUALITY_HIGH_QUALITY);
+
+    // An unknown enum value (future extension). We cast through an int
+    // to spoof forward-compat callers writing values newer engines know.
+    const auto unknown = static_cast<jbox_resampler_quality_t>(0xFEu);
+    REQUIRE(jbox_engine_set_resampler_quality(e, unknown) == JBOX_OK);
+    REQUIRE(jbox_engine_resampler_quality(e) == JBOX_RESAMPLER_QUALITY_MASTERING);
+
+    jbox_engine_destroy(e);
+}
+
+// -----------------------------------------------------------------------------
 // End-to-end: drainer + setLogSink through the public C API
 // -----------------------------------------------------------------------------
 //

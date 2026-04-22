@@ -21,6 +21,14 @@ struct AddRouteSheet: View {
     @State private var bufferFrames: UInt32 = 0
     @State private var errorMessage: String?
 
+    /// Buffer-size policy preference (Preferences → Audio). Seeds the
+    /// Performance-mode picker the first time the user switches into
+    /// that tier; they can still override it per-route before saving.
+    /// 0 == "use each device's current setting"; non-zero is an
+    /// explicit override in frames. Matches
+    /// `BufferSizePolicy.storedRaw` in `JboxEngineSwift`.
+    @AppStorage(JboxPreferences.bufferSizePolicyKey) private var bufferPolicyRaw: Int = 0
+
     /// Standard buffer-size options offered to the user. The menu
     /// filters down to the subset the selected device supports.
     private static let kBufferSizeChoices: [UInt32] = [
@@ -180,6 +188,9 @@ struct AddRouteSheet: View {
         }
         .frame(minWidth: 520, minHeight: 460)
         .onAppear(perform: preselectDefaults)
+        .onChange(of: latencyMode) { _, newMode in
+            seedBufferFromPolicyIfNeeded(latencyMode: newMode)
+        }
     }
 
     // MARK: Actions
@@ -191,6 +202,21 @@ struct AddRouteSheet: View {
         if destUID.isEmpty, let first = outputDevices.first {
             destUID = first.uid
         }
+        seedBufferFromPolicyIfNeeded(latencyMode: latencyMode)
+    }
+
+    /// If the user switches into Performance mode (or opens the sheet
+    /// already on Performance) and hasn't picked a buffer size, seed
+    /// `bufferFrames` from the global policy. We only touch an
+    /// untouched `0` so the user's explicit override is never
+    /// overwritten. Policy values that the currently-selected devices
+    /// can't honour fall back to 0 (tier default) instead of forcing
+    /// the HAL to clamp.
+    private func seedBufferFromPolicyIfNeeded(latencyMode: LatencyMode) {
+        guard latencyMode == .performance, bufferFrames == 0 else { return }
+        let raw = UInt32(max(0, bufferPolicyRaw))
+        guard raw != 0, bufferSizeOptions.contains(raw) else { return }
+        bufferFrames = raw
     }
 
     private func save() {

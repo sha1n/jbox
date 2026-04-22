@@ -44,8 +44,12 @@ extern "C" {
  *              target HAL buffer size the fast path requests).
  *   7  MINOR — added jbox_engine_rename_route for non-disruptive
  *              renames of existing routes.
+ *   8  MINOR — added jbox_engine_set_resampler_quality /
+ *              jbox_engine_resampler_quality so the Swift
+ *              Preferences window can push an engine-wide SRC
+ *              quality preset. Applies to newly-started routes.
  */
-#define JBOX_ENGINE_ABI_VERSION 7u
+#define JBOX_ENGINE_ABI_VERSION 8u
 
 uint32_t jbox_engine_abi_version(void);
 
@@ -349,6 +353,42 @@ jbox_error_code_t jbox_engine_poll_route_latency_components(
     jbox_engine_t*                   engine,
     jbox_route_id_t                  route_id,
     jbox_route_latency_components_t* out_components);
+
+/* -------------------------------------------------------------------- */
+/*  Resampler quality (engine-wide)                                     */
+/* -------------------------------------------------------------------- */
+
+/*
+ * Engine-wide sample-rate-conversion quality preset (ABI v8+). Applied
+ * when a new route's converter is constructed at `startRoute` — routes
+ * already running keep the preset their converter was built with until
+ * stopped and started again.
+ *
+ *   0 — Mastering. `_Complexity_Mastering` + `Quality_Max`. Default.
+ *       Highest-fidelity preset; what the engine has used since v1.
+ *   1 — High Quality. `_Complexity_Normal` + `Quality_High`. Still
+ *       well above the Core Audio default; noticeably cheaper on
+ *       high-channel-count / multi-route sessions.
+ *
+ * Unknown values are clamped to Mastering. See docs/spec.md § 2.5 and
+ * § 4.6.
+ */
+typedef enum {
+    JBOX_RESAMPLER_QUALITY_MASTERING    = 0,
+    JBOX_RESAMPLER_QUALITY_HIGH_QUALITY = 1
+} jbox_resampler_quality_t;
+
+/* Set the engine-wide resampler quality preset. Non-NULL engine
+ * required; otherwise returns JBOX_ERR_INVALID_ARGUMENT. Unknown
+ * values are clamped to Mastering without error. */
+jbox_error_code_t jbox_engine_set_resampler_quality(
+    jbox_engine_t*           engine,
+    jbox_resampler_quality_t quality);
+
+/* Read the current engine-wide resampler quality preset. Returns
+ * JBOX_RESAMPLER_QUALITY_MASTERING on NULL engine (the default). */
+jbox_resampler_quality_t jbox_engine_resampler_quality(
+    jbox_engine_t* engine);
 
 /*
  * Supported HAL buffer-frame-size range for the device identified by

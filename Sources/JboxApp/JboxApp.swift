@@ -9,6 +9,13 @@ struct JboxApp: App {
     /// see the same engine instance. Lives for the app's lifetime.
     @State private var appState = AppState()
 
+    /// Live appearance preference. Bound at the top of the scene graph
+    /// so both the main window and the menu bar popover track the
+    /// user's choice; `colorScheme(from:)` resolves `.system` → `nil`
+    /// (follow OS), `.light`/`.dark` → the matching `ColorScheme`.
+    @AppStorage(JboxPreferences.appearanceKey) private var appearanceRaw
+        = AppearanceMode.default.rawValue
+
     /// Window-group identifier used by the menu bar's "Open Jbox"
     /// action to reopen the main window after the user has closed it.
     private static let mainWindowId = "main"
@@ -16,56 +23,293 @@ struct JboxApp: App {
     var body: some Scene {
         WindowGroup("Jbox", id: Self.mainWindowId) {
             AppRootView(appState: appState)
+                .preferredColorScheme(colorScheme)
         }
         .windowResizability(.contentMinSize)
 
         Settings {
-            PreferencesView()
+            PreferencesView(appState: appState)
+                .preferredColorScheme(colorScheme)
         }
 
         MenuBarExtra {
             MenuBarScene(appState: appState, mainWindowId: Self.mainWindowId)
+                .preferredColorScheme(colorScheme)
         } label: {
             MenuBarIconLabel(store: appState.store)
         }
         .menuBarExtraStyle(.window)
     }
-}
 
-/// Default-storage key for the Advanced → "Show engine diagnostics"
-/// toggle (Phase 6 refinement #4). Exported so views can read it via
-/// `@AppStorage(JboxPreferences.showDiagnosticsKey)`. Persisted in
-/// `NSUserDefaults` under this exact key until Phase 7 rolls its
-/// own `AppState.preferences`; migration is a key-read away.
-enum JboxPreferences {
-    public static let showDiagnosticsKey = "com.jbox.showDiagnostics"
-}
-
-struct PreferencesView: View {
-    var body: some View {
-        TabView {
-            AdvancedPreferencesView()
-                .tabItem { Label("Advanced", systemImage: "wrench.and.screwdriver") }
+    /// Translate the stored appearance preference into the SwiftUI
+    /// `ColorScheme?` that `.preferredColorScheme(_:)` expects. A `nil`
+    /// return lets the scenes inherit the OS appearance.
+    private var colorScheme: ColorScheme? {
+        switch AppearanceMode(rawValueOrDefault: appearanceRaw) {
+        case .system: return nil
+        case .light:  return .light
+        case .dark:   return .dark
         }
-        .frame(width: 420, height: 180)
     }
 }
 
-struct AdvancedPreferencesView: View {
-    @AppStorage(JboxPreferences.showDiagnosticsKey) private var showDiagnostics = false
+/// Central default-storage keys for the three-tab Preferences window
+/// (docs/spec.md § 4.6). Every `@AppStorage`-backed setting in the app
+/// reads from a constant here so the keys can be audited and renamed
+/// in one place. Persisted in `NSUserDefaults` until Phase 7 rolls a
+/// proper `AppState.preferences` struct on top of `state.json`; the
+/// migration is a `UserDefaults.standard.value(forKey:)` read away.
+enum JboxPreferences {
+    // General
+    /// Raw value of `AppearanceMode`. Default: `.system`.
+    public static let appearanceKey       = "com.jbox.appearance"
+    // Audio
+    /// Raw `UInt32`: 0 = use device setting (default); non-zero = explicit
+    /// override frame count matching `BufferSizePolicy.frameChoices`.
+    public static let bufferSizePolicyKey = "com.jbox.bufferSizePolicy"
+    /// Raw value of `Engine.ResamplerQuality.rawValue`. Default: `.mastering`.
+    public static let resamplerQualityKey = "com.jbox.resamplerQuality"
+    // Advanced
+    /// Bool; diagnostics toggle (Phase 6 refinement #4). Default: off.
+    public static let showDiagnosticsKey  = "com.jbox.showDiagnostics"
+}
+
+struct PreferencesView: View {
+    let appState: AppState
+
+    var body: some View {
+        TabView {
+            GeneralPreferencesView()
+                .tabItem { Label("General", systemImage: "gearshape") }
+
+            AudioPreferencesView(appState: appState)
+                .tabItem { Label("Audio", systemImage: "waveform") }
+
+            AdvancedPreferencesView()
+                .tabItem { Label("Advanced", systemImage: "wrench.and.screwdriver") }
+        }
+        .frame(width: 460, height: 320)
+    }
+}
+
+/// General tab: appearance + menu bar toggles. Launch-at-login and
+/// menu-bar meters are Phase 7 concerns (persistence + menu bar
+/// feature); shown disabled so users see the layout that's coming.
+struct GeneralPreferencesView: View {
+    @AppStorage(JboxPreferences.appearanceKey) private var appearanceRaw
+        = AppearanceMode.default.rawValue
+
+    private static let appearanceFooter =
+        "Controls the main window and menu bar popover. "
+        + "\"Follow System\" inherits the macOS appearance."
+
+    private static let menuBarFooter =
+        "Both land with Phase 7 — launch-at-login needs persistence to "
+        + "round-trip, and menu-bar meters need the icon renderer to "
+        + "animate between states."
 
     var body: some View {
         Form {
-            Section {
-                Toggle("Show engine diagnostics", isOn: $showDiagnostics)
-            } footer: {
-                Text("When on, the expanded route panel surfaces frame "
-                     + "counters and the per-component latency breakdown. "
-                     + "Off by default — the collapsed row stays calm.")
-            }
+            appearanceSection
+            menuBarSection
         }
         .formStyle(.grouped)
         .padding()
+    }
+
+    private var appearanceSection: some View {
+        Section {
+            Picker("Theme", selection: $appearanceRaw) {
+                Text("Follow System").tag(AppearanceMode.system.rawValue)
+                Text("Light").tag(AppearanceMode.light.rawValue)
+                Text("Dark").tag(AppearanceMode.dark.rawValue)
+            }
+            .pickerStyle(.segmented)
+        } header: {
+            Text("Appearance")
+        } footer: {
+            Text(Self.appearanceFooter)
+        }
+    }
+
+    private var menuBarSection: some View {
+        Section {
+            Toggle("Launch at login", isOn: .constant(false))
+                .disabled(true)
+            Toggle("Show meters in menu bar icon", isOn: .constant(false))
+                .disabled(true)
+        } header: {
+            Text("Menu bar")
+        } footer: {
+            Text(Self.menuBarFooter)
+        }
+    }
+}
+
+/// Audio tab: buffer-size policy + resampler quality. Both are
+/// engine-facing: buffer policy seeds the per-route default in
+/// `AddRouteSheet`, resampler quality pushes through to the engine's
+/// `AudioConverterWrapper` constructor for newly-started routes.
+struct AudioPreferencesView: View {
+    let appState: AppState
+
+    @AppStorage(JboxPreferences.bufferSizePolicyKey) private var bufferPolicyRaw: Int = 0
+    @AppStorage(JboxPreferences.resamplerQualityKey) private var resamplerRaw: Int
+        = Int(Engine.ResamplerQuality.mastering.rawValue)
+
+    private static let bufferFooter =
+        "Applies to newly-added Performance-mode routes. The HAL clamps "
+        + "the value into each device's supported range at start time. "
+        + "Existing routes keep the size they were created with."
+
+    private static let resamplerFooter =
+        "Mastering is Apple's highest-fidelity SRC preset. High Quality "
+        + "trades a small amount of SRC transparency for measurable CPU "
+        + "savings on multi-route sessions. Changes apply to "
+        + "newly-started routes — stop and start a running route to "
+        + "re-build its converter."
+
+    var body: some View {
+        Form {
+            bufferSection
+            resamplerSection
+        }
+        .formStyle(.grouped)
+        .padding()
+        .onChange(of: resamplerRaw, initial: true) { _, newRaw in
+            applyResampler(newRaw)
+        }
+    }
+
+    private var bufferSection: some View {
+        Section {
+            Picker("Policy", selection: $bufferPolicyRaw) {
+                Text("Use each device's current setting").tag(0)
+                ForEach(BufferSizePolicy.frameChoices, id: \.self) { frames in
+                    Text("Explicit override: \(frames) frames")
+                        .tag(Int(frames))
+                }
+            }
+            .pickerStyle(.menu)
+        } header: {
+            Text("Buffer size")
+        } footer: {
+            Text(Self.bufferFooter)
+        }
+    }
+
+    private var resamplerSection: some View {
+        Section {
+            Picker("Quality", selection: $resamplerRaw) {
+                Text("Mastering (default)")
+                    .tag(Int(Engine.ResamplerQuality.mastering.rawValue))
+                Text("High Quality (cheaper CPU)")
+                    .tag(Int(Engine.ResamplerQuality.highQuality.rawValue))
+            }
+            .pickerStyle(.radioGroup)
+        } header: {
+            Text("Resampler quality")
+        } footer: {
+            Text(Self.resamplerFooter)
+        }
+    }
+
+    /// Push the resampler-quality preference through to the engine.
+    /// Idempotent: the engine stores an atomic and ignores repeat
+    /// writes of the same value, so it is safe to run on every view
+    /// refresh (we use `initial: true` so the first paint primes the
+    /// engine if the user had a non-default stored preference from a
+    /// previous launch).
+    private func applyResampler(_ raw: Int) {
+        guard let store = appState.store else { return }
+        let clamped = UInt32(max(0, raw))
+        let quality = Engine.ResamplerQuality(rawValue: clamped) ?? .mastering
+        store.setResamplerQuality(quality)
+    }
+}
+
+/// Advanced tab: diagnostics + Open Logs Folder. Export / Import /
+/// Reset Configuration are Phase 7 — they need the durable `state.json`
+/// to round-trip meaningfully.
+struct AdvancedPreferencesView: View {
+    @AppStorage(JboxPreferences.showDiagnosticsKey) private var showDiagnostics = false
+
+    private static let diagnosticsFooter =
+        "When on, the expanded route panel surfaces frame counters and "
+        + "the per-component latency breakdown. Off by default — the "
+        + "collapsed row stays calm."
+
+    private static let logsFooter =
+        "Rotating log files under ~/Library/Logs/Jbox land with Phase 8 "
+        + "packaging. Until then, `Console.app` or `log stream "
+        + "--predicate 'subsystem == \"com.jbox.app\"'` is the live "
+        + "source."
+
+    private static let configFooter =
+        "Configuration round-trip lands with Phase 7 — the state.json "
+        + "backing store is not implemented yet."
+
+    var body: some View {
+        Form {
+            diagnosticsSection
+            logsSection
+            configSection
+        }
+        .formStyle(.grouped)
+        .padding()
+    }
+
+    private var diagnosticsSection: some View {
+        Section {
+            Toggle("Show engine diagnostics", isOn: $showDiagnostics)
+        } footer: {
+            Text(Self.diagnosticsFooter)
+        }
+    }
+
+    private var logsSection: some View {
+        Section {
+            Button("Open Logs Folder…", action: openLogsFolder)
+        } header: {
+            Text("Logs")
+        } footer: {
+            Text(Self.logsFooter)
+        }
+    }
+
+    private var configSection: some View {
+        Section {
+            Button("Export Configuration…", action: {})
+                .disabled(true)
+            Button("Import Configuration…", action: {})
+                .disabled(true)
+            Button("Reset State…", action: {})
+                .disabled(true)
+        } header: {
+            Text("Configuration")
+        } footer: {
+            Text(Self.configFooter)
+        }
+    }
+
+    /// Opens the Jbox log directory in Finder. Creates the directory
+    /// on demand so the reveal always succeeds; the rotating file sink
+    /// itself (Phase 8) will populate it once it lands. Falls back to
+    /// `~/Library/Logs` when the Jbox-scoped path can't be resolved.
+    private func openLogsFolder() {
+        let fm = FileManager.default
+        let libraryLogs = fm.urls(for: .libraryDirectory, in: .userDomainMask)
+            .first?.appendingPathComponent("Logs", isDirectory: true)
+        let jboxLogs = libraryLogs?.appendingPathComponent("Jbox", isDirectory: true)
+        if let jboxLogs {
+            try? fm.createDirectory(at: jboxLogs,
+                                    withIntermediateDirectories: true)
+            NSWorkspace.shared.open(jboxLogs)
+            return
+        }
+        if let libraryLogs {
+            NSWorkspace.shared.open(libraryLogs)
+        }
     }
 }
 
@@ -84,6 +328,7 @@ final class AppState {
         JboxLog.app.notice("JboxApp starting")
         do {
             let s = try EngineStore()
+            applyStoredPreferences(to: s)
             s.refreshDevices()
             store = s
             JboxLog.app.notice("store ready devices=\(s.devices.count)")
@@ -91,6 +336,23 @@ final class AppState {
             initError = String(describing: error)
             JboxLog.app.error("engine init failed: \(String(describing: error), privacy: .public)")
         }
+    }
+
+    /// Push engine-facing preferences into a fresh `EngineStore`
+    /// before the UI comes up. Without this, a user who had set a
+    /// non-default resampler quality in a previous session would get
+    /// the default until they opened the Preferences window — any
+    /// routes started in that window would be built with the wrong
+    /// converter. Reading `UserDefaults.standard` directly avoids
+    /// pulling `@AppStorage` into a non-view type; the keys are the
+    /// same `JboxPreferences` constants the Preferences window uses.
+    private func applyStoredPreferences(to store: EngineStore) {
+        let defaults = UserDefaults.standard
+        let raw = defaults.object(forKey: JboxPreferences.resamplerQualityKey) as? Int
+            ?? Int(Engine.ResamplerQuality.mastering.rawValue)
+        let clamped = UInt32(max(0, raw))
+        let quality = Engine.ResamplerQuality(rawValue: clamped) ?? .mastering
+        store.setResamplerQuality(quality)
     }
 }
 

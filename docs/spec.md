@@ -104,6 +104,7 @@ destination device IOProc (RT thread)
 - Semantic versioning: `MAJOR.MINOR.PATCH`.
   - Additions (new functions, new enum values, new fields appended to structs) are `MINOR` bumps.
   - Breaking changes (removed functions, renamed symbols, reordered struct fields, behavior changes) are `MAJOR` bumps.
+- Current ABI version is `8`. History: v1 initial; v2 appended `estimated_latency_us`; v3 appended `low_latency`; v4 added latency-component polling; v5 renamed `low_latency` → `latency_mode` (three tiers); v6 appended `buffer_frames`; v7 added `jbox_engine_rename_route`; v8 added `jbox_engine_set_resampler_quality` + `jbox_engine_resampler_quality` (engine-wide SRC preset, see § 2.5).
 - The bridge header `jbox_engine.h` defines a `JBOX_ENGINE_ABI_VERSION` macro; clients may check it at compile time and at runtime via `jbox_engine_abi_version()`.
 
 ---
@@ -207,10 +208,16 @@ Apple's `AudioConverter` is production-grade, supports variable sample-rate rati
 
 **Configuration:**
 
-- `kAudioConverterSampleRateConverterComplexity` = `kAudioConverterSampleRateConverterComplexity_Mastering` (highest quality).
-- `kAudioConverterSampleRateConverterQuality` = `kAudioConverterQuality_Max`.
+- `kAudioConverterSampleRateConverterComplexity` — preset-driven (see below).
+- `kAudioConverterSampleRateConverterQuality` — preset-driven (see below).
 - Input ASBD: source device's sample rate, float interleaved, channel count = route's source-channel count.
 - Output ASBD: destination device's sample rate, float interleaved, channel count = `mapping.count` — one converter output slot per edge. Fan-out edges (multiple edges sharing a `src` channel) each get their own slot; the pre-ring scratch copy duplicates the source sample into every such slot.
+
+**Resampler quality preset.** One of two presets, applied when each route's converter is constructed at `startRoute` — routes already running keep the preset their converter was built with until stopped and started again.
+- **Mastering (default).** `_Complexity_Mastering` + `Quality_Max`. Unchanged behaviour from pre-v8 engines.
+- **High Quality.** `_Complexity_Normal` + `Quality_High`. Still well above the Core Audio default quality; trades a small amount of SRC transparency for measurable CPU savings on multi-route sessions.
+
+The preset is engine-wide. The Swift Preferences window (§ 4.6 — Audio tab) pushes changes through `jbox_engine_set_resampler_quality` (bridge ABI v8+); the engine stores the current preset on an atomic that `RouteManager::attemptStart` reads when constructing each route's `AudioConverterWrapper`.
 
 **Variable-ratio updates:**
 
@@ -666,11 +673,16 @@ Clicking a scene in the sidebar activates it. Activation runs the engine through
 
 ### 4.6 Preferences window
 
-Standard macOS settings window (`SwiftUI.Settings` scene) with three tabs:
+Standard macOS settings window (`SwiftUI.Settings` scene) with three tabs, implemented in `Sources/JboxApp/JboxApp.swift` as `PreferencesView` + three subviews (`GeneralPreferencesView`, `AudioPreferencesView`, `AdvancedPreferencesView`). Keys and defaults are centralised in `JboxPreferences`; typed value types (`AppearanceMode`, `BufferSizePolicy`) live in `JboxEngineSwift/Preferences.swift` so they are unit-testable without SwiftUI. Persistence is `NSUserDefaults` until Phase 7 rolls a real `AppState.preferences` struct on top of `state.json`; the migration path reads each key once and drops it.
 
-- **General** — launch-at-login toggle; appearance picker (System / Light / Dark); "Show meters in menu bar" toggle.
-- **Audio** — buffer-size policy: "Use each device's current setting" (default) / "Explicit override" with a numeric field (32 / 64 / 128 / 256 / 512 / 1024 samples) and a warning that the override is device-global. Resampler quality: Mastering (default) / High Quality.
-- **Advanced** — "Show engine diagnostics" toggle (off by default; when on, the route row exposes the developer-oriented counters `frames_produced / frames_consumed · u<K>` and the per-side estimated-latency breakdown inside the expanded meter panel). Export Configuration (saves `state.json` to a user-chosen location) / Import Configuration (replaces current state with confirmation) / Reset State (wipes `state.json` with confirmation) / "Open Logs Folder" button.
+- **General** — appearance picker (System / Light / Dark; wired to every scene via `.preferredColorScheme(...)`, where System returns `nil` and lets SwiftUI inherit the OS appearance). Launch-at-login and "Show meters in menu bar" are disabled placeholders — both land with Phase 7 (launch-at-login needs persistence, and menu-bar meters need the icon renderer to animate between states).
+- **Audio** —
+    - **Buffer-size policy**: "Use each device's current setting" (default) / "Explicit override: N frames" for each of 32 / 64 / 128 / 256 / 512 / 1024. The selected value seeds the Performance-mode buffer-size picker in `AddRouteSheet` the first time the user switches into that tier on a new route; per-route overrides are preserved and not retroactively reconfigured. Values the currently-selected devices can't honour fall back to the tier default (64) rather than forcing an HAL clamp.
+    - **Resampler quality**: Mastering (default) / High Quality. Pushed through the engine via ABI v8 (`jbox_engine_set_resampler_quality`) and applied to newly-started routes only — already-running routes keep the preset their converter was built with until stopped and started again. Footer copy states this explicitly. See § 2.5.
+- **Advanced** —
+    - **Show engine diagnostics** toggle (off by default; when on, the expanded meter panel surfaces the `frames_produced / frames_consumed · u<K>` counters and the per-side estimated-latency breakdown). Already landed pre-Preferences; key preserved.
+    - **Open Logs Folder** button — reveals `~/Library/Logs/Jbox` in Finder, creating the directory on demand. The rotating file sink itself lands with Phase 8 packaging; until then `Console.app` / `log stream --predicate 'subsystem == "com.jbox.app"'` is the authoritative source and this button exists primarily to point users at where the files will live.
+    - **Export / Import / Reset Configuration** — disabled placeholders. They all need the `state.json` backing store (Phase 7) to round-trip meaningfully.
 
 ### 4.7 Key flows
 

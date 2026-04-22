@@ -429,6 +429,41 @@ jbox_error_code_t jbox_engine_supported_buffer_frame_size_range(
     }
 }
 
+jbox_error_code_t jbox_engine_set_resampler_quality(
+    jbox_engine_t*           engine,
+    jbox_resampler_quality_t quality) {
+    if (engine == nullptr || engine->impl == nullptr) {
+        return JBOX_ERR_INVALID_ARGUMENT;
+    }
+    // Unknown values clamp to Mastering rather than erroring; the
+    // enum is intended to grow additively and older engines should
+    // not reject future values from newer callers.
+    auto q = jbox::rt::ResamplerQuality::Mastering;
+    if (quality == JBOX_RESAMPLER_QUALITY_HIGH_QUALITY) {
+        q = jbox::rt::ResamplerQuality::HighQuality;
+    }
+    try {
+        engine->impl->setResamplerQuality(q);
+    } catch (...) {
+        return JBOX_ERR_INTERNAL;
+    }
+    return JBOX_OK;
+}
+
+jbox_resampler_quality_t jbox_engine_resampler_quality(
+    jbox_engine_t* engine) {
+    if (engine == nullptr || engine->impl == nullptr) {
+        return JBOX_RESAMPLER_QUALITY_MASTERING;
+    }
+    switch (engine->impl->resamplerQuality()) {
+    case jbox::rt::ResamplerQuality::HighQuality:
+        return JBOX_RESAMPLER_QUALITY_HIGH_QUALITY;
+    case jbox::rt::ResamplerQuality::Mastering:
+    default:
+        return JBOX_RESAMPLER_QUALITY_MASTERING;
+    }
+}
+
 size_t jbox_engine_poll_meters(jbox_engine_t*    engine,
                                jbox_route_id_t   route_id,
                                jbox_meter_side_t side,

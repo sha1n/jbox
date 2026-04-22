@@ -56,6 +56,57 @@ TEST_CASE("AudioConverterWrapper constructs and destroys cleanly at unity",
     REQUIRE(w.inputRate() == Catch::Approx(48000.0));
 }
 
+TEST_CASE("AudioConverterWrapper constructs cleanly under each quality preset",
+          "[audio_converter_wrapper][resampler_quality]") {
+    // Every preset exposed through the Preferences → Audio tab must
+    // yield a working converter. The AudioConverter silently accepts
+    // unknown complexity / quality constants, so the only way to catch
+    // a broken mapping is a construction-side smoke test: build one,
+    // ask for unity output, verify the RMS is sensible. SNR gaps
+    // between Mastering and HighQuality are not meaningful at unity
+    // ratio, so we assert the same tolerance either way.
+    const auto presets = {jbox::rt::ResamplerQuality::Mastering,
+                          jbox::rt::ResamplerQuality::HighQuality};
+    for (auto q : presets) {
+        jbox::rt::AudioConverterWrapper w(48000.0, 48000.0, 1, q);
+        SineSource src{.phase = 0.0, .freq_hz = 440.0,
+                       .rate_hz = 48000.0, .channels = 1};
+
+        std::vector<float> out(4800, 0.0f);  // 100 ms
+        const std::size_t produced = w.convert(out.data(), out.size(),
+                                               &SineSource::pull, &src);
+        REQUIRE(produced == out.size());
+
+        const double r = rms(out.data(), out.size());
+        REQUIRE(r == Catch::Approx(1.0 / std::sqrt(2.0)).margin(0.02));
+    }
+}
+
+TEST_CASE("AudioConverterWrapper resamples cleanly under each quality preset",
+          "[audio_converter_wrapper][resampler_quality]") {
+    // Non-unity ratio exercises the filter path both presets configure.
+    // 44.1k → 48k is the common studio conversion where a broken
+    // complexity / quality pairing would show up as garbage output.
+    const auto presets = {jbox::rt::ResamplerQuality::Mastering,
+                          jbox::rt::ResamplerQuality::HighQuality};
+    for (auto q : presets) {
+        jbox::rt::AudioConverterWrapper w(44100.0, 48000.0, 1, q);
+        SineSource src{.phase = 0.0, .freq_hz = 440.0,
+                       .rate_hz = 44100.0, .channels = 1};
+
+        std::vector<float> out(4800, 0.0f);  // 100 ms at 48 k
+        const std::size_t produced = w.convert(out.data(), out.size(),
+                                               &SineSource::pull, &src);
+        REQUIRE(produced == out.size());
+
+        // Both presets preserve full-scale sine energy within the
+        // same margin — we're checking that the filter is configured,
+        // not benchmarking SNR.
+        const double r = rms(out.data(), out.size());
+        REQUIRE(r == Catch::Approx(1.0 / std::sqrt(2.0)).margin(0.02));
+    }
+}
+
 TEST_CASE("AudioConverterWrapper passes unity-ratio sine with high fidelity",
           "[audio_converter_wrapper]") {
     jbox::rt::AudioConverterWrapper w(48000.0, 48000.0, 1);

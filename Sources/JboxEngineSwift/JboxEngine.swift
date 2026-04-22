@@ -207,6 +207,35 @@ public final class Engine {
         }
     }
 
+    /// Engine-wide sample-rate-conversion quality preset (ABI v8+).
+    /// Applied when a new route's converter is constructed at
+    /// `startRoute`. Routes already running keep the preset their
+    /// converter was built with until stopped and started again — the
+    /// Preferences copy footer tells users this explicitly.
+    public enum ResamplerQuality: UInt32, Sendable, Equatable, Hashable, CaseIterable {
+        /// Highest-fidelity preset. `_Complexity_Mastering` +
+        /// `Quality_Max`. Default; unchanged from pre-v8 behaviour.
+        case mastering = 0
+        /// `_Complexity_Normal` + `Quality_High`. Cheaper; still well
+        /// above the Core Audio default. Trade some SRC transparency
+        /// for measurable CPU savings on multi-route sessions.
+        case highQuality = 1
+
+        fileprivate var cValue: jbox_resampler_quality_t {
+            switch self {
+            case .mastering:   return JBOX_RESAMPLER_QUALITY_MASTERING
+            case .highQuality: return JBOX_RESAMPLER_QUALITY_HIGH_QUALITY
+            }
+        }
+
+        fileprivate init(_ c: jbox_resampler_quality_t) {
+            switch c {
+            case JBOX_RESAMPLER_QUALITY_HIGH_QUALITY: self = .highQuality
+            default:                                   self = .mastering
+            }
+        }
+    }
+
     /// Which side of a route to meter. Source reflects the pre-ring-
     /// buffer peaks of the mapped source channels; destination reflects
     /// the post-converter peaks of the mapped destination channels.
@@ -378,6 +407,27 @@ public final class Engine {
 
     public func removeRoute(_ id: UInt32) throws {
         try callRouteAction(id, jbox_engine_remove_route)
+    }
+
+    /// Set the engine-wide resampler quality preset (ABI v8+). The
+    /// change applies to newly-started routes only — already-running
+    /// routes keep the preset their converter was built with until
+    /// stopped and started again.
+    public func setResamplerQuality(_ quality: ResamplerQuality) throws {
+        guard let h = handle else {
+            throw JboxError(code: JBOX_ERR_INTERNAL, message: "engine not initialised")
+        }
+        let code = jbox_engine_set_resampler_quality(h, quality.cValue)
+        if code != JBOX_OK {
+            throw JboxError(code: code)
+        }
+    }
+
+    /// Read the engine-wide resampler quality preset. Defaults to
+    /// `.mastering` when the engine handle is gone.
+    public var resamplerQuality: ResamplerQuality {
+        guard let h = handle else { return .mastering }
+        return ResamplerQuality(jbox_engine_resampler_quality(h))
     }
 
     /// Rename a route in place. Non-disruptive — the engine keeps the

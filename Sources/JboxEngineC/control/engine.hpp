@@ -64,6 +64,19 @@ public:
                                  float* out_peaks,
                                  std::size_t max_channels);
 
+    // Engine-wide resampler quality preset (docs/spec.md § 4.6). Thin
+    // forwarder onto RouteManager's atomic — changing it here affects
+    // subsequently-started routes only, since each converter is built
+    // once at route start. The Swift layer pushes preference changes
+    // here; routes already running keep their original preset until
+    // stopped and started again.
+    void              setResamplerQuality(jbox::rt::ResamplerQuality q) {
+        rm_.setResamplerQuality(q);
+    }
+    jbox::rt::ResamplerQuality resamplerQuality() const {
+        return rm_.resamplerQuality();
+    }
+
     DeviceManager&   deviceManager() { return dm_; }
     RouteManager&    routeManager()  { return rm_; }
     DriftSampler&    driftSampler()  { return sampler_; }

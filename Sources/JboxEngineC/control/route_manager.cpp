@@ -626,7 +626,8 @@ jbox_error_code_t RouteManager::attemptStart(RouteRecord& r) {
 
     try {
         r.converter = std::make_unique<jbox::rt::AudioConverterWrapper>(
-            r.nominal_src_rate, r.nominal_dst_rate, r.channels_count);
+            r.nominal_src_rate, r.nominal_dst_rate, r.channels_count,
+            resamplerQuality());
     } catch (const std::exception&) {
         releaseRouteResources(r);
         r.state = JBOX_ROUTE_STATE_ERROR;

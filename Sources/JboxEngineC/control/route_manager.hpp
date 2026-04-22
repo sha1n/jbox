@@ -239,10 +239,26 @@ public:
     // the pointers are valid until the next add/remove/stop call.
     std::vector<RouteRecord*> runningRoutes();
 
+    // Engine-wide resampler quality preset. Read at `attemptStart` when
+    // constructing each route's `AudioConverterWrapper` — changing it
+    // mid-flight does not retune already-running routes. Stored as an
+    // atomic so the Swift preferences observer can push updates from
+    // any thread without taking a lock.
+    void setResamplerQuality(jbox::rt::ResamplerQuality q) noexcept {
+        resampler_quality_.store(static_cast<std::uint8_t>(q),
+                                 std::memory_order_relaxed);
+    }
+    jbox::rt::ResamplerQuality resamplerQuality() const noexcept {
+        return static_cast<jbox::rt::ResamplerQuality>(
+            resampler_quality_.load(std::memory_order_relaxed));
+    }
+
 private:
 
     DeviceManager& dm_;
     jbox::rt::DefaultRtLogQueue* log_queue_ = nullptr;
+    // 0 = Mastering (default), 1 = HighQuality. See ResamplerQuality.
+    std::atomic<std::uint8_t> resampler_quality_{0};
     std::unordered_map<jbox_route_id_t, std::unique_ptr<RouteRecord>> routes_;
     jbox_route_id_t next_id_ = 1;
 

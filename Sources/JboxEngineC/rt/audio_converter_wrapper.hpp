@@ -12,8 +12,16 @@
 // control thread must publish new rates through an atomic that the RT
 // thread reads — see RouteRecord::target_input_rate in route_manager.
 //
-// Quality: kAudioConverterSampleRateConverterComplexity_Mastering +
-// kAudioConverterQuality_Max, per docs/spec.md § 2.5.
+// Quality: two presets selectable at construction time (docs/spec.md
+// § 2.5 and § 4.6). `Mastering` uses
+// `kAudioConverterSampleRateConverterComplexity_Mastering` +
+// `kAudioConverterQuality_Max` — the default, highest-fidelity setting
+// we have used since Phase 4. `HighQuality` uses `_Normal` complexity +
+// `Quality_High`, trading a small amount of SRC transparency for
+// noticeably less CPU on high-channel-count / multi-route sessions.
+// The preset is chosen per-construction; changing the engine-wide
+// preference affects new routes only (existing routes keep the quality
+// their converter was built with).
 
 #ifndef JBOX_RT_AUDIO_CONVERTER_WRAPPER_HPP
 #define JBOX_RT_AUDIO_CONVERTER_WRAPPER_HPP
@@ -23,13 +31,26 @@
 
 namespace jbox::rt {
 
+enum class ResamplerQuality : std::uint8_t {
+    // kAudioConverterSampleRateConverterComplexity_Mastering +
+    // kAudioConverterQuality_Max. Default. Highest-fidelity preset.
+    Mastering   = 0,
+    // _Normal complexity + Quality_High. Cheaper; still well above the
+    // Core Audio default quality. Pick this when CPU headroom matters
+    // more than SRC transparency.
+    HighQuality = 1,
+};
+
 class AudioConverterWrapper {
 public:
     // Construct with nominal rates and channel count. Throws std::runtime_error
     // on AudioConverterNew failure (control-thread only — construction is
-    // never called on the RT thread).
+    // never called on the RT thread). `quality` selects the SRC quality
+    // preset; defaulting to Mastering preserves the pre-preferences
+    // behaviour at call sites that have not yet been updated.
     AudioConverterWrapper(double src_rate, double dst_rate,
-                          std::uint32_t channels);
+                          std::uint32_t channels,
+                          ResamplerQuality quality = ResamplerQuality::Mastering);
     ~AudioConverterWrapper();
 
     AudioConverterWrapper(const AudioConverterWrapper&) = delete;

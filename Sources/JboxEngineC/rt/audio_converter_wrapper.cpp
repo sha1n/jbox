@@ -66,7 +66,8 @@ OSStatus acInputCallback(AudioConverterRef /*inConverter*/,
 }  // namespace
 
 AudioConverterWrapper::AudioConverterWrapper(double src_rate, double dst_rate,
-                                             std::uint32_t channels)
+                                             std::uint32_t channels,
+                                             ResamplerQuality quality)
     : channels_(channels),
       current_input_rate_(src_rate) {
     if (channels == 0 || channels > TrampolineCtx::kMaxChannels) {
@@ -80,14 +81,31 @@ AudioConverterWrapper::AudioConverterWrapper(double src_rate, double dst_rate,
     if (status != noErr || ac == nullptr) {
         throw std::runtime_error("AudioConverterNew failed");
     }
-    const UInt32 complexity = kAudioConverterSampleRateConverterComplexity_Mastering;
+    // Apple's AudioConverter is configured by two independent knobs:
+    //   - SampleRateConverterComplexity — picks the filter topology
+    //     (Mastering uses a longer, higher-order polyphase than Normal).
+    //   - SampleRateConverterQuality — picks the runtime interpolation
+    //     quality inside the chosen topology.
+    // We expose one user-facing setting per docs/spec.md § 4.6, mapping
+    // to combinations that are audibly distinct on busy sessions.
+    UInt32 complexity = kAudioConverterSampleRateConverterComplexity_Mastering;
+    UInt32 src_quality = kAudioConverterQuality_Max;
+    switch (quality) {
+    case ResamplerQuality::Mastering:
+        complexity  = kAudioConverterSampleRateConverterComplexity_Mastering;
+        src_quality = kAudioConverterQuality_Max;
+        break;
+    case ResamplerQuality::HighQuality:
+        complexity  = kAudioConverterSampleRateConverterComplexity_Normal;
+        src_quality = kAudioConverterQuality_High;
+        break;
+    }
     AudioConverterSetProperty(ac,
                               kAudioConverterSampleRateConverterComplexity,
                               sizeof(complexity), &complexity);
-    const UInt32 quality = kAudioConverterQuality_Max;
     AudioConverterSetProperty(ac,
                               kAudioConverterSampleRateConverterQuality,
-                              sizeof(quality), &quality);
+                              sizeof(src_quality), &src_quality);
     converter_ = ac;
 }
 
