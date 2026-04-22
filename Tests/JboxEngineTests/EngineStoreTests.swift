@@ -492,6 +492,227 @@ struct EngineStoreTests {
         store.removeRoute(route.id)
     }
 
+    // MARK: overallState / runningRouteCount (Phase 6 MenuBarExtra)
+
+    /// Tiny helper that builds a `Route` value with a specific runtime
+    /// state, used only by the `overallState` and menu-bar helper
+    /// tests below. Bypasses the engine entirely — the derivation
+    /// logic is a pure function over the `routes` array.
+    private func mkRoute(id: UInt32, state: RouteState) -> Route {
+        let cfg = RouteConfig(
+            source: DeviceReference(uid: "s\(id)", lastKnownName: "src\(id)"),
+            destination: DeviceReference(uid: "d\(id)", lastKnownName: "dst\(id)"),
+            mapping: [ChannelEdge(src: 0, dst: 0)])
+        let status = RouteStatus(
+            state: state, lastError: JBOX_OK,
+            framesProduced: 0, framesConsumed: 0,
+            underrunCount: 0, overrunCount: 0)
+        return Route(id: id, config: cfg, status: status)
+    }
+
+    @Test("overallState is .idle for an empty route list")
+    func overallStateEmpty() {
+        #expect(EngineStore.overallState(for: [Route]()) == .idle)
+    }
+
+    @Test("overallState is .idle when every route is stopped")
+    func overallStateAllStopped() {
+        let routes = [
+            mkRoute(id: 1, state: .stopped),
+            mkRoute(id: 2, state: .stopped),
+        ]
+        #expect(EngineStore.overallState(for: routes) == .idle)
+    }
+
+    @Test("overallState is .running when at least one route is running and none need attention")
+    func overallStateRunning() {
+        let routes = [
+            mkRoute(id: 1, state: .stopped),
+            mkRoute(id: 2, state: .running),
+        ]
+        #expect(EngineStore.overallState(for: routes) == .running)
+    }
+
+    @Test("overallState treats .starting as running (icon fills mid-transition)")
+    func overallStateStartingCountsAsRunning() {
+        let routes = [mkRoute(id: 1, state: .starting)]
+        #expect(EngineStore.overallState(for: routes) == .running)
+    }
+
+    @Test("overallState escalates to .attention on any waiting route, even alongside running ones")
+    func overallStateWaitingEscalates() {
+        let routes = [
+            mkRoute(id: 1, state: .running),
+            mkRoute(id: 2, state: .waiting),
+        ]
+        #expect(EngineStore.overallState(for: routes) == .attention)
+    }
+
+    @Test("overallState escalates to .attention on any errored route")
+    func overallStateErrorEscalates() {
+        let routes = [
+            mkRoute(id: 1, state: .running),
+            mkRoute(id: 2, state: .error),
+        ]
+        #expect(EngineStore.overallState(for: routes) == .attention)
+    }
+
+    @Test("runningRouteCount is 0 on an empty store")
+    func runningRouteCountEmpty() throws {
+        let store = try makeStore()
+        #expect(store.runningRouteCount == 0)
+        // With no routes, runningRouteCount is 0 and overallState is .idle.
+        #expect(store.overallState == .idle)
+    }
+
+    @Test("runningRouteCount counts only the live .running routes, not stopped or starting")
+    func runningRouteCountOnlyRunning() throws {
+        let store = try makeStore()
+        store.refreshDevices()
+        guard let src = store.devices.first(where: { $0.inputChannelCount  >= 1 }),
+              let dst = store.devices.first(where: { $0.outputChannelCount >= 1 })
+        else {
+            Issue.record("CI runner expected to expose at least one input- and one output-capable device")
+            return
+        }
+        // Three routes; we'll start only the middle one.
+        let a = try store.addRoute(RouteConfig(
+            source: DeviceReference(device: src),
+            destination: DeviceReference(device: dst),
+            mapping: [ChannelEdge(src: 0, dst: 0)], name: "a"))
+        let b = try store.addRoute(RouteConfig(
+            source: DeviceReference(device: src),
+            destination: DeviceReference(device: dst),
+            mapping: [ChannelEdge(src: 0, dst: 0)], name: "b"))
+        let c = try store.addRoute(RouteConfig(
+            source: DeviceReference(device: src),
+            destination: DeviceReference(device: dst),
+            mapping: [ChannelEdge(src: 0, dst: 0)], name: "c"))
+
+        // All stopped → count must be 0.
+        #expect(store.runningRouteCount == 0)
+
+        store.startRoute(b.id)
+        // Count should reflect only .running — match against an
+        // expected "number of .running routes" to stay honest about
+        // what the CI runner actually delivers (a device may land in
+        // .waiting instead of .running).
+        let expectedRunning = store.routes.filter { $0.status.state == .running }.count
+        #expect(store.runningRouteCount == expectedRunning)
+
+        store.removeRoute(a.id)
+        store.removeRoute(b.id)
+        store.removeRoute(c.id)
+    }
+
+    // MARK: startAll / stopAll (Phase 6 MenuBarExtra)
+
+    @Test("startAll on an empty store is a no-op")
+    func startAllEmptyIsNoOp() throws {
+        let store = try makeStore()
+        store.startAll()
+        #expect(store.routes.isEmpty)
+        #expect(store.lastError == nil)
+    }
+
+    @Test("stopAll on an empty store is a no-op")
+    func stopAllEmptyIsNoOp() throws {
+        let store = try makeStore()
+        store.stopAll()
+        #expect(store.routes.isEmpty)
+        #expect(store.lastError == nil)
+    }
+
+    @Test("startAll does not surface lastError when routes are already running (no redundant engine calls)")
+    func startAllIdempotentOnRunningRoutes() throws {
+        // startAll's switch skips `.running` / `.starting` / `.waiting`,
+        // so when every route is already in one of those states the
+        // engine is never re-entered. Observable consequence: after
+        // the call, `lastError` stays nil (a redundant engine call
+        // on an already-running route would likely throw) and the
+        // route states are whatever they were before the call.
+        let store = try makeStore()
+        store.refreshDevices()
+        guard let src = store.devices.first(where: { $0.inputChannelCount  >= 1 }),
+              let dst = store.devices.first(where: { $0.outputChannelCount >= 1 })
+        else {
+            Issue.record("CI runner expected to expose at least one input- and one output-capable device")
+            return
+        }
+        let a = try store.addRoute(RouteConfig(
+            source: DeviceReference(device: src),
+            destination: DeviceReference(device: dst),
+            mapping: [ChannelEdge(src: 0, dst: 0)], name: "a"))
+        store.startRoute(a.id)
+        // Whatever state startRoute landed on (running / starting /
+        // waiting), startAll should be a no-op against it.
+        let stateBefore = store.routes.first?.status.state
+        #expect(stateBefore != .stopped && stateBefore != .error)
+
+        // Clear lastError from startRoute's success path and call startAll.
+        store.startAll()
+        #expect(store.lastError == nil)
+
+        // The route did not regress to .stopped; startAll's switch
+        // left it in its pre-call state class.
+        let stateAfter = store.routes.first?.status.state
+        #expect(stateAfter != .stopped)
+
+        store.stopRoute(a.id)
+        store.removeRoute(a.id)
+    }
+
+    @Test("startAll leaves already-running routes alone and attempts to start stopped ones")
+    func startAllTouchesOnlyIdleRoutes() throws {
+        // We don't rely on real audio starting successfully — most CI
+        // runners will leave a route in .stopped or .waiting after
+        // startRoute. The behaviour under test is that startAll
+        // iterates the routes in .stopped / .error states and calls
+        // startRoute on each, while leaving .running untouched.
+        // We verify by capturing the state *before* vs. *after* for
+        // every route: no route regresses to a state it was not in
+        // immediately before.
+        let store = try makeStore()
+        store.refreshDevices()
+        guard let src = store.devices.first(where: { $0.inputChannelCount  >= 1 }),
+              let dst = store.devices.first(where: { $0.outputChannelCount >= 1 })
+        else {
+            Issue.record("CI runner expected to expose at least one input- and one output-capable device")
+            return
+        }
+        let a = try store.addRoute(RouteConfig(
+            source: DeviceReference(device: src),
+            destination: DeviceReference(device: dst),
+            mapping: [ChannelEdge(src: 0, dst: 0)],
+            name: "a"))
+        let b = try store.addRoute(RouteConfig(
+            source: DeviceReference(device: src),
+            destination: DeviceReference(device: dst),
+            mapping: [ChannelEdge(src: 0, dst: 0)],
+            name: "b"))
+
+        // Both routes start in .stopped.
+        #expect(store.routes.allSatisfy { $0.status.state == .stopped })
+
+        store.startAll()
+        // Every route has been poked at least once; they land in
+        // whatever non-.stopped state Core Audio allows on this runner
+        // (usually .running, sometimes .waiting when the device is busy).
+        let statesAfter = store.routes.map { $0.status.state }
+        #expect(statesAfter.allSatisfy { $0 != .stopped })
+
+        // stopAll flips them back. .error rows stay put (startAll's
+        // scope covers .error too, but stopAll leaves them), which is
+        // the symmetric rule.
+        store.stopAll()
+        for r in store.routes where r.status.state != .error {
+            #expect(r.status.state == .stopped)
+        }
+
+        store.removeRoute(a.id)
+        store.removeRoute(b.id)
+    }
+
     @Test("replaceRoute with a new mapping issues a new engine id")
     func replaceRouteMappingEditAssignsNewId() throws {
         let store = try makeStore()

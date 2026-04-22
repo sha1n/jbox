@@ -77,6 +77,21 @@ public struct RouteConfig: Equatable, Sendable {
     }
 }
 
+/// Overall app status summary used by the menu bar extra (spec § 4.2)
+/// to pick an icon variant. Derived purely from the current route
+/// snapshot, so it tracks `EngineStore.routes` automatically without
+/// any timer of its own.
+public enum OverallState: Equatable, Hashable, Sendable {
+    /// No routes or every route is stopped.
+    case idle
+    /// At least one route is running and no route is in error /
+    /// waiting. The normal "audio is flowing" indicator.
+    case running
+    /// Any route is waiting for its device or has errored out — the
+    /// user needs to look. Outranks `.running` when both are present.
+    case attention
+}
+
 /// A live route: the engine-assigned id, the user's config, and the
 /// most recently polled runtime status.
 public struct Route: Identifiable, Equatable, Sendable {
@@ -309,6 +324,68 @@ public final class EngineStore {
         } catch {
             lastError = String(describing: error)
             JboxLog.engine.error("removeRoute id=\(id) failed: \(String(describing: error), privacy: .public)")
+        }
+    }
+
+    /// Derived state for the menu bar icon (spec.md § 4.2). `.attention`
+    /// outranks `.running` — a single errored or waiting route turns the
+    /// icon red even if other routes are flowing.
+    public var overallState: OverallState {
+        Self.overallState(for: routes)
+    }
+
+    /// Pure helper exposed for tests. Factored out so the derivation
+    /// rule can be exercised against hand-crafted `Route` arrays without
+    /// booting a real Core Audio engine.
+    public static func overallState<S: Sequence>(for routes: S) -> OverallState
+        where S.Element == Route
+    {
+        var anyRunning = false
+        for r in routes {
+            switch r.status.state {
+            case .error, .waiting:
+                return .attention
+            case .running, .starting:
+                anyRunning = true
+            case .stopped:
+                continue
+            }
+        }
+        return anyRunning ? .running : .idle
+    }
+
+    /// Count of routes currently flowing audio (`.running`). Exposed for
+    /// the menu bar header "N routes running" line.
+    public var runningRouteCount: Int {
+        routes.lazy.filter { $0.status.state == .running }.count
+    }
+
+    /// Start every route that isn't already running or in the middle of
+    /// a transition. Errors on individual routes are logged through
+    /// `startRoute`'s usual path (last-error plumbing, os_log) but do
+    /// not abort the batch — the user sees each surviving failure in
+    /// the main window alert.
+    public func startAll() {
+        for route in routes {
+            switch route.status.state {
+            case .stopped, .error:
+                startRoute(route.id)
+            case .waiting, .starting, .running:
+                continue
+            }
+        }
+    }
+
+    /// Stop every route that isn't already stopped. Mirror of
+    /// `startAll()` for the menu bar's Stop All action.
+    public func stopAll() {
+        for route in routes {
+            switch route.status.state {
+            case .running, .starting, .waiting:
+                stopRoute(route.id)
+            case .stopped, .error:
+                continue
+            }
         }
     }
 

@@ -585,30 +585,39 @@ Two-pane layout — the standard macOS utility pattern, using `NavigationSplitVi
 
 ### 4.2 Menu bar extra
 
-A menu bar icon reflects overall app state:
-- **Filled icon** when any route is running.
-- **Outline icon** when all routes are stopped.
-- **Tinted red** when any route is in error or waiting for a device.
+A menu bar icon reflects overall app state via `EngineStore.overallState`. The icon is a precomposed `NSImage` (since SwiftUI `MenuBarExtra` labels only render simple leaf views like `Text` / `Image`, not arbitrary view hierarchies). It layers a custom **route glyph** — three horizontal tracks between two columns of dots, a monochrome echo of the app icon, drawn with `NSBezierPath` at 18 pt — under an optional colored **status dot** in the bottom-right corner:
+- **No dot** when every route is stopped or no routes exist.
+- **Green dot** when at least one route is running or starting and no route needs attention.
+- **Red dot** when any route is in error or waiting for a device. This outranks running — a single errored route turns the dot red even if others are flowing.
 
-Clicking opens a popover:
+The glyph is drawn in `NSColor.labelColor` — a dynamic color that resolves to the menu bar's text color at draw time, so light / dark adaptation works automatically without the template flag (which would tint the colored status dot monochrome). A thin `windowBackgroundColor` halo behind the dot keeps it legible against dark-translucent, light-translucent, and reduce-transparency-solid menu-bar themes.
+
+Clicking opens a window-style popover (SwiftUI `MenuBarExtra` with the `.menuBarExtraStyle(.window)` modifier):
 
 ```
-  Jbox — 2 routes running
+  Jbox
+  2 routes running
 
-  ✔  Keys to Console            ●     (toggle)
-  ✔  Mic to Monitors            ●     (toggle)
-     Backup Send (waiting)      ⏸     (toggle)
+  ●  Keys to Console                 Stop
+  ●  Mic to Monitors                 Stop
+  ○  Backup Send                     Start
   ─────────────────────────────────
-  Scene: Practice                     ▾
+  Scene                    None yet
   ─────────────────────────────────
-  Start All      Stop All
+  [  Start All  ]  [  Stop All  ]
   ─────────────────────────────────
-  Open Jbox…
+  Open Jbox
   Preferences…
-  Quit
+  Quit Jbox
 ```
 
 No deep editing from the menu bar — just toggles, scene switching, and opening the main window. The menu bar is for "what's running" awareness and quick actions.
+
+A 2 Hz `.task` on the popover root keeps route statuses live so the icon tracks state even when the main window is closed (the window-style `MenuBarExtra` keeps the content view alive for the app's lifetime). The main window's own 4 Hz `.task` continues to drive row-level updates when it is visible.
+
+The **Scene** row is a placeholder in Phase 6 — it renders "None yet" and is disabled. The real scene picker lands with Phase 7 persistence / activation; it drops into this slot with the same layout.
+
+The **Open Jbox** action looks for an existing main-window instance in `NSApp.windows` (skipping `NSPanel` subclasses like the menu bar popover, and matching the "Jbox" window title) and brings it key-and-front via `makeKeyAndOrderFront(_:)`, deminiaturizing first if needed. Only when no existing window is found does it fall through to SwiftUI's `openWindow(id: "main")` — this keeps repeated clicks from spawning duplicate windows. Stopping the scene from creating more than one instance *at all* (e.g., on `Cmd+N`) is a separate, deeper fix tracked as a Phase 6 follow-up. **Preferences…** routes through `openSettings`. **Quit Jbox** calls `NSApp.terminate(nil)`.
 
 ### 4.3 Route editor
 
