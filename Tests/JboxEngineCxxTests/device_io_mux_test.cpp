@@ -377,8 +377,17 @@ TEST_CASE("DeviceIOMux: share_device attach does not claim exclusive",
                             /*share_device*/ true));
     // Hog mode must not be held — other apps can keep using the device.
     REQUIRE_FALSE(backend.isExclusive("dev"));
+    // Regression (aggregate-silence bug caught on a V31 → Apollo
+    // aggregate route in manual testing): share-mode attach must
+    // NOT issue any buffer-size request. On aggregate devices, the
+    // backend fans `setBufferFramesOnID` out to every active
+    // sub-device, which stalls the aggregate's IOProc scheduler
+    // when called from a shared client. In share mode the device
+    // keeps its current buffer size, which is the mode's contract.
+    REQUIRE(backend.bufferSizeRequests().empty());
     mux.detachInput(&sink);
     REQUIRE_FALSE(backend.isExclusive("dev"));
+    REQUIRE(backend.bufferSizeRequests().empty());
 }
 
 TEST_CASE("DeviceIOMux: mixed sharing and non-sharing routes — hog tied to the latter",

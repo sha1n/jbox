@@ -296,10 +296,31 @@ void DeviceIOMux::updateBufferRequest() {
             exclusive_claimed_ = false;
         }
     } else if (!exclusive_claimed_) {
-        // Claim failure is non-fatal — the route continues on the
-        // shared-client path and accepts whatever the HAL ends up
-        // giving.
+        // Claim failure (another app already holds hog) is non-fatal
+        // — the route runs on the shared-client path at whatever
+        // buffer size the device currently has. We don't try to
+        // force a shrink on a device we don't own: see the
+        // `!exclusive_claimed_` gate below for the aggregate-stall
+        // reason.
         exclusive_claimed_ = backend_.claimExclusive(uid_);
+    }
+
+    // Only issue the buffer-size request when we actually hold hog
+    // mode. Without exclusivity the request is unreliable (Core
+    // Audio's max-across-clients policy clamps it upward when
+    // another app holds the device larger), and on aggregate
+    // devices the backend's per-sub-device fan-out of
+    // `setBufferFramesOnID` can silently stall the aggregate's
+    // IOProc scheduler — callbacks stop firing, route stays in
+    // RUNNING state with no audio and no error. Skipping the
+    // request in share mode matches the mode's contract: coexist
+    // with other apps at whatever buffer size the device is
+    // already running. `last_requested_frames_` is reset so that a
+    // subsequent non-sharing attach (which does claim hog) re-issues
+    // the request cleanly.
+    if (!exclusive_claimed_) {
+        last_requested_frames_ = 0;
+        return;
     }
 
     if (target == 0) {
