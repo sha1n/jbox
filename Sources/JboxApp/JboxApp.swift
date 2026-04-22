@@ -20,10 +20,21 @@ struct JboxApp: App {
     /// action to reopen the main window after the user has closed it.
     private static let mainWindowId = "main"
 
+    /// App-lifecycle signal so we can flush any debounced save on the
+    /// way to `.background`. Without this, a preferences edit parked
+    /// inside `StateStore`'s 500 ms debounce window would be lost if
+    /// the user quits immediately after.
+    @Environment(\.scenePhase) private var scenePhase
+
     var body: some Scene {
         WindowGroup("Jbox", id: Self.mainWindowId) {
             AppRootView(appState: appState)
                 .preferredColorScheme(colorScheme)
+                .onChange(of: scenePhase) { _, phase in
+                    if phase == .background || phase == .inactive {
+                        appState.flush()
+                    }
+                }
         }
         .windowResizability(.contentMinSize)
 
@@ -313,46 +324,201 @@ struct AdvancedPreferencesView: View {
     }
 }
 
-/// Owner for the `EngineStore` + the init-error slot. Shared between
-/// the main window and the menu bar extra via SwiftUI's `@State`
-/// propagation — both scenes see the same reference, so either one
-/// can drive `load()` the first time it appears.
+/// Owner for the `EngineStore`, the init-error slot, and the
+/// `StateStore` that persists `StoredAppState` to disk (docs/spec.md
+/// § 3.2). Shared between the main window and the menu bar extra via
+/// SwiftUI's `@State` propagation — both scenes see the same reference,
+/// so either one can drive `load()` the first time it appears.
+///
+/// Persistence flow:
+///   1. `load()` reads `state.json`, falls back to `.bak` on missing,
+///      and migrates any `UserDefaults`-only preferences on first run.
+///   2. Preferences come through `@AppStorage` bindings in the views;
+///      changes fire `UserDefaults.didChangeNotification`, which this
+///      class observes and reflects back into `persisted.preferences`
+///      before queuing a debounced save.
+///   3. Route mutations go through `EngineStore.onRoutesChanged`, which
+///      triggers a re-snapshot of `store.routes` into `persisted.routes`
+///      followed by a debounced save.
+///   4. `flush()` forces any pending debounced save to disk on app
+///      shutdown.
 @MainActor
 @Observable
 final class AppState {
     var store: EngineStore?
     var initError: String?
 
+    /// Latest durable state mirrored into memory. Source of truth for
+    /// what gets persisted on the next save tick; views continue to
+    /// read preferences from `@AppStorage`, which this class keeps in
+    /// lockstep with the struct below.
+    private(set) var persisted = StoredAppState()
+
+    private var stateStore: StateStore?
+    private var userDefaultsObserver: NSObjectProtocol?
+
     func load() {
         guard store == nil, initError == nil else { return }
         JboxLog.app.notice("JboxApp starting")
+
+        let ss = try? StateStore(directory: StateStore.defaultDirectory())
+        if ss == nil {
+            JboxLog.app.error("state store init failed — running without persistence")
+        }
+        self.stateStore = ss
+
+        let loaded: StoredAppState?
+        do {
+            loaded = try ss?.load()
+        } catch let StateStore.LoadError.schemaTooNew(file, supported) {
+            initError = "state.json was written by a newer Jbox (\(file) > \(supported)). Refusing to downgrade."
+            JboxLog.app.error("refusing to load state.json: fileVersion=\(file) supported=\(supported)")
+            return
+        } catch {
+            JboxLog.app.error("state.json load failed: \(String(describing: error), privacy: .public). Starting with defaults.")
+            loaded = nil
+        }
+
+        if let loaded {
+            persisted = loaded
+            // Push loaded preferences into UserDefaults so @AppStorage
+            // bindings observe them on first paint.
+            writePreferencesIntoDefaults(loaded.preferences)
+        } else {
+            // First-run / fresh install: migrate whatever the user had
+            // set via @AppStorage (pre-Phase-7) so their preferences
+            // don't reset on upgrade.
+            persisted.preferences = readPreferencesFromDefaults()
+            saveNow()
+        }
+
         do {
             let s = try EngineStore()
-            applyStoredPreferences(to: s)
+            s.setResamplerQuality(persisted.preferences.resamplerQuality)
             s.refreshDevices()
+            restoreRoutes(into: s)
+            s.onRoutesChanged = { [weak self] in
+                self?.snapshotRoutes()
+            }
             store = s
-            JboxLog.app.notice("store ready devices=\(s.devices.count)")
+            JboxLog.app.notice("store ready devices=\(s.devices.count) routes=\(s.routes.count)")
         } catch {
             initError = String(describing: error)
             JboxLog.app.error("engine init failed: \(String(describing: error), privacy: .public)")
+            return
+        }
+
+        // Watch @AppStorage changes so the state file tracks the user's
+        // preferences edits. `UserDefaults.didChangeNotification` fires
+        // for any key change in the standard suite; we filter to the
+        // jbox-prefixed keys and re-snapshot only when one of those
+        // actually differs. StateStore's debounce absorbs the chatter.
+        userDefaultsObserver = NotificationCenter.default.addObserver(
+            forName: UserDefaults.didChangeNotification,
+            object: UserDefaults.standard,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in self?.snapshotPreferences() }
         }
     }
 
-    /// Push engine-facing preferences into a fresh `EngineStore`
-    /// before the UI comes up. Without this, a user who had set a
-    /// non-default resampler quality in a previous session would get
-    /// the default until they opened the Preferences window — any
-    /// routes started in that window would be built with the wrong
-    /// converter. Reading `UserDefaults.standard` directly avoids
-    /// pulling `@AppStorage` into a non-view type; the keys are the
-    /// same `JboxPreferences` constants the Preferences window uses.
-    private func applyStoredPreferences(to store: EngineStore) {
-        let defaults = UserDefaults.standard
-        let raw = defaults.object(forKey: JboxPreferences.resamplerQualityKey) as? Int
-            ?? Int(Engine.ResamplerQuality.mastering.rawValue)
-        let clamped = UInt32(max(0, raw))
-        let quality = Engine.ResamplerQuality(rawValue: clamped) ?? .mastering
-        store.setResamplerQuality(quality)
+    /// Force any pending debounced save synchronously. Called from the
+    /// SwiftUI scene phase hook on `.background` transitions so
+    /// mutations parked in the debounce window don't get lost when the
+    /// app quits.
+    func flush() {
+        stateStore?.flush()
+    }
+
+    // `AppState` is retained by SwiftUI for the whole process
+    // lifetime, so there's no teardown to write here; the observer is
+    // cleaned up automatically when the app exits.
+
+    // MARK: - Restore on launch
+
+    private func restoreRoutes(into store: EngineStore) {
+        for sr in persisted.routes {
+            let cfg = RouteConfig(
+                source: sr.sourceDevice,
+                destination: sr.destDevice,
+                mapping: sr.mapping,
+                name: sr.isAutoName ? nil : sr.name,
+                latencyMode: sr.latencyMode,
+                bufferFrames: sr.bufferFrames)
+            do {
+                _ = try store.addRoute(cfg,
+                                       persistId: sr.id,
+                                       createdAt: sr.createdAt)
+                JboxLog.app.notice("restored route persistId=\(sr.id.uuidString, privacy: .public)")
+            } catch {
+                JboxLog.app.error("failed to restore route \(sr.id.uuidString, privacy: .public): \(String(describing: error), privacy: .public)")
+            }
+        }
+    }
+
+    // MARK: - Preferences sync (UserDefaults ↔ StoredPreferences)
+
+    private func readPreferencesFromDefaults() -> StoredPreferences {
+        let d = UserDefaults.standard
+        let appearanceRaw = d.string(forKey: JboxPreferences.appearanceKey) ?? AppearanceMode.default.rawValue
+        let bufferRaw     = UInt32(max(0, d.integer(forKey: JboxPreferences.bufferSizePolicyKey)))
+        let resamplerRaw  = UInt32(max(0, d.integer(forKey: JboxPreferences.resamplerQualityKey)))
+        return StoredPreferences(
+            bufferSizePolicy: BufferSizePolicy(storedRaw: bufferRaw),
+            resamplerQuality: Engine.ResamplerQuality(rawValue: resamplerRaw) ?? .mastering,
+            appearance: AppearanceMode(rawValueOrDefault: appearanceRaw),
+            showDiagnostics: d.bool(forKey: JboxPreferences.showDiagnosticsKey))
+    }
+
+    private func writePreferencesIntoDefaults(_ p: StoredPreferences) {
+        let d = UserDefaults.standard
+        d.set(p.appearance.rawValue,        forKey: JboxPreferences.appearanceKey)
+        d.set(Int(p.bufferSizePolicy.storedRaw), forKey: JboxPreferences.bufferSizePolicyKey)
+        d.set(Int(p.resamplerQuality.rawValue),  forKey: JboxPreferences.resamplerQualityKey)
+        d.set(p.showDiagnostics,            forKey: JboxPreferences.showDiagnosticsKey)
+    }
+
+    private func snapshotPreferences() {
+        let fresh = readPreferencesFromDefaults()
+        guard fresh != persisted.preferences else { return }
+        persisted.preferences = fresh
+        // Keep engine-facing settings aligned with the new preferences
+        // so a resampler-quality change takes effect on newly-started
+        // routes without needing another code path.
+        store?.setResamplerQuality(fresh.resamplerQuality)
+        scheduleSave()
+    }
+
+    // MARK: - Route snapshot
+
+    private func snapshotRoutes() {
+        guard let store = store else { return }
+        persisted.routes = store.routes.map { r in
+            let trimmedName = r.config.name?.trimmingCharacters(in: .whitespaces) ?? ""
+            return StoredRoute(
+                id: r.persistId,
+                name: trimmedName.isEmpty ? r.config.displayName : trimmedName,
+                isAutoName: trimmedName.isEmpty,
+                sourceDevice: r.config.source,
+                destDevice:   r.config.destination,
+                mapping: r.config.mapping,
+                createdAt: r.createdAt,
+                modifiedAt: r.modifiedAt,
+                latencyMode: r.config.latencyMode,
+                bufferFrames: r.config.bufferFrames)
+        }
+        scheduleSave()
+    }
+
+    // MARK: - Save
+
+    private func scheduleSave() {
+        stateStore?.save(persisted)
+    }
+
+    private func saveNow() {
+        stateStore?.save(persisted)
+        stateStore?.flush()
     }
 }
 

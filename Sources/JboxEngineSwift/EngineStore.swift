@@ -7,7 +7,7 @@ import Observation
 /// the last human-readable name we saw for it. `lastKnownName` lets
 /// the UI keep rendering a sensible label when the device is
 /// temporarily disconnected. See docs/spec.md § 3.1.1.
-public struct DeviceReference: Equatable, Hashable, Sendable {
+public struct DeviceReference: Codable, Equatable, Hashable, Sendable {
     public var uid: String
     public var lastKnownName: String
 
@@ -93,16 +93,32 @@ public enum OverallState: Equatable, Hashable, Sendable {
 }
 
 /// A live route: the engine-assigned id, the user's config, and the
-/// most recently polled runtime status.
+/// most recently polled runtime status. `persistId` is the durable
+/// UUID that rides with the route through `state.json` and outlives
+/// the engine-assigned `id` (which is re-minted on every process
+/// launch). `createdAt` / `modifiedAt` mirror the spec § 3.1.3 fields
+/// so the app layer can snapshot a route into `StoredRoute` without
+/// looking up a side-table.
 public struct Route: Identifiable, Equatable, Sendable {
     public let id: UInt32
+    public let persistId: UUID
     public var config: RouteConfig
     public var status: RouteStatus
+    public let createdAt: Date
+    public var modifiedAt: Date
 
-    public init(id: UInt32, config: RouteConfig, status: RouteStatus) {
-        self.id = id
-        self.config = config
-        self.status = status
+    public init(id: UInt32,
+                config: RouteConfig,
+                status: RouteStatus,
+                persistId: UUID = UUID(),
+                createdAt: Date = Date(),
+                modifiedAt: Date = Date()) {
+        self.id         = id
+        self.persistId  = persistId
+        self.config     = config
+        self.status     = status
+        self.createdAt  = createdAt
+        self.modifiedAt = modifiedAt
     }
 }
 
@@ -194,6 +210,13 @@ public final class EngineStore {
 
     private let engine: Engine
 
+    /// Invoked after every mutation that changes the persistable shape
+    /// of `routes` (add / remove / rename / replace). The app-layer
+    /// persistence wiring (`AppState`) uses this to trigger a debounced
+    /// save against `state.json`. Intentionally nullable — tests and
+    /// the CLI keep the store alive without any persistence layer.
+    public var onRoutesChanged: (() -> Void)?
+
     public init(engine: Engine) {
         self.engine = engine
     }
@@ -284,8 +307,14 @@ public final class EngineStore {
 
     /// Add a route; returns the new live `Route` value (also appended
     /// to `routes`). Throws `JboxError` on engine-side failure.
+    ///
+    /// `persistId` / `createdAt` default to fresh values for UI-driven
+    /// adds; the restore-on-launch path passes the originals from
+    /// `StoredRoute` so the UUID and timestamps survive relaunch.
     @discardableResult
-    public func addRoute(_ config: RouteConfig) throws -> Route {
+    public func addRoute(_ config: RouteConfig,
+                         persistId: UUID = UUID(),
+                         createdAt: Date = Date()) throws -> Route {
         do {
             let id = try engine.addRoute(
                 sourceUID: config.source.uid,
@@ -296,10 +325,13 @@ public final class EngineStore {
                 bufferFrames: config.bufferFrames ?? 0
             )
             let status = try engine.pollStatus(id)
-            let route = Route(id: id, config: config, status: status)
+            let route = Route(id: id, config: config, status: status,
+                              persistId: persistId,
+                              createdAt: createdAt, modifiedAt: createdAt)
             routes.append(route)
             lastError = nil
             JboxLog.engine.notice("route added: id=\(id) src=\(config.source.lastKnownName, privacy: .public) dst=\(config.destination.lastKnownName, privacy: .public) channels=\(config.mapping.count)")
+            onRoutesChanged?()
             return route
         } catch {
             lastError = String(describing: error)
@@ -343,6 +375,7 @@ public final class EngineStore {
             peakHolds.forget(routeId: id)
             lastError = nil
             JboxLog.engine.notice("removeRoute id=\(id) ok")
+            onRoutesChanged?()
         } catch {
             lastError = String(describing: error)
             JboxLog.engine.error("removeRoute id=\(id) failed: \(String(describing: error), privacy: .public)")
@@ -422,9 +455,11 @@ public final class EngineStore {
             if let idx = routes.firstIndex(where: { $0.id == id }) {
                 let trimmed = newName.trimmingCharacters(in: .whitespaces)
                 routes[idx].config.name = trimmed.isEmpty ? nil : trimmed
+                routes[idx].modifiedAt = Date()
             }
             lastError = nil
             JboxLog.engine.notice("renameRoute id=\(id) ok")
+            onRoutesChanged?()
         } catch {
             lastError = String(describing: error)
             JboxLog.engine.error("renameRoute id=\(id) failed: \(String(describing: error), privacy: .public)")
@@ -498,7 +533,12 @@ public final class EngineStore {
             lastError: JBOX_OK,
             framesProduced: 0, framesConsumed: 0,
             underrunCount: 0, overrunCount: 0)
-        routes[idx] = Route(id: newId, config: newConfig, status: initialStatus)
+        // Preserve the original persistId and createdAt so the route
+        // keeps its identity across an edit; only modifiedAt advances.
+        routes[idx] = Route(id: newId, config: newConfig, status: initialStatus,
+                            persistId: old.persistId,
+                            createdAt: old.createdAt,
+                            modifiedAt: Date())
 
         if wasActive {
             startRoute(newId)
@@ -506,6 +546,7 @@ public final class EngineStore {
 
         lastError = nil
         JboxLog.engine.notice("replaceRoute old=\(id) new=\(newId) wasActive=\(wasActive)")
+        onRoutesChanged?()
         return routes[idx]
     }
 

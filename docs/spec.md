@@ -430,10 +430,10 @@ struct ChannelEdge: Codable, Equatable, Hashable {
 
 #### 3.1.3 `Route`
 
-The central entity.
+The central entity. Implemented as `StoredRoute` (Sources/JboxEngineSwift/Persistence/StoredAppState.swift) — named with the `Stored` prefix to keep the durable value distinct from the engine-bound `Route` that carries the process-lifetime `UInt32` id.
 
 ```swift
-struct Route: Codable, Identifiable, Equatable {
+struct StoredRoute: Codable, Identifiable, Equatable {
   let id: UUID
   var name: String             // user-visible label
   var isAutoName: Bool         // true → regenerate name on mapping changes; false → user edited
@@ -442,8 +442,12 @@ struct Route: Codable, Identifiable, Equatable {
   var mapping: [ChannelEdge]
   let createdAt: Date
   var modifiedAt: Date
+  var latencyMode: LatencyMode // Phase 6 tiered preset; default .off
+  var bufferFrames: UInt32?    // Per-route HAL buffer-size override; nil = tier default
 }
 ```
+
+`latencyMode` and `bufferFrames` extend the original v1 field list — without persisting them, per-route Performance-mode choices would reset on every relaunch. Both are optional on decode (defaults `.off` and `nil`) so pre-Phase-7 files still load.
 
 **v1 invariants** on `mapping`:
 - Each `dst` appears at most once. (Writing two edges into the same destination channel would be summing / fan-in — deferred per Appendix A.)
@@ -473,51 +477,58 @@ enum ActivationMode: String, Codable {
 
 #### 3.1.5 `Preferences`
 
+Implemented as `StoredPreferences`.
+
 ```swift
-struct Preferences: Codable, Equatable {
-  var launchAtLogin: Bool                      // default: false
+struct StoredPreferences: Codable, Equatable {
+  var launchAtLogin: Bool                       // default: false
   var bufferSizePolicy: BufferSizePolicy        // default: .useDeviceSetting
-  var resamplerQuality: ResamplerQuality        // default: .mastering
+  var resamplerQuality: Engine.ResamplerQuality // default: .mastering
   var appearance: AppearanceMode                // default: .system
   var showMetersInMenuBar: Bool                 // default: false
+  var showDiagnostics: Bool                     // default: false (Advanced tab toggle)
 }
 
 enum BufferSizePolicy: Codable, Equatable {
   case useDeviceSetting
-  case explicitOverride(frames: Int)
+  case explicitOverride(frames: UInt32)
 }
 
-enum ResamplerQuality: String, Codable { case mastering, highQuality }
-enum AppearanceMode: String, Codable   { case system, light, dark }
+// `Engine.ResamplerQuality` is the UInt32-raw type used by the engine ABI;
+// `AppearanceMode` is String-backed. Both gain automatic Codable.
+// Missing keys decode to the above defaults so additive fields don't
+// invalidate older `state.json` files.
 ```
+
+`BufferSizePolicy` encodes as a single integer on disk (0 = `useDeviceSetting`, N = `explicitOverride(frames: N)`) to keep the `state.json` diff readable and to match the existing `@AppStorage` `storedRaw` representation. `showDiagnostics` extends the original v1 field list — without persisting the Advanced-tab diagnostics toggle, the user's choice resets on every relaunch.
 
 #### 3.1.6 `AppState`
 
-The root document persisted to disk.
+The root document persisted to disk. Implemented as `StoredAppState`; the name `AppState` is taken by the runtime `@Observable` shell that owns the `EngineStore` + the `StateStore`.
 
 ```swift
-struct AppState: Codable, Equatable {
-  var schemaVersion: Int             // current: 1
-  var routes: [Route]
-  var scenes: [Scene]
-  var preferences: Preferences
+struct StoredAppState: Codable, Equatable {
+  var schemaVersion: Int                      // current: 1
+  var routes: [StoredRoute]
+  var scenes: [StoredScene]
+  var preferences: StoredPreferences
   var lastQuittedAt: Date?
 }
 ```
 
 ### 3.2 Persistence
 
-**Location.** `~/Library/Application Support/Jbox/state.json`. The directory is created on first launch with mode 0755.
+**Location.** `~/Library/Application Support/Jbox/state.json`. The directory is created on first launch with mode 0755. The path is identical whether Jbox runs from `build/Jbox.app` (`make run`) or `/Applications/Jbox.app` — it is resolved from `FileManager`'s user Application Support scope, independent of install location. A `JBOX_STATE_DIR` environment variable overrides the directory for development isolation.
 
 **Format.** JSON via `Codable`. Pretty-printed (2-space indent) so diffs are readable when the user backs up or commits the file.
 
-**Write strategy.**
-- Save triggered by any change that mutates persisted state (route add / edit / delete, scene change, preferences change).
+**Write strategy.** Implemented by `StateStore` (Sources/JboxEngineSwift/Persistence/StateStore.swift).
+- Save triggered by any change that mutates persisted state (route add / edit / delete, scene change, preferences change). Routes ride `EngineStore.onRoutesChanged`; preferences ride `UserDefaults.didChangeNotification` against the `com.jbox.*` keys that back the `@AppStorage` bindings in the Preferences views.
 - **Debounced at 500 ms.** A burst of edits is coalesced into a single write.
-- **Atomic write**: write to `state.json.tmp` in the same directory, `fsync`, rename over `state.json`. Prevents partial-write corruption on crash or power loss.
-- Persistence I/O runs on the application-layer's persistence queue; never on main or RT threads.
+- **Atomic write**: write to `state.json.tmp`, move the existing `state.json` over `state.json.bak`, then move `state.json.tmp` over `state.json`. Each move is atomic on the same volume; the worst-case crash window leaves the previous generation available under `.bak`.
+- Persistence I/O runs on the `StateStore`'s private serial queue; never on main or RT threads. The SwiftUI scene phase hook invokes `AppState.flush()` on `.background` / `.inactive` transitions so mutations parked in the debounce window are flushed before the app exits.
 
-**Backup.** The previous `state.json` is renamed to `state.json.bak` before each successful write. One-generation backup — enough insurance against bad edits, not a full history.
+**Backup.** The previous `state.json` is renamed to `state.json.bak` before each successful write. One-generation backup — enough insurance against bad edits, not a full history. `load()` transparently falls back to `.bak` when `state.json` is missing (crash-between-rename resilience).
 
 **Schema migration.**
 - `schemaVersion` starts at `1` for initial releases.
@@ -673,7 +684,7 @@ Clicking a scene in the sidebar activates it. Activation runs the engine through
 
 ### 4.6 Preferences window
 
-Standard macOS settings window (`SwiftUI.Settings` scene) with three tabs, implemented in `Sources/JboxApp/JboxApp.swift` as `PreferencesView` + three subviews (`GeneralPreferencesView`, `AudioPreferencesView`, `AdvancedPreferencesView`). Keys and defaults are centralised in `JboxPreferences`; typed value types (`AppearanceMode`, `BufferSizePolicy`) live in `JboxEngineSwift/Preferences.swift` so they are unit-testable without SwiftUI. Persistence is `NSUserDefaults` until Phase 7 rolls a real `AppState.preferences` struct on top of `state.json`; the migration path reads each key once and drops it.
+Standard macOS settings window (`SwiftUI.Settings` scene) with three tabs, implemented in `Sources/JboxApp/JboxApp.swift` as `PreferencesView` + three subviews (`GeneralPreferencesView`, `AudioPreferencesView`, `AdvancedPreferencesView`). Keys and defaults are centralised in `JboxPreferences`; typed value types (`AppearanceMode`, `BufferSizePolicy`) live in `JboxEngineSwift/Preferences.swift` so they are unit-testable without SwiftUI. Views continue to bind through `@AppStorage` for the two-way SwiftUI ergonomics; the Phase 7 persistence slice keeps `StoredPreferences` in lockstep by observing `UserDefaults.didChangeNotification` and snapshotting the `com.jbox.*` keys into `state.json` via `StateStore` (see § 3.2). On launch the loaded preferences are written back into `UserDefaults` so the `@AppStorage` bindings observe them on first paint.
 
 - **General** — appearance picker (System / Light / Dark; wired to every scene via `.preferredColorScheme(...)`, where System returns `nil` and lets SwiftUI inherit the OS appearance). Launch-at-login and "Show meters in menu bar" are disabled placeholders — both land with Phase 7 (launch-at-login needs persistence, and menu-bar meters need the icon renderer to animate between states).
 - **Audio** —
@@ -682,7 +693,7 @@ Standard macOS settings window (`SwiftUI.Settings` scene) with three tabs, imple
 - **Advanced** —
     - **Show engine diagnostics** toggle (off by default; when on, the expanded meter panel surfaces the `frames_produced / frames_consumed · u<K>` counters and the per-side estimated-latency breakdown). Already landed pre-Preferences; key preserved.
     - **Open Logs Folder** button — reveals `~/Library/Logs/Jbox` in Finder, creating the directory on demand. The rotating file sink itself lands with Phase 8 packaging; until then `Console.app` / `log stream --predicate 'subsystem == "com.jbox.app"'` is the authoritative source and this button exists primarily to point users at where the files will live.
-    - **Export / Import / Reset Configuration** — disabled placeholders. They all need the `state.json` backing store (Phase 7) to round-trip meaningfully.
+    - **Export / Import / Reset Configuration** — disabled placeholders. The backing `state.json` store landed in the Phase 7 persistence slice; the UI is waiting on the scenes editor work before Import/Export feel defensible (scenes still round-trip through the same file but the editor is deferred).
 
 ### 4.7 Key flows
 

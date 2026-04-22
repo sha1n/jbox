@@ -34,7 +34,7 @@
 | 5     | Multi-route and shared devices        | Three simultaneous routes running, including one that shares a device with another.   | ✅ Code done (4 commits from `a83c4b5`) — real-hardware three-route sanity deferred |
 | 6     | SwiftUI UI                            | User can add / edit / delete / start / stop routes through the GUI.                   | 🚧 First slice + channel-label pickers + meter Slices A & B + post-Slice-B refinements (fan-out, edit routes, latency pill + diagnostics, tier modes) + MenuBarExtra + three-tab Preferences landed — VoiceOver on `MeterPanel`, multi-window prevention, SwiftUI previews, and XCUITests still pending |
 | 6+    | Logging pipeline                      | `os_log`-visible events for engine lifecycle, route mutations, and RT dropouts.       | 🚧 Option-B slice landed (drainer + Swift `Logger` wrappers + edge-triggered RT producers). Coverage closed in `7f778d2`. Rotating file sink still pending (Phase 8). |
-| 7     | Persistence, scenes, launch-at-login  | Relaunching the app restores configured routes and scenes.                             | ⏳ Pending |
+| 7     | Persistence, scenes, launch-at-login  | Relaunching the app restores configured routes and scenes.                             | 🚧 Persistence slice landed — routes + preferences round-trip through `state.json`. Scenes UI + launch-at-login still pending. |
 | 8     | Packaging and installation            | `Jbox.app` runs from `/Applications` on a clean user account.                          | ⏳ Pending |
 | 9     | Release hardening                     | v1.0.0 tagged and published to GitHub Releases.                                        | ⏳ Pending |
 
@@ -441,23 +441,25 @@ Phase 6 first-slice summary of deviations:
 
 ## Phase 7 — Persistence, scenes, launch-at-login
 
+**Status:** 🚧 Persistence slice landed (Codable layer + `StateStore` + `AppState` wiring + live route / preferences round-trip). Scenes UI + activation logic and launch-at-login are still pending; the `StoredScene` entity is serialised so a scene editor can land without bumping the schema version.
+
 **Goal.** Make configured state durable across relaunches. Implement scenes. Offer opt-in launch-at-login.
 
 **Entry criteria.** Phase 6 complete.
 
 **Exit criteria.**
-- Relaunching the app restores all configured routes and scenes exactly.
-- Scenes activate correctly (exclusive and additive modes).
-- Opt-in launch-at-login works: when toggled on, the app registers as a login item; after macOS login, Jbox starts automatically and appears in the menu bar (routes remain stopped per the design).
-- Schema migration infrastructure in place even though only v1 exists (stub migrations compile and run).
-- `state.json` is atomically written, debounced, backed up.
+- [x] Relaunching the app restores all configured routes. (Scenes land once the editor lands.)
+- [ ] Scenes activate correctly (exclusive and additive modes).
+- [ ] Opt-in launch-at-login works: when toggled on, the app registers as a login item; after macOS login, Jbox starts automatically and appears in the menu bar (routes remain stopped per the design).
+- [x] Schema migration infrastructure in place even though only v1 exists. `StoredAppState.currentSchemaVersion` + `StateStore.LoadError.schemaTooNew` refuse forward-schema files; a future v2 adds a ladder of decode-time migrators.
+- [x] `state.json` is atomically written, debounced, backed up.
 
 **Tasks.**
 
 Persistence:
-- [ ] `Persistence/AppState.swift` — `Codable` structs matching [spec.md § 3.1](./spec.md#31-entities).
-- [ ] `Persistence/StateStore.swift` — debounced atomic writer, `.bak` backup, schema-version dispatch.
-- [ ] Load-on-launch: read `state.json`, run migrations if needed, refuse to load newer-schema files with a user-visible error.
+- [x] `Sources/JboxEngineSwift/Persistence/StoredAppState.swift` — `Codable` value types: `StoredAppState`, `StoredRoute`, `StoredScene`, `StoredSceneActivationMode`, `StoredPreferences`. `BufferSizePolicy` picks up a custom single-value Codable so the on-disk shape matches the `@AppStorage` `storedRaw` representation (0 = useDeviceSetting; N = override frames). Existing `ChannelEdge` / `DeviceReference` / `AppearanceMode` / `Engine.ResamplerQuality` / `LatencyMode` gain `Codable` conformance. 27 Swift Testing cases cover round-trips, missing-key defaults, extra-key tolerance, BufferSizePolicy's tag-free encoding, schemaVersion decoding, fan-out mapping preservation, multi-route ordering, and `lastQuittedAt` round-trips.
+- [x] `Sources/JboxEngineSwift/Persistence/StateStore.swift` — debounced atomic writer. `save()` serialises onto a private serial queue; the debounce window coalesces bursts into one write. Atomic sequence is `state.json.tmp` → rename existing `state.json` → `state.json.bak` → promote `.tmp` over `state.json`. `load()` falls back to `.bak` when `state.json` is missing (crash-between-rename resilience), ignores a stray `.tmp` scratch artefact, throws `fileCorrupt` on malformed JSON, and throws `schemaTooNew` when the file's `schemaVersion` outranks the app's support — whether the mismatch lives in `state.json` or the backup fallback. `flush()` is synchronous and safe from any actor. `defaultDirectory()` resolves `~/Library/Application Support/Jbox` (overridable via `JBOX_STATE_DIR` for dev isolation). 15 Swift Testing cases pin the file-layout invariants using temp directories.
+- [x] Load-on-launch + save-on-change wiring in `AppState` (Sources/JboxApp/JboxApp.swift). On first launch, migrates any `@AppStorage` keys that were the pre-Phase-7 source of truth into `StoredPreferences`; on subsequent launches, pushes the loaded preferences back into `UserDefaults` so the `@AppStorage` views observe them on first paint. Routes restore via `EngineStore.addRoute(_:persistId:createdAt:)` — the new overload threads the persisted UUID + createdAt through, so routes keep their durable identity across runs. Mutations trigger a debounced save via a new `EngineStore.onRoutesChanged` callback (route add / remove / rename / replace). Preference edits ride `UserDefaults.didChangeNotification`. Scene-phase `.background` transitions call `AppState.flush()` so a mutation parked in the debounce window is written before the app exits.
 
 Scenes:
 - [ ] Scene activation logic in the application layer (not the engine): given a scene, compute the set of routes to start / stop and issue the appropriate engine commands.
@@ -470,9 +472,18 @@ Launch-at-login:
 - [ ] First-time enabling shows an explanatory note.
 
 Testing:
-- [ ] Persistence round-trip tests (write, read, verify equality).
-- [ ] Migration test: load a v1 JSON, serialize, confirm no data loss.
-- [ ] Scene activation tests with mocked engine commands.
+- [x] Persistence round-trip tests (write, read, verify equality) — `PersistedStateTests.swift` (27 cases) + `StateStoreTests.swift` (15 cases).
+- [x] Forward-compat test: decode a v1 JSON with missing post-v1 keys, confirm defaults are applied; decode a v1 JSON with extra keys, confirm they're ignored.
+- [ ] Migration test for a real v2 schema (placeholder until a v2 field forces a bump).
+- [ ] Scene activation tests with mocked engine commands. **Deferred with the scenes UI task above.**
+
+Phase 7 persistence-slice summary of deviations:
+- **`StoredRoute` carries `latencyMode` + `bufferFrames`.** spec § 3.1.3 predates Phase 6's tiered latency modes; without persisting these two fields, every relaunch would snap routes back to the `.off` tier + tier-default buffer size, erasing Performance-mode choices the user deliberately made. Both fields are optional on decode (defaults: `.off`, `nil`) so pre-Phase-7 files still load cleanly. The spec's § 3.1.3 snippet will catch up in the next spec pass.
+- **`StoredPreferences.showDiagnostics` is a sixth field.** spec § 3.1.5 lists five preferences; the Advanced-tab diagnostics toggle landed mid-Phase-6 without an entry, and without persisting it the user's choice resets on relaunch. Added as an additive field; missing-key decode returns `false` as the default.
+- **`BufferSizePolicy` Codable is single-value, not tagged.** Auto-synthesised Codable on an enum with associated values produces a tagged object (`{"useDeviceSetting": {}}` / `{"explicitOverride": {"frames": 256}}`). Custom implementation encodes a single `UInt32` matching the existing `storedRaw` representation — cleaner diffs, forward-compatible with the `@AppStorage` migration path that reads `Int` directly.
+- **Preferences still ride `@AppStorage` views, synced into `StoredPreferences`.** The minimal-touch approach: SwiftUI views keep their `@AppStorage` bindings; `AppState` observes `UserDefaults.didChangeNotification`, snapshots into `StoredPreferences`, and writes `state.json`. Reverse direction (loaded preferences → UserDefaults) primes the bindings on launch. A future slice can rewrite the preferences views to bind directly to an `@Observable` preferences model — not worth the view-layer churn during the persistence slice.
+- **No migration ladder yet.** `currentSchemaVersion` stays at `1`; every post-v1 field has been added as an additive optional so no migration is needed. A `v1 → v2` slot in `StateStore.load()` will be introduced the first time a field needs a schema bump.
+- **First-run saves immediately.** When `state.json` is missing, `AppState.load()` flushes a fresh file as soon as it migrates `@AppStorage` values, so the user sees the file on disk without waiting for a mutation. Simplifies debugging (the file's existence confirms Jbox has been launched at least once) and sidesteps a subtle race where the engine init could fail and leave no file behind.
 
 ---
 

@@ -67,7 +67,7 @@ public struct Device: Equatable, Hashable, Sendable {
     }
 }
 
-public struct ChannelEdge: Equatable, Hashable, Sendable {
+public struct ChannelEdge: Codable, Equatable, Hashable, Sendable {
     public let src: UInt32
     public let dst: UInt32
     public init(src: UInt32, dst: UInt32) {
