@@ -7,6 +7,8 @@ import JboxEngineSwift
 struct RouteListView: View {
     let store: EngineStore
     @State private var showingAddSheet = false
+    /// When non-nil, the edit sheet is presented for that route.
+    @State private var editingRoute: Route? = nil
 
     /// Per-route expansion state for the meter panel. Lives in view
     /// state for now; a Phase 7 persistence pass can migrate this onto
@@ -77,6 +79,11 @@ struct RouteListView: View {
                         showingAddSheet = false
                     }
                 }
+                .sheet(item: $editingRoute) { route in
+                    EditRouteSheet(route: route, store: store) {
+                        editingRoute = nil
+                    }
+                }
                 .alert(
                     "Engine error",
                     isPresented: .init(
@@ -107,7 +114,8 @@ struct RouteListView: View {
                         route: route,
                         store: store,
                         expanded: expandedRoutes.contains(route.id),
-                        onToggleExpanded: { toggleExpansion(route.id) }
+                        onToggleExpanded: { toggleExpansion(route.id) },
+                        onEditRequested: { editingRoute = route }
                     )
                     .listRowSeparator(.hidden)
                     .listRowBackground(Color.clear)
@@ -134,6 +142,14 @@ struct RouteRow: View {
     let store: EngineStore
     let expanded: Bool
     let onToggleExpanded: () -> Void
+    let onEditRequested: () -> Void
+
+    /// Inline-rename state: when true, the display name becomes a
+    /// TextField bound to `renameDraft`. Enter commits through the
+    /// engine's non-disruptive rename API; Escape reverts.
+    @State private var isRenaming = false
+    @State private var renameDraft = ""
+    @FocusState private var renameFieldFocused: Bool
 
     private var canExpand: Bool {
         route.status.state == .running
@@ -158,8 +174,7 @@ struct RouteRow: View {
                 StatusGlyph(state: route.status.state)
 
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(route.config.displayName)
-                        .font(.headline)
+                    nameView
                     Text(mappingSummary)
                         .font(.caption)
                         .foregroundStyle(.secondary)
@@ -186,6 +201,14 @@ struct RouteRow: View {
                     Button("Start") { store.startRoute(route.id) }
                         .disabled(route.status.state == .starting)
                 }
+
+                Button {
+                    onEditRequested()
+                } label: {
+                    Image(systemName: "pencil")
+                }
+                .buttonStyle(.borderless)
+                .help("Edit route")
 
                 Button(role: .destructive) {
                     store.removeRoute(route.id)
@@ -227,6 +250,62 @@ struct RouteRow: View {
     private var errorText: String? {
         guard route.status.state == .error else { return nil }
         return String(cString: jbox_error_code_name(route.status.lastError))
+    }
+
+    @ViewBuilder
+    private var nameView: some View {
+        if isRenaming {
+            TextField("Route name", text: $renameDraft)
+                .textFieldStyle(.roundedBorder)
+                .font(.headline)
+                .focused($renameFieldFocused)
+                .onSubmit(commitRename)
+                .onExitCommand(perform: cancelRename)
+                .onChange(of: renameFieldFocused) { _, isFocused in
+                    // Commit on defocus (standard Finder-style rename).
+                    // Escape already flipped `isRenaming` to false so the
+                    // stale focus change from the field being torn down
+                    // is a no-op on that path.
+                    if !isFocused && isRenaming {
+                        commitRename()
+                    }
+                }
+                .frame(maxWidth: 360)
+        } else {
+            Text(route.config.displayName)
+                .font(.headline)
+                .contentShape(Rectangle())
+                .onTapGesture(count: 2, perform: startRename)
+                .help("Double-click to rename")
+        }
+    }
+
+    private func startRename() {
+        // Seed the draft with the user's custom name, not displayName.
+        // If `config.name` is nil we start with an empty field so the
+        // user types a fresh label instead of editing the auto-generated
+        // "source → destination" fallback.
+        renameDraft = route.config.name ?? ""
+        isRenaming = true
+        DispatchQueue.main.async {
+            renameFieldFocused = true
+        }
+    }
+
+    private func commitRename() {
+        let trimmed = renameDraft.trimmingCharacters(in: .whitespaces)
+        // `""` clears the custom name and lets `displayName` fall back
+        // to the auto "source → destination" label. Skip the engine
+        // round-trip when nothing actually changed.
+        let current = route.config.name ?? ""
+        if trimmed != current {
+            store.renameRoute(route.id, to: trimmed)
+        }
+        isRenaming = false
+    }
+
+    private func cancelRename() {
+        isRenaming = false
     }
 }
 

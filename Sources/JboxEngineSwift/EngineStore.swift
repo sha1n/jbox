@@ -312,6 +312,104 @@ public final class EngineStore {
         }
     }
 
+    /// Rename a route non-disruptively. The engine's internal name is
+    /// updated via `jbox_engine_rename_route`; the local `RouteConfig`
+    /// gets the new name too so the UI's displayName follows. Empty
+    /// string clears the custom name, letting `displayName` fall back
+    /// to the "source → destination" auto-label.
+    public func renameRoute(_ id: UInt32, to newName: String) {
+        do {
+            try engine.renameRoute(id, to: newName)
+            if let idx = routes.firstIndex(where: { $0.id == id }) {
+                let trimmed = newName.trimmingCharacters(in: .whitespaces)
+                routes[idx].config.name = trimmed.isEmpty ? nil : trimmed
+            }
+            lastError = nil
+            JboxLog.engine.notice("renameRoute id=\(id) ok")
+        } catch {
+            lastError = String(describing: error)
+            JboxLog.engine.error("renameRoute id=\(id) failed: \(String(describing: error), privacy: .public)")
+        }
+    }
+
+    /// Apply edits to an existing route. When only the name differs,
+    /// this short-circuits to `renameRoute`. Any other change (mapping,
+    /// devices, latency mode, buffer frames) requires a reconfig —
+    /// the engine's mapping is immutable after `addRoute`, so the
+    /// store stops and removes the old route and adds a replacement.
+    /// If the old route was running, the replacement is started and
+    /// the returned `Route` reflects that. The engine-assigned id
+    /// changes on reconfig; callers keeping ids around must refresh
+    /// from the returned value.
+    ///
+    /// On `addRoute` failure during reconfig, the old route is
+    /// restarted (if it was previously running) and the error is
+    /// rethrown — the user sees an error message and their route
+    /// stays in place.
+    @discardableResult
+    public func replaceRoute(_ id: UInt32, with newConfig: RouteConfig) throws -> Route {
+        guard let idx = routes.firstIndex(where: { $0.id == id }) else {
+            throw JboxError(code: JBOX_ERR_INVALID_ARGUMENT, message: "unknown route id")
+        }
+        let old = routes[idx]
+
+        // Fast path: only the user-chosen name changed.
+        if old.config.source == newConfig.source,
+           old.config.destination == newConfig.destination,
+           old.config.mapping == newConfig.mapping,
+           old.config.latencyMode == newConfig.latencyMode,
+           old.config.bufferFrames == newConfig.bufferFrames {
+            renameRoute(id, to: newConfig.name ?? "")
+            return routes[idx]
+        }
+
+        let wasActive = (old.status.state == .running || old.status.state == .waiting)
+        if wasActive {
+            try engine.stopRoute(id)
+            refreshStatus(id)
+        }
+
+        let newId: UInt32
+        do {
+            newId = try engine.addRoute(
+                sourceUID: newConfig.source.uid,
+                destUID: newConfig.destination.uid,
+                mapping: newConfig.mapping,
+                name: newConfig.name ?? "",
+                latencyMode: newConfig.latencyMode,
+                bufferFrames: newConfig.bufferFrames ?? 0)
+        } catch {
+            // Best-effort rollback so the user isn't left without their route.
+            if wasActive {
+                try? engine.startRoute(id)
+                refreshStatus(id)
+            }
+            lastError = String(describing: error)
+            JboxLog.engine.error("replaceRoute id=\(id) addRoute failed: \(String(describing: error), privacy: .public)")
+            throw error
+        }
+
+        try? engine.removeRoute(id)
+        meters.removeValue(forKey: id)
+        latencyComponents.removeValue(forKey: id)
+        peakHolds.forget(routeId: id)
+
+        let initialStatus = (try? engine.pollStatus(newId)) ?? RouteStatus(
+            state: .stopped,
+            lastError: JBOX_OK,
+            framesProduced: 0, framesConsumed: 0,
+            underrunCount: 0, overrunCount: 0)
+        routes[idx] = Route(id: newId, config: newConfig, status: initialStatus)
+
+        if wasActive {
+            startRoute(newId)
+        }
+
+        lastError = nil
+        JboxLog.engine.notice("replaceRoute old=\(id) new=\(newId) wasActive=\(wasActive)")
+        return routes[idx]
+    }
+
     /// Refresh `status` on every known route. Meant to be driven by a
     /// ~4 Hz timer from the app layer (Phase 6 #4). Also refreshes the
     /// cached `latencyComponents` so the diagnostics panel sees the

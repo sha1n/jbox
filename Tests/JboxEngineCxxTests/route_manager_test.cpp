@@ -151,6 +151,70 @@ TEST_CASE("RouteManager: startRoute with invalid channel index goes to ERROR",
     REQUIRE(status.last_error == JBOX_ERR_MAPPING_INVALID);
 }
 
+TEST_CASE("RouteManager: renameRoute updates the stored name in any state",
+          "[route_manager][rename]") {
+    Fixture f(2, 2);
+    std::vector<ChannelEdge> m{{0, 0}, {1, 1}};
+    RouteManager::RouteConfig cfg{"src", "dst", m, "initial"};
+    jbox_error_t err{};
+    const auto id = f.rm->addRoute(cfg, &err);
+    REQUIRE(id != JBOX_INVALID_ROUTE_ID);
+    REQUIRE(f.rm->routeName(id) == "initial");
+
+    // STOPPED → renamed.
+    REQUIRE(f.rm->renameRoute(id, "alpha") == JBOX_OK);
+    REQUIRE(f.rm->routeName(id) == "alpha");
+
+    // RUNNING → still accepted, audio flow not disturbed.
+    REQUIRE(f.rm->startRoute(id) == JBOX_OK);
+    jbox_route_status_t before{};
+    f.rm->pollStatus(id, &before);
+    REQUIRE(before.state == JBOX_ROUTE_STATE_RUNNING);
+    REQUIRE(f.rm->renameRoute(id, "beta") == JBOX_OK);
+    REQUIRE(f.rm->routeName(id) == "beta");
+    jbox_route_status_t after{};
+    f.rm->pollStatus(id, &after);
+    REQUIRE(after.state == JBOX_ROUTE_STATE_RUNNING);
+
+    // Empty string clears the name.
+    REQUIRE(f.rm->renameRoute(id, "") == JBOX_OK);
+    REQUIRE(f.rm->routeName(id).empty());
+}
+
+TEST_CASE("RouteManager: renameRoute rejects unknown ids",
+          "[route_manager][rename]") {
+    Fixture f(2, 2);
+    REQUIRE(f.rm->renameRoute(999u, "orphan") == JBOX_ERR_INVALID_ARGUMENT);
+    REQUIRE(f.rm->routeName(999u).empty());
+}
+
+TEST_CASE("RouteManager: renameRoute on a WAITING route leaves state untouched",
+          "[route_manager][rename]") {
+    // Reach WAITING by starting against a missing source.
+    auto backend = std::make_unique<SimulatedBackend>();
+    backend->addDevice(makeOutputDevice("dst", 2));
+    auto dm = std::make_unique<DeviceManager>(std::move(backend));
+    dm->refresh();
+    RouteManager rm(*dm);
+
+    std::vector<ChannelEdge> m{{0, 0}};
+    RouteManager::RouteConfig cfg{"missing-src", "dst", m, "pre-rename"};
+    jbox_error_t err{};
+    const auto id = rm.addRoute(cfg, &err);
+    REQUIRE(id != JBOX_INVALID_ROUTE_ID);
+    REQUIRE(rm.startRoute(id) == JBOX_OK);
+
+    jbox_route_status_t status{};
+    rm.pollStatus(id, &status);
+    REQUIRE(status.state == JBOX_ROUTE_STATE_WAITING);
+
+    REQUIRE(rm.renameRoute(id, "waited") == JBOX_OK);
+    REQUIRE(rm.routeName(id) == "waited");
+
+    rm.pollStatus(id, &status);
+    REQUIRE(status.state == JBOX_ROUTE_STATE_WAITING);
+}
+
 TEST_CASE("RouteManager: end-to-end sample flow through the engine",
           "[route_manager][integration]") {
     // 2-channel src (indices 0, 1) → 4-channel dst, routed to dst channels 2 and 3.

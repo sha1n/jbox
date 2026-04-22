@@ -341,6 +341,28 @@ jbox_error_code_t jbox_engine_remove_route(jbox_engine_t* engine,
     }
 }
 
+jbox_error_code_t jbox_engine_rename_route(jbox_engine_t* engine,
+                                           jbox_route_id_t route_id,
+                                           const char*     new_name) {
+    if (engine == nullptr) return JBOX_ERR_INVALID_ARGUMENT;
+    try {
+        const std::string name = (new_name != nullptr) ? new_name : "";
+        const auto code = engine->impl->renameRoute(route_id, name);
+        if (code == JBOX_OK) {
+            os_log(bridgeLog(),
+                   "rename_route ok: id=%u name=%{public}s",
+                   route_id, name.c_str());
+        } else {
+            os_log_error(bridgeLog(),
+                         "rename_route failed: id=%u code=%d",
+                         route_id, static_cast<int>(code));
+        }
+        return code;
+    } catch (...) {
+        return JBOX_ERR_INTERNAL;
+    }
+}
+
 jbox_error_code_t jbox_engine_start_route(jbox_engine_t* engine,
                                           jbox_route_id_t route_id) {
     if (engine == nullptr) return JBOX_ERR_INVALID_ARGUMENT;

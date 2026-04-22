@@ -333,8 +333,9 @@ Phase 6 refinements landed:
 - **Tiered latency modes** per route — Off (safe 8× ring, 4096 floor), Low (3× / 512 floor), Performance (2× / 256 floor + `ring/4` drift setpoint). The picker is per-route.
 - **Direct-monitor fast path** for same-device Performance routes — bypasses the ring and SRC entirely, copies input → output in one duplex IOProc, aggregate-device aware.
 - **HAL buffer-size control** — per-route override clamped into the device's supported range (intersected across aggregate sub-devices), with Core Audio hog-mode ownership for the route's lifetime so the request actually lands.
+- **Edit existing routes** — non-disruptive inline rename on double-click (engine-side `jbox_engine_rename_route`, ABI v7), plus a pencil button that opens an edit sheet for full reconfigs (device / mapping / tier / buffer). Running routes are stopped, reconfigured, and restarted as a single action; the apply button reads "Apply and restart" when that will happen.
 
-Still pending in Phase 6: `MenuBarExtra`, Preferences window beyond the diagnostics toggle, per-route edit-in-place (rename + mapping), VoiceOver label on the expanded meter panel, and `XCUITest` flows. The scene editor was consolidated into Phase 7 alongside persistence. Real-hardware acceptance tests (soak, latency, sample-rate mismatch, multi-route sanity) from Phases 3–5 are deferred to the owner's rig — the simulated backend covers their logic.
+Still pending in Phase 6: `MenuBarExtra`, Preferences window beyond the diagnostics toggle, VoiceOver label on the expanded meter panel, and `XCUITest` flows. The scene editor was consolidated into Phase 7 alongside persistence. Real-hardware acceptance tests (soak, latency, sample-rate mismatch, multi-route sanity) from Phases 3–5 are deferred to the owner's rig — the simulated backend covers their logic.
 
 Release engineering is already operational: pushing a `v*` tag triggers `.github/workflows/release.yml`, which builds an ad-hoc-signed `Jbox.app` (with `JboxEngineCLI` bundled inside) and publishes a drag-to-install `Jbox-<version>.dmg` as a draft pre-release. See [docs/releases.md](./docs/releases.md).
 

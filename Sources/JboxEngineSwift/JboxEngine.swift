@@ -380,6 +380,21 @@ public final class Engine {
         try callRouteAction(id, jbox_engine_remove_route)
     }
 
+    /// Rename a route in place. Non-disruptive — the engine keeps the
+    /// route flowing audio if it was running. Pass an empty string to
+    /// clear the stored name.
+    public func renameRoute(_ id: UInt32, to newName: String) throws {
+        guard let h = handle else {
+            throw JboxError(code: JBOX_ERR_INTERNAL, message: "engine not initialised")
+        }
+        let code = newName.withCString { ptr in
+            jbox_engine_rename_route(h, id, ptr)
+        }
+        if code != JBOX_OK {
+            throw JboxError(code: code)
+        }
+    }
+
     public func pollStatus(_ id: UInt32) throws -> RouteStatus {
         guard let h = handle else {
             throw JboxError(code: JBOX_ERR_INTERNAL, message: "engine not initialised")

@@ -43,6 +43,11 @@ jbox_error_code_t Engine::removeRoute(jbox_route_id_t id) {
     return rm_.removeRoute(id);
 }
 
+jbox_error_code_t Engine::renameRoute(jbox_route_id_t id,
+                                      const std::string& new_name) {
+    return rm_.renameRoute(id, new_name);
+}
+
 jbox_error_code_t Engine::startRoute(jbox_route_id_t id) {
     return rm_.startRoute(id);
 }

@@ -275,6 +275,37 @@ TEST_CASE("bridge: add / start / poll / stop / remove route via C API",
     jbox_engine_destroy(e);
 }
 
+TEST_CASE("bridge: rename_route forwards to the engine facade",
+          "[bridge_api][rename]") {
+    auto backend_holder = std::make_unique<SimulatedBackend>();
+    auto* backend = backend_holder.get();
+    backend->addDevice(makeDev("src", kBackendDirectionInput,  2, 0));
+    backend->addDevice(makeDev("dst", kBackendDirectionOutput, 0, 2));
+
+    jbox_engine_t* e = jbox::internal::createEngineWithBackend(std::move(backend_holder),
+                                                                /*spawn_sampler_thread=*/false);
+    REQUIRE(e != nullptr);
+
+    const jbox_channel_edge_t mapping[] = {{0, 0}, {1, 1}};
+    jbox_route_config_t rcfg{
+        .source_uid = "src",
+        .dest_uid   = "dst",
+        .mapping    = mapping,
+        .mapping_count = 2,
+        .name = "original",
+    };
+    jbox_error_t err{};
+    const jbox_route_id_t id = jbox_engine_add_route(e, &rcfg, &err);
+    REQUIRE(id != JBOX_INVALID_ROUTE_ID);
+
+    REQUIRE(jbox_engine_rename_route(e, id, "renamed") == JBOX_OK);
+    REQUIRE(jbox_engine_rename_route(e, id, nullptr) == JBOX_OK);       // clears
+    REQUIRE(jbox_engine_rename_route(e, 999u, "orphan") == JBOX_ERR_INVALID_ARGUMENT);
+    REQUIRE(jbox_engine_rename_route(nullptr, id, "noop") == JBOX_ERR_INVALID_ARGUMENT);
+
+    jbox_engine_destroy(e);
+}
+
 TEST_CASE("bridge: add_route rejects NULL mapping with mapping_count>0",
           "[bridge_api]") {
     auto backend = std::make_unique<SimulatedBackend>();

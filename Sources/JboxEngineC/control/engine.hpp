@@ -49,6 +49,7 @@ public:
     jbox_route_id_t  addRoute(const RouteManager::RouteConfig& cfg,
                               jbox_error_t* err);
     jbox_error_code_t removeRoute(jbox_route_id_t id);
+    jbox_error_code_t renameRoute(jbox_route_id_t id, const std::string& new_name);
     jbox_error_code_t startRoute(jbox_route_id_t id);
     jbox_error_code_t stopRoute(jbox_route_id_t id);
     jbox_error_code_t pollStatus(jbox_route_id_t id,

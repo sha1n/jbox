@@ -333,6 +333,22 @@ jbox_error_code_t RouteManager::removeRoute(jbox_route_id_t id) {
     return JBOX_OK;
 }
 
+jbox_error_code_t RouteManager::renameRoute(jbox_route_id_t id,
+                                            const std::string& new_name) {
+    auto it = routes_.find(id);
+    if (it == routes_.end()) return JBOX_ERR_INVALID_ARGUMENT;
+    // `name` is only read on the control thread (RT callbacks never
+    // touch it), so a plain assign is race-free here.
+    it->second->name = new_name;
+    return JBOX_OK;
+}
+
+std::string RouteManager::routeName(jbox_route_id_t id) const {
+    auto it = routes_.find(id);
+    if (it == routes_.end()) return {};
+    return it->second->name;
+}
+
 jbox_error_code_t RouteManager::startRoute(jbox_route_id_t id) {
     auto it = routes_.find(id);
     if (it == routes_.end()) return JBOX_ERR_INVALID_ARGUMENT;

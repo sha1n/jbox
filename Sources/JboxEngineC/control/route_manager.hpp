@@ -182,6 +182,19 @@ public:
     // Remove a route. Stops it first if running.
     jbox_error_code_t removeRoute(jbox_route_id_t id);
 
+    // Rename a route in place. Safe to call in any state — running
+    // routes keep flowing audio uninterrupted because `name` is not
+    // touched on the RT path. Returns JBOX_ERR_INVALID_ARGUMENT for an
+    // unknown id; JBOX_OK on success. Empty `new_name` clears the name.
+    jbox_error_code_t renameRoute(jbox_route_id_t id,
+                                  const std::string& new_name);
+
+    // Current stored name for `id`, or empty if the id is unknown.
+    // Control-thread only (reads `RouteRecord::name`). Primarily a
+    // testability hook — the C ABI does not expose names back to
+    // clients today.
+    std::string routeName(jbox_route_id_t id) const;
+
     // Request start. Transitions:
     //   STOPPED → WAITING     (device(s) missing at start time)
     //   STOPPED → RUNNING     (happy path)

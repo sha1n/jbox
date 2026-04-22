@@ -1,34 +1,33 @@
 import SwiftUI
 import JboxEngineSwift
 
-/// Modal sheet presented from the main window's "+" toolbar button.
-/// Picks source and destination devices, edits a channel mapping as
-/// a list of 1-indexed pairs, and submits to `store.addRoute`.
-/// Mapping rules (docs/spec.md § 3.1): non-empty; no duplicate dst
-/// (fan-in / summing is deferred per Appendix A). Duplicate src is
-/// **allowed** — it produces fan-out, one source feeding multiple
-/// destinations. Engine-side validation errors are surfaced inline.
-struct AddRouteSheet: View {
+/// Sheet for editing an existing route. Pre-fills every field from
+/// the route's current `RouteConfig`. On Apply:
+///   - If only the user-chosen name changed, the store routes the call
+///     through `jbox_engine_rename_route` — no audio interruption.
+///   - Any other change (devices, mapping, latency mode, buffer frames)
+///     forces a reconfig: the old route is stopped and removed, and a
+///     replacement is added with a fresh engine id. If the old route
+///     was running, the replacement is started automatically.
+///
+/// The apply button's copy reflects whether the route is active
+/// ("Apply and restart" vs "Apply") so the user sees the restart
+/// happen by design rather than as a surprise.
+struct EditRouteSheet: View {
+    let route: Route
     let store: EngineStore
     let onClose: () -> Void
 
     @State private var sourceUID: String = ""
     @State private var destUID: String = ""
-    @State private var pairs: [MappingPair] = [MappingPair(src: 0, dst: 0)]
+    @State private var pairs: [MappingPair] = []
     @State private var customName: String = ""
     @State private var latencyMode: LatencyMode = .off
-    /// 0 == "use the tier default" (currently 64 for Performance).
     @State private var bufferFrames: UInt32 = 0
     @State private var errorMessage: String?
 
-    /// Standard buffer-size options offered to the user. The menu
-    /// filters down to the subset the selected device supports.
     private static let kBufferSizeChoices: [UInt32] = [
         32, 64, 128, 256, 512, 1024, 2048]
-
-    // `MappingPair` and the mapping-row view live in
-    // ChannelMappingEditor.swift so the Add and Edit sheets can share
-    // them. Same for `ChannelMappingValidator`.
 
     // MARK: Derived
 
@@ -57,13 +56,40 @@ struct AddRouteSheet: View {
             pairs: pairs, srcChannels: srcChannels, dstChannels: dstChannels)
     }
 
-    private var canSave: Bool { validationIssue == nil }
+    /// Did the user change anything that requires a full reconfig?
+    /// Name-only changes take the non-disruptive engine rename path.
+    private var hasConfigChanges: Bool {
+        let edges = MappingPair.toEdges(pairs)
+        if sourceUID != route.config.source.uid          { return true }
+        if destUID   != route.config.destination.uid     { return true }
+        if edges     != route.config.mapping             { return true }
+        if latencyMode != route.config.latencyMode       { return true }
+        let effectiveBuffer = bufferFrames == 0 ? nil : bufferFrames
+        if effectiveBuffer != route.config.bufferFrames  { return true }
+        return false
+    }
 
-    /// Buffer-size choices the Performance-mode picker offers —
-    /// intersection of our standard choices with the source
-    /// device's HAL-reported range (and the destination's, if they
-    /// differ). Returns the full list when the device does not
-    /// expose a range.
+    private var trimmedName: String {
+        customName.trimmingCharacters(in: .whitespaces)
+    }
+
+    private var hasAnyChange: Bool {
+        if hasConfigChanges { return true }
+        let newName: String? = trimmedName.isEmpty ? nil : trimmedName
+        return newName != route.config.name
+    }
+
+    private var canSave: Bool { validationIssue == nil && hasAnyChange }
+
+    private var wasActive: Bool {
+        route.status.state == .running || route.status.state == .waiting
+    }
+
+    private var applyLabel: String {
+        if hasConfigChanges && wasActive { return "Apply and restart" }
+        return "Apply"
+    }
+
     private var bufferSizeOptions: [UInt32] {
         var range: ClosedRange<UInt32>? = nil
         if !sourceUID.isEmpty,
@@ -166,46 +192,44 @@ struct AddRouteSheet: View {
                 }
             }
             .formStyle(.grouped)
-            .navigationTitle("New route")
+            .navigationTitle("Edit route")
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("Cancel", action: onClose)
                 }
                 ToolbarItem(placement: .confirmationAction) {
-                    Button("Save", action: save)
+                    Button(applyLabel, action: apply)
                         .disabled(!canSave)
                         .keyboardShortcut(.defaultAction)
                 }
             }
         }
         .frame(minWidth: 520, minHeight: 460)
-        .onAppear(perform: preselectDefaults)
+        .onAppear(perform: prefillFromRoute)
     }
 
     // MARK: Actions
 
-    private func preselectDefaults() {
-        if sourceUID.isEmpty, let first = inputDevices.first {
-            sourceUID = first.uid
-        }
-        if destUID.isEmpty, let first = outputDevices.first {
-            destUID = first.uid
-        }
+    private func prefillFromRoute() {
+        sourceUID    = route.config.source.uid
+        destUID      = route.config.destination.uid
+        pairs        = MappingPair.from(edges: route.config.mapping)
+        customName   = route.config.name ?? ""
+        latencyMode  = route.config.latencyMode
+        bufferFrames = route.config.bufferFrames ?? 0
     }
 
-    private func save() {
+    private func apply() {
         guard let src = srcDevice, let dst = dstDevice else { return }
-        let mapping = MappingPair.toEdges(pairs)
-        let cfg = RouteConfig(
+        let newConfig = RouteConfig(
             source: DeviceReference(device: src),
             destination: DeviceReference(device: dst),
-            mapping: mapping,
-            name: customName.trimmingCharacters(in: .whitespaces).isEmpty ? nil : customName,
+            mapping: MappingPair.toEdges(pairs),
+            name: trimmedName.isEmpty ? nil : trimmedName,
             latencyMode: latencyMode,
-            bufferFrames: bufferFrames == 0 ? nil : bufferFrames
-        )
+            bufferFrames: bufferFrames == 0 ? nil : bufferFrames)
         do {
-            _ = try store.addRoute(cfg)
+            _ = try store.replaceRoute(route.id, with: newConfig)
             onClose()
         } catch let e as JboxError {
             errorMessage = e.description

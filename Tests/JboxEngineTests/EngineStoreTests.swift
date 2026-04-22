@@ -347,4 +347,189 @@ struct EngineStoreTests {
         named.name = "Live feed"
         #expect(named.displayName == "Live feed")
     }
+
+    // MARK: Edit flow (Phase 6 refinement #2)
+
+    @Test("renameRoute preserves the engine id and updates the local config.name")
+    func renameRoutePreservesIdAndLocalName() throws {
+        let store = try makeStore()
+        store.refreshDevices()
+        guard let src = store.devices.first(where: { $0.inputChannelCount  >= 1 }),
+              let dst = store.devices.first(where: { $0.outputChannelCount >= 1 })
+        else {
+            Issue.record("CI runner expected to expose at least one input- and one output-capable device")
+            return
+        }
+        let cfg = RouteConfig(
+            source: DeviceReference(device: src),
+            destination: DeviceReference(device: dst),
+            mapping: [ChannelEdge(src: 0, dst: 0)],
+            name: "original")
+        let route = try store.addRoute(cfg)
+
+        store.renameRoute(route.id, to: "renamed")
+        #expect(store.routes.first?.id == route.id)
+        #expect(store.routes.first?.config.name == "renamed")
+        #expect(store.lastError == nil)
+
+        // Empty string clears the custom name — displayName auto-falls
+        // back to "source → destination".
+        store.renameRoute(route.id, to: "")
+        #expect(store.routes.first?.config.name == nil)
+
+        store.removeRoute(route.id)
+    }
+
+    @Test("renameRoute on an unknown id surfaces INVALID_ARGUMENT via lastError")
+    func renameRouteUnknownId() throws {
+        let store = try makeStore()
+        store.renameRoute(99_999, to: "orphan")
+        #expect(store.lastError != nil)
+    }
+
+    @Test("replaceRoute short-circuits to rename when only the name changed")
+    func replaceRouteRenameFastPath() throws {
+        let store = try makeStore()
+        store.refreshDevices()
+        guard let src = store.devices.first(where: { $0.inputChannelCount  >= 1 }),
+              let dst = store.devices.first(where: { $0.outputChannelCount >= 1 })
+        else {
+            Issue.record("CI runner expected to expose at least one input- and one output-capable device")
+            return
+        }
+        let original = RouteConfig(
+            source: DeviceReference(device: src),
+            destination: DeviceReference(device: dst),
+            mapping: [ChannelEdge(src: 0, dst: 0)],
+            name: "before")
+        let route = try store.addRoute(original)
+
+        var edited = original
+        edited.name = "after"
+        let updated = try store.replaceRoute(route.id, with: edited)
+        // Rename fast path keeps the id.
+        #expect(updated.id == route.id)
+        #expect(updated.config.name == "after")
+        #expect(store.routes.first?.id == route.id)
+
+        store.removeRoute(route.id)
+    }
+
+    @Test("replaceRoute on an unknown id throws without touching the store")
+    func replaceRouteUnknownId() throws {
+        let store = try makeStore()
+        store.refreshDevices()
+        guard let src = store.devices.first(where: { $0.inputChannelCount  >= 1 }),
+              let dst = store.devices.first(where: { $0.outputChannelCount >= 1 })
+        else {
+            Issue.record("CI runner expected to expose at least one input- and one output-capable device")
+            return
+        }
+        let anchor = try store.addRoute(RouteConfig(
+            source: DeviceReference(device: src),
+            destination: DeviceReference(device: dst),
+            mapping: [ChannelEdge(src: 0, dst: 0)],
+            name: "anchor"))
+
+        let bogus = RouteConfig(
+            source: DeviceReference(device: src),
+            destination: DeviceReference(device: dst),
+            mapping: [ChannelEdge(src: 0, dst: 0)],
+            name: "ghost")
+        do {
+            _ = try store.replaceRoute(99_999, with: bogus)
+            Issue.record("expected unknown-id rejection")
+        } catch let e as JboxError {
+            #expect(e.code == JBOX_ERR_INVALID_ARGUMENT)
+        }
+        // The anchor route survived the failed replace.
+        #expect(store.routes.count == 1)
+        #expect(store.routes.first?.id == anchor.id)
+
+        store.removeRoute(anchor.id)
+    }
+
+    @Test("replaceRoute preserves the original id when the engine rejects the new config")
+    func replaceRouteRollbackKeepsOriginalRoute() throws {
+        let store = try makeStore()
+        store.refreshDevices()
+        guard let src = store.devices.first(where: { $0.inputChannelCount  >= 1 }),
+              let dst = store.devices.first(where: { $0.outputChannelCount >= 1 })
+        else {
+            Issue.record("CI runner expected to expose at least one input- and one output-capable device")
+            return
+        }
+
+        let originalConfig = RouteConfig(
+            source: DeviceReference(device: src),
+            destination: DeviceReference(device: dst),
+            mapping: [ChannelEdge(src: 0, dst: 0)],
+            name: "rollback-source")
+        let route = try store.addRoute(originalConfig)
+
+        // Same id but an empty source UID — the engine rejects this
+        // in `RouteManager::addRoute` with `INVALID_ARGUMENT`, which
+        // exercises the rollback branch inside `replaceRoute`.
+        let doomed = RouteConfig(
+            source: DeviceReference(uid: "", lastKnownName: "broken"),
+            destination: DeviceReference(device: dst),
+            mapping: [ChannelEdge(src: 0, dst: 0)],
+            name: "doomed")
+        do {
+            _ = try store.replaceRoute(route.id, with: doomed)
+            Issue.record("expected engine addRoute rejection")
+        } catch let e as JboxError {
+            #expect(e.code == JBOX_ERR_INVALID_ARGUMENT)
+        }
+
+        // The route is still there under its original id, with its
+        // original config untouched.
+        #expect(store.routes.count == 1)
+        #expect(store.routes.first?.id == route.id)
+        #expect(store.routes.first?.config.source.uid == src.uid)
+        #expect(store.routes.first?.config.name == "rollback-source")
+
+        store.removeRoute(route.id)
+    }
+
+    @Test("replaceRoute with a new mapping issues a new engine id")
+    func replaceRouteMappingEditAssignsNewId() throws {
+        let store = try makeStore()
+        store.refreshDevices()
+        guard let src = store.devices.first(where: { $0.inputChannelCount  >= 1 }),
+              let dst = store.devices.first(where: { $0.outputChannelCount >= 1 })
+        else {
+            Issue.record("CI runner expected to expose at least one input- and one output-capable device")
+            return
+        }
+        // Only meaningful when we have at least one spare src or dst
+        // channel to swap into the mapping. Skip otherwise.
+        guard src.inputChannelCount >= 2 || dst.outputChannelCount >= 2 else {
+            return
+        }
+
+        let original = RouteConfig(
+            source: DeviceReference(device: src),
+            destination: DeviceReference(device: dst),
+            mapping: [ChannelEdge(src: 0, dst: 0)],
+            name: "edit-mapping")
+        let route = try store.addRoute(original)
+
+        // Build an edit that changes the destination channel if possible;
+        // otherwise bump the source channel.
+        let newMapping: [ChannelEdge] =
+            dst.outputChannelCount >= 2
+            ? [ChannelEdge(src: 0, dst: 1)]
+            : [ChannelEdge(src: 1, dst: 0)]
+        var edited = original
+        edited.mapping = newMapping
+
+        let updated = try store.replaceRoute(route.id, with: edited)
+        #expect(updated.id != route.id)
+        #expect(updated.config.mapping == newMapping)
+        #expect(store.routes.count == 1)
+        #expect(store.routes.first?.id == updated.id)
+
+        store.removeRoute(updated.id)
+    }
 }

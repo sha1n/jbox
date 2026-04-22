@@ -42,8 +42,10 @@ extern "C" {
  *   6  MINOR — appended `buffer_frames` to jbox_route_config_t (0
  *              means use the tier default; non-zero overrides the
  *              target HAL buffer size the fast path requests).
+ *   7  MINOR — added jbox_engine_rename_route for non-disruptive
+ *              renames of existing routes.
  */
-#define JBOX_ENGINE_ABI_VERSION 6u
+#define JBOX_ENGINE_ABI_VERSION 7u
 
 uint32_t jbox_engine_abi_version(void);
 
@@ -278,6 +280,23 @@ jbox_route_id_t jbox_engine_add_route(jbox_engine_t*             engine,
 /* Remove a route. If the route is running it is stopped first. */
 jbox_error_code_t jbox_engine_remove_route(jbox_engine_t*  engine,
                                            jbox_route_id_t route_id);
+
+/*
+ * Rename a route (ABI v7+). Non-disruptive: safe in any state, and a
+ * running route keeps flowing audio uninterrupted. The engine copies
+ * the string. Passing NULL clears the stored name (equivalent to an
+ * empty string). Returns JBOX_ERR_INVALID_ARGUMENT for NULL engine or
+ * unknown `route_id`.
+ *
+ * Note: the engine does not currently surface the stored name back
+ * through the C ABI — callers own the authoritative user-visible
+ * name. This entry exists so that future engine-side logging can
+ * identify routes by user-chosen names, and so that a persistence
+ * layer can push names through at restore time.
+ */
+jbox_error_code_t jbox_engine_rename_route(jbox_engine_t*  engine,
+                                           jbox_route_id_t route_id,
+                                           const char*     new_name);
 
 /* Request that the route start audio flow. Transitions to WAITING if
  * either referenced device is not currently present; otherwise to
