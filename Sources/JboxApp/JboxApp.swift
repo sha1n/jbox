@@ -83,6 +83,11 @@ enum JboxPreferences {
     // Advanced
     /// Bool; diagnostics toggle (Phase 6 refinement #4). Default: off.
     public static let showDiagnosticsKey  = "com.jbox.showDiagnostics"
+    // Routing defaults
+    /// Bool; global "Share device with other apps by default" (Phase
+    /// 7.5). Newly-created routes inherit this; existing routes carry
+    /// their stored `Bool?` choice. Default: off (preserve exclusive).
+    public static let shareDevicesByDefaultKey = "com.jbox.shareDevicesByDefault"
 }
 
 struct PreferencesView: View {
@@ -167,6 +172,7 @@ struct AudioPreferencesView: View {
     @AppStorage(JboxPreferences.bufferSizePolicyKey) private var bufferPolicyRaw: Int = 0
     @AppStorage(JboxPreferences.resamplerQualityKey) private var resamplerRaw: Int
         = Int(Engine.ResamplerQuality.mastering.rawValue)
+    @AppStorage(JboxPreferences.shareDevicesByDefaultKey) private var shareDevicesByDefault: Bool = false
 
     private static let bufferFooter =
         "Applies to newly-added Performance-mode routes. The HAL clamps "
@@ -180,10 +186,18 @@ struct AudioPreferencesView: View {
         + "newly-started routes — stop and start a running route to "
         + "re-build its converter."
 
+    private static let sharingFooter =
+        "New routes inherit this setting. You can override it per route "
+        + "in the route editor. When on, other apps can keep using a "
+        + "device while a Jbox route is active — at the cost of Jbox "
+        + "no longer being able to force a small HAL buffer, so "
+        + "Performance tier is unavailable."
+
     var body: some View {
         Form {
             bufferSection
             resamplerSection
+            sharingSection
         }
         .formStyle(.grouped)
         .padding()
@@ -222,6 +236,17 @@ struct AudioPreferencesView: View {
             Text("Resampler quality")
         } footer: {
             Text(Self.resamplerFooter)
+        }
+    }
+
+    private var sharingSection: some View {
+        Section {
+            Toggle("Share devices with other apps by default",
+                   isOn: $shareDevicesByDefault)
+        } header: {
+            Text("Routing defaults")
+        } footer: {
+            Text(Self.sharingFooter)
         }
     }
 
@@ -437,14 +462,20 @@ final class AppState {
     // MARK: - Restore on launch
 
     private func restoreRoutes(into store: EngineStore) {
+        let defaultShare = persisted.preferences.shareDevicesByDefault
         for sr in persisted.routes {
+            // Phase 7.5 resolution rule: per-route nil inherits the
+            // global default. The engine never sees nil; it always
+            // receives a concrete bool.
+            let effectiveShare = sr.shareDevices ?? defaultShare
             let cfg = RouteConfig(
                 source: sr.sourceDevice,
                 destination: sr.destDevice,
                 mapping: sr.mapping,
                 name: sr.isAutoName ? nil : sr.name,
                 latencyMode: sr.latencyMode,
-                bufferFrames: sr.bufferFrames)
+                bufferFrames: sr.bufferFrames,
+                shareDevices: effectiveShare)
             do {
                 _ = try store.addRoute(cfg,
                                        persistId: sr.id,
@@ -467,7 +498,8 @@ final class AppState {
             bufferSizePolicy: BufferSizePolicy(storedRaw: bufferRaw),
             resamplerQuality: Engine.ResamplerQuality(rawValue: resamplerRaw) ?? .mastering,
             appearance: AppearanceMode(rawValueOrDefault: appearanceRaw),
-            showDiagnostics: d.bool(forKey: JboxPreferences.showDiagnosticsKey))
+            showDiagnostics: d.bool(forKey: JboxPreferences.showDiagnosticsKey),
+            shareDevicesByDefault: d.bool(forKey: JboxPreferences.shareDevicesByDefaultKey))
     }
 
     private func writePreferencesIntoDefaults(_ p: StoredPreferences) {
@@ -476,6 +508,7 @@ final class AppState {
         d.set(Int(p.bufferSizePolicy.storedRaw), forKey: JboxPreferences.bufferSizePolicyKey)
         d.set(Int(p.resamplerQuality.rawValue),  forKey: JboxPreferences.resamplerQualityKey)
         d.set(p.showDiagnostics,            forKey: JboxPreferences.showDiagnosticsKey)
+        d.set(p.shareDevicesByDefault,      forKey: JboxPreferences.shareDevicesByDefaultKey)
     }
 
     private func snapshotPreferences() {
@@ -493,8 +526,34 @@ final class AppState {
 
     private func snapshotRoutes() {
         guard let store = store else { return }
+        // Phase 7.5: preserve the on-disk `shareDevices: Bool?` shape.
+        // The "inherit" sentinel (`nil`) only makes sense for routes
+        // that were already in persisted.routes with that value —
+        // typically pre-Phase-7.5 state files. Brand-new routes
+        // created through the UI always pin a concrete Bool because
+        // the user made an explicit choice.
+        let priorByPersistId: [UUID: Bool?] = Dictionary(
+            uniqueKeysWithValues: persisted.routes.map { ($0.id, $0.shareDevices) })
+        let defaultShare = persisted.preferences.shareDevicesByDefault
+
         persisted.routes = store.routes.map { r in
             let trimmedName = r.config.name?.trimmingCharacters(in: .whitespaces) ?? ""
+            let storedShare: Bool?
+            if let priorStored = priorByPersistId[r.persistId] {
+                // Route was already persisted. Preserve its Bool? shape
+                // unless the user's effective choice has diverged from
+                // what that shape would resolve to today.
+                if r.config.shareDevices == (priorStored ?? defaultShare) {
+                    storedShare = priorStored
+                } else {
+                    storedShare = r.config.shareDevices
+                }
+            } else {
+                // Brand-new route — pin the user's concrete choice on
+                // disk so a future change to the global default does
+                // not silently flip this route.
+                storedShare = r.config.shareDevices
+            }
             return StoredRoute(
                 id: r.persistId,
                 name: trimmedName.isEmpty ? r.config.displayName : trimmedName,
@@ -505,7 +564,8 @@ final class AppState {
                 createdAt: r.createdAt,
                 modifiedAt: r.modifiedAt,
                 latencyMode: r.config.latencyMode,
-                bufferFrames: r.config.bufferFrames)
+                bufferFrames: r.config.bufferFrames,
+                shareDevices: storedShare)
         }
         scheduleSave()
     }

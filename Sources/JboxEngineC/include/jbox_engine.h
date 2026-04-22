@@ -48,8 +48,12 @@ extern "C" {
  *              jbox_engine_resampler_quality so the Swift
  *              Preferences window can push an engine-wide SRC
  *              quality preset. Applies to newly-started routes.
+ *   9  MINOR — appended `share_device` to jbox_route_config_t and
+ *              `status_flags` to jbox_route_status_t; introduced
+ *              JBOX_ROUTE_STATUS_SHARE_DOWNGRADE for the Performance →
+ *              Low demotion surface (spec § 2.7 "Device sharing").
  */
-#define JBOX_ENGINE_ABI_VERSION 8u
+#define JBOX_ENGINE_ABI_VERSION 9u
 
 uint32_t jbox_engine_abi_version(void);
 
@@ -186,6 +190,17 @@ typedef struct {
  * supported range (`supportedBufferFrameSizeRange`) — callers
  * typically surface that range in their UI so users only choose
  * values the device can honour.
+ *
+ * `share_device` (ABI v9+) opts the route out of Jbox's default
+ * hog-mode policy: when non-zero, the engine will not call
+ * `claimExclusive` on the route's device(s), and the route runs on
+ * Core Audio's shared-client path at whatever HAL buffer size the
+ * device happens to have. Performance-tier routes flagged
+ * `share_device = 1` are silently demoted to Low latency (the fast
+ * path needs exclusivity; the ring/4 setpoint can't be defended
+ * without it) and surface the `JBOX_ROUTE_STATUS_SHARE_DOWNGRADE`
+ * bit via `jbox_engine_poll_route_status`. Zero-initialised callers
+ * keep today's exclusive behaviour.
  */
 typedef struct {
     const char*                source_uid;
@@ -195,6 +210,7 @@ typedef struct {
     const char*                name;
     uint32_t                   latency_mode;
     uint32_t                   buffer_frames;
+    uint8_t                    share_device;
 } jbox_route_config_t;
 
 typedef enum {
@@ -206,6 +222,9 @@ typedef enum {
 } jbox_route_state_t;
 
 const char* jbox_route_state_name(jbox_route_state_t state);
+
+/* Bitfield constants for `jbox_route_status_t::status_flags` (ABI v9+). */
+#define JBOX_ROUTE_STATUS_SHARE_DOWNGRADE 0x00000001u
 
 /* Snapshot of a route's runtime state. Filled in by poll_route_status.
  *
@@ -223,6 +242,11 @@ typedef struct {
      * sample rate is unknown. Not updated after the route starts; stop +
      * start refreshes the value. */
     uint64_t           estimated_latency_us;
+    /* Added in ABI v9: bitmap of per-route status flags. Currently only
+     * JBOX_ROUTE_STATUS_SHARE_DOWNGRADE is defined — set when a
+     * Performance-tier route was silently demoted because its
+     * `share_device` flag is set. Zero for non-running routes. */
+    uint32_t           status_flags;
 } jbox_route_status_t;
 
 /* -------------------------------------------------------------------- */

@@ -19,6 +19,9 @@ struct AddRouteSheet: View {
     @State private var latencyMode: LatencyMode = .off
     /// 0 == "use the tier default" (currently 64 for Performance).
     @State private var bufferFrames: UInt32 = 0
+    /// Phase 7.5 per-route opt-out. Defaults to the global preference;
+    /// the user can flip per-route before saving.
+    @State private var shareDevices: Bool = false
     @State private var errorMessage: String?
 
     /// Buffer-size policy preference (Preferences → Audio). Seeds the
@@ -28,6 +31,10 @@ struct AddRouteSheet: View {
     /// explicit override in frames. Matches
     /// `BufferSizePolicy.storedRaw` in `JboxEngineSwift`.
     @AppStorage(JboxPreferences.bufferSizePolicyKey) private var bufferPolicyRaw: Int = 0
+    /// Phase 7.5 global default for the share-device toggle. Seeds
+    /// `shareDevices` when the sheet opens; per-route edits don't
+    /// write back to this key.
+    @AppStorage(JboxPreferences.shareDevicesByDefaultKey) private var shareDevicesByDefault: Bool = false
 
     /// Standard buffer-size options offered to the user. The menu
     /// filters down to the subset the selected device supports.
@@ -149,11 +156,20 @@ struct AddRouteSheet: View {
                     Picker("Latency mode", selection: $latencyMode) {
                         Text("Off — safe default").tag(LatencyMode.off)
                         Text("Low").tag(LatencyMode.low)
-                        Text("Performance").tag(LatencyMode.performance)
+                        Text(shareDevices ? "Performance — unavailable when sharing" : "Performance")
+                            .tag(LatencyMode.performance)
                     }
                     .pickerStyle(.menu)
+                    .disabled(false)  // keep the picker enabled; just snap below.
 
-                    if latencyMode == .performance {
+                    Toggle("Share device with other apps", isOn: $shareDevices)
+                    if shareDevices {
+                        Text("Performance requires exclusive device access and is unavailable while sharing.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+
+                    if latencyMode == .performance && !shareDevices {
                         Picker("Buffer size", selection: $bufferFrames) {
                             Text("Default (64)").tag(UInt32(0))
                             ForEach(bufferSizeOptions, id: \.self) { frames in
@@ -191,6 +207,14 @@ struct AddRouteSheet: View {
         .onChange(of: latencyMode) { _, newMode in
             seedBufferFromPolicyIfNeeded(latencyMode: newMode)
         }
+        .onChange(of: shareDevices) { _, sharing in
+            // Snap back when the user toggles sharing on with
+            // Performance selected. Unchecking sharing doesn't
+            // auto-restore Performance — that was a deliberate choice.
+            if sharing && latencyMode == .performance {
+                latencyMode = .low
+            }
+        }
     }
 
     // MARK: Actions
@@ -202,6 +226,8 @@ struct AddRouteSheet: View {
         if destUID.isEmpty, let first = outputDevices.first {
             destUID = first.uid
         }
+        // Seed the share toggle from the global default on first paint.
+        shareDevices = shareDevicesByDefault
         seedBufferFromPolicyIfNeeded(latencyMode: latencyMode)
     }
 
@@ -228,7 +254,8 @@ struct AddRouteSheet: View {
             mapping: mapping,
             name: customName.trimmingCharacters(in: .whitespaces).isEmpty ? nil : customName,
             latencyMode: latencyMode,
-            bufferFrames: bufferFrames == 0 ? nil : bufferFrames
+            bufferFrames: bufferFrames == 0 ? nil : bufferFrames,
+            shareDevices: shareDevices
         )
         do {
             _ = try store.addRoute(cfg)

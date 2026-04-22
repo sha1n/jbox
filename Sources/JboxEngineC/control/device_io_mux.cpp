@@ -45,7 +45,8 @@ DeviceIOMux::~DeviceIOMux() {
 bool DeviceIOMux::attachInput(void* key,
                               InputIOProcCallback callback,
                               void* user_data,
-                              std::uint32_t requested_buffer_frames) {
+                              std::uint32_t requested_buffer_frames,
+                              bool share_device) {
     if (input_channel_count_ == 0 || callback == nullptr) return false;
 
     auto next = std::make_unique<InputList>();
@@ -56,7 +57,8 @@ bool DeviceIOMux::attachInput(void* key,
             next->push_back(e);
         }
     }
-    next->push_back({key, callback, user_data, requested_buffer_frames});
+    next->push_back({key, callback, user_data, requested_buffer_frames, share_device});
+    if (!share_device) ++non_sharing_attached_;
 
     const bool first = (input_ioproc_id_ == kInvalidIOProcId);
     if (first) {
@@ -87,10 +89,18 @@ void DeviceIOMux::detachInput(void* key) {
 
     auto next = std::make_unique<InputList>();
     next->reserve(input_list_->size());
+    bool detached_was_non_sharing = false;
     for (const auto& e : *input_list_) {
-        if (e.key != key) next->push_back(e);
+        if (e.key != key) {
+            next->push_back(e);
+        } else if (!e.share_device) {
+            detached_was_non_sharing = true;
+        }
     }
     if (next->size() == input_list_->size()) return;  // key not found
+    if (detached_was_non_sharing && non_sharing_attached_ > 0) {
+        --non_sharing_attached_;
+    }
 
     const bool now_empty = next->empty();
     const InputList* published = now_empty ? nullptr : next.get();
@@ -115,7 +125,8 @@ void DeviceIOMux::detachInput(void* key) {
 bool DeviceIOMux::attachOutput(void* key,
                                OutputIOProcCallback callback,
                                void* user_data,
-                               std::uint32_t requested_buffer_frames) {
+                               std::uint32_t requested_buffer_frames,
+                               bool share_device) {
     if (output_channel_count_ == 0 || callback == nullptr) return false;
 
     auto next = std::make_unique<OutputList>();
@@ -126,7 +137,8 @@ bool DeviceIOMux::attachOutput(void* key,
             next->push_back(e);
         }
     }
-    next->push_back({key, callback, user_data, requested_buffer_frames});
+    next->push_back({key, callback, user_data, requested_buffer_frames, share_device});
+    if (!share_device) ++non_sharing_attached_;
 
     const bool first = (output_ioproc_id_ == kInvalidIOProcId);
     if (first) {
@@ -152,10 +164,18 @@ void DeviceIOMux::detachOutput(void* key) {
 
     auto next = std::make_unique<OutputList>();
     next->reserve(output_list_->size());
+    bool detached_was_non_sharing = false;
     for (const auto& e : *output_list_) {
-        if (e.key != key) next->push_back(e);
+        if (e.key != key) {
+            next->push_back(e);
+        } else if (!e.share_device) {
+            detached_was_non_sharing = true;
+        }
     }
     if (next->size() == output_list_->size()) return;
+    if (detached_was_non_sharing && non_sharing_attached_ > 0) {
+        --non_sharing_attached_;
+    }
 
     const bool now_empty = next->empty();
     const OutputList* published = now_empty ? nullptr : next.get();
@@ -261,26 +281,30 @@ std::uint32_t DeviceIOMux::currentMinBufferRequest() const {
 void DeviceIOMux::updateBufferRequest() {
     const std::uint32_t target = currentMinBufferRequest();
 
-    if (target == 0) {
-        // No active requester — release exclusive ownership if we
-        // had claimed it. Backend's releaseExclusive restores the
-        // original buffer size.
+    // Phase 7.5: hog mode is claimed iff we have at least one
+    // non-sharing route *and* at least one active buffer request.
+    // The AND preserves the pre-Phase-7.5 invariant that no-opinion
+    // Off-tier routes never hog the device; the non_sharing clause
+    // adds the share-device opt-out semantics. A mux hosting only
+    // share_device routes never claims exclusive — the HAL's max-
+    // across-clients policy may then clamp our request upward,
+    // which is the documented trade-off.
+    const bool want_exclusive = (non_sharing_attached_ > 0) && (target > 0);
+    if (!want_exclusive) {
         if (exclusive_claimed_) {
             backend_.releaseExclusive(uid_);
             exclusive_claimed_ = false;
         }
-        last_requested_frames_ = 0;
-        return;
+    } else if (!exclusive_claimed_) {
+        // Claim failure is non-fatal — the route continues on the
+        // shared-client path and accepts whatever the HAL ends up
+        // giving.
+        exclusive_claimed_ = backend_.claimExclusive(uid_);
     }
 
-    // At least one route wants a specific target. Claim exclusive on
-    // the 0→1 transition so the buffer-size request actually lands
-    // (the backend's max-across-clients policy would otherwise let
-    // another app's larger preference win). Claim failure is non-
-    // fatal; the route continues on the shared-client path and
-    // accepts whatever the HAL ends up giving.
-    if (!exclusive_claimed_) {
-        exclusive_claimed_ = backend_.claimExclusive(uid_);
+    if (target == 0) {
+        last_requested_frames_ = 0;
+        return;
     }
 
     // Re-apply only if the min changed, to avoid churning the HAL

@@ -341,6 +341,8 @@ Still pending in Phase 6: VoiceOver label on the expanded meter panel, single-wi
 
 Phase 7 persistence slice landed: routes and preferences round-trip through `~/Library/Application Support/Jbox/state.json`. `StateStore` writes atomically with a one-generation `.bak` backup and a 500 ms debounce; `AppState.load()` restores routes on launch with their durable UUIDs, pushes persisted preferences back into `@AppStorage`, and refuses to load state files with a forward schema version. Scene editor + activation logic and launch-at-login are still pending.
 
+Phase 7.5 device-sharing slice landed: a per-route "Share device with other apps" checkbox (plus a matching Preferences default) opts the route out of Jbox's hog-mode policy so Music / Safari / Zoom can keep using a device while a Jbox route is active. Performance tier is unavailable when sharing (the fast path needs exclusivity) and is silently demoted to Low; the route row surfaces the demotion + a lock glyph when hog mode is active. ABI v8 → v9 (`share_device` + `status_flags`). See plan.md Phase 7.5.
+
 Release engineering is already operational: pushing a `v*` tag triggers `.github/workflows/release.yml`, which builds an ad-hoc-signed `Jbox.app` (with `JboxEngineCLI` bundled inside) and publishes a drag-to-install `Jbox-<version>.dmg` as a draft pre-release. See [docs/releases.md](./docs/releases.md).
 
 See [docs/plan.md](./docs/plan.md) for the full phased implementation roadmap.

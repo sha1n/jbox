@@ -71,16 +71,21 @@ public:
     // mux's device-buffer negotiation. 0 means "no opinion" — the
     // route neither shrinks the buffer nor prevents another route's
     // shrink request. Non-zero enters this request into the mux's
-    // refcount: on the 0→1 transition the mux claims exclusive
-    // (hog-mode) ownership of the device and requests the minimum
-    // across currently-attached routes; on the 1→0 transition the
-    // exclusive claim is released (which restores the original
-    // buffer size via the backend's snapshot). When multiple routes
-    // attach with different non-zero requests, the smallest wins.
+    // min-across-requests refcount.
+    //
+    // `share_device` (Phase 7.5): when true, the attach participates
+    // in the RT dispatch and in the buffer-size min, but does not
+    // count toward the `non_sharing_attached` refcount that drives
+    // hog-mode acquisition. Mixed-mode attachments on the same
+    // device see hog mode claimed only while at least one
+    // non-sharing route is attached; when the last non-sharing
+    // route detaches the claim is released even if sharing routes
+    // remain active.
     bool attachInput(void* key,
                      InputIOProcCallback callback,
                      void* user_data,
-                     std::uint32_t requested_buffer_frames = 0);
+                     std::uint32_t requested_buffer_frames = 0,
+                     bool share_device = false);
 
     // Detach the input callback previously registered with `key`.
     // No-op if `key` is not attached. Blocks the caller for one grace
@@ -91,7 +96,8 @@ public:
     bool attachOutput(void* key,
                       OutputIOProcCallback callback,
                       void* user_data,
-                      std::uint32_t requested_buffer_frames = 0);
+                      std::uint32_t requested_buffer_frames = 0,
+                      bool share_device = false);
     void detachOutput(void* key);
 
     bool hasAnyInput() const;
@@ -107,12 +113,16 @@ private:
         // 0 = route has no opinion on buffer size. Non-zero takes
         // part in the mux's min-across-requests refcount.
         std::uint32_t       requested_buffer_frames = 0;
+        // Phase 7.5: true = route opted out of hog-mode; this entry
+        // does not contribute to `non_sharing_attached_`.
+        bool                share_device = false;
     };
     struct OutputEntry {
         void*                key = nullptr;
         OutputIOProcCallback cb  = nullptr;
         void*                user_data = nullptr;
         std::uint32_t        requested_buffer_frames = 0;
+        bool                 share_device = false;
     };
     using InputList  = std::vector<InputEntry>;
     using OutputList = std::vector<OutputEntry>;
@@ -180,6 +190,14 @@ private:
     // Last buffer size we asked the backend for. Used to suppress
     // redundant calls when the min hasn't changed across attaches.
     std::uint32_t last_requested_frames_  = 0;
+    // Phase 7.5: count of currently-attached entries with
+    // `share_device == false`. Spans both input and output
+    // directions because hog-mode is a per-device property.
+    // claimExclusive fires on the 0→1 edge of this counter;
+    // releaseExclusive fires on the 1→0 edge. Buffer-size min
+    // negotiation stays independent of this counter (sharing
+    // routes still participate in the buffer min).
+    std::uint32_t non_sharing_attached_   = 0;
 };
 
 }  // namespace jbox::control

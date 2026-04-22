@@ -17,6 +17,7 @@
 - [Phase 5 — Multi-route and shared devices](#phase-5--multi-route-and-shared-devices)
 - [Phase 6 — SwiftUI UI](#phase-6--swiftui-ui)
 - [Phase 7 — Persistence, scenes, launch-at-login](#phase-7--persistence-scenes-launch-at-login)
+- [Phase 7.5 — Device sharing (hog-mode opt-out)](#phase-75--device-sharing-hog-mode-opt-out)
 - [Phase 8 — Packaging and installation](#phase-8--packaging-and-installation)
 - [Phase 9 — Release hardening and device-level testing](#phase-9--release-hardening-and-device-level-testing)
 
@@ -35,6 +36,7 @@
 | 6     | SwiftUI UI                            | User can add / edit / delete / start / stop routes through the GUI.                   | 🚧 First slice + channel-label pickers + meter Slices A & B + post-Slice-B refinements (fan-out, edit routes, latency pill + diagnostics, tier modes) + MenuBarExtra + three-tab Preferences landed — VoiceOver on `MeterPanel`, multi-window prevention, SwiftUI previews, and XCUITests still pending |
 | 6+    | Logging pipeline                      | `os_log`-visible events for engine lifecycle, route mutations, and RT dropouts.       | 🚧 Option-B slice landed (drainer + Swift `Logger` wrappers + edge-triggered RT producers). Coverage closed in `7f778d2`. Rotating file sink still pending (Phase 8). |
 | 7     | Persistence, scenes, launch-at-login  | Relaunching the app restores configured routes and scenes.                             | 🚧 Persistence slice landed — routes + preferences round-trip through `state.json`. Scenes UI + launch-at-login still pending. |
+| 7.5   | Device sharing (hog-mode opt-out)     | Per-route and global "share device with other apps" preference; lock-glyph indicator when hog mode is active. | ✅ Landed (promoted from the post-v1.0.0 deferred list). |
 | 8     | Packaging and installation            | `Jbox.app` runs from `/Applications` on a clean user account.                          | ⏳ Pending |
 | 9     | Release hardening                     | v1.0.0 tagged and published to GitHub Releases.                                        | ⏳ Pending |
 
@@ -487,6 +489,58 @@ Phase 7 persistence-slice summary of deviations:
 
 ---
 
+## Phase 7.5 — Device sharing (hog-mode opt-out)
+
+**Status:** ✅ Landed. Promoted from the post-v1.0.0 deferred list in the same commit that ships the implementation.
+
+**Goal.** Give users an opt-out from Jbox's default hog-mode policy so other apps (Music, Safari, Zoom, …) can keep using a device while Jbox has a route on it. Default behaviour preserves today's flow — if the user never touches the new preference, nothing changes.
+
+**Entry criteria.** Phase 6 complete (the engine already has `claimExclusive` / `releaseExclusive`, the duplex fast-path, and the mux buffer-size refcount). Phase 7 persistence slice complete (the new preference rides `StoredPreferences` without needing a schema bump).
+
+**Exit criteria.**
+- [x] A per-route checkbox "Share device with other apps" in the route editor does what it says: the route skips `claimExclusive` and tolerates whatever HAL buffer size the shared-client path ends up giving.
+- [x] A global "Share devices with other apps by default" toggle in Preferences governs newly-created routes; existing routes keep their stored value.
+- [x] Performance-tier routes flagged `share=true` are silently demoted to Low tier, and the UI surfaces the demotion so the user isn't silently punished.
+- [x] When two routes share a source device with mismatched flags, the hog-mode claim is driven by the non-sharing route and released only when *that* route detaches — and the route row's lock glyph names which route is holding the device.
+- [x] `make verify` green on the combined diff.
+
+**Tasks.**
+
+Engine / ABI:
+- [x] `jbox_engine.h` ABI v8 → v9 (MINOR, additive): appended `uint8_t share_device` to `jbox_route_config_t`; appended `uint32_t status_flags` to `jbox_route_status_t`; defined `JBOX_ROUTE_STATUS_SHARE_DOWNGRADE`.
+- [x] `RouteRecord` gained `share_device: bool` + a runtime `share_downgraded: bool` sibling set during `attemptStart`.
+- [x] `route_manager.cpp`: gated the duplex fast-path `claimExclusive` on `!r.share_device`; threaded the flag into `DeviceIOMux::attachInput/attachOutput`; in `attemptStart`, when `latency_mode == kPerformance && share_device` demoted to Low and raised `share_downgraded`; `pollStatus` populates `status_flags`.
+- [x] `DeviceIOMux::attachInput/attachOutput` grew a `share_device: bool` parameter; the mux maintains a `non_sharing_attached` counter *parallel* to the overall attach count. `claimExclusive` fires when both `non_sharing_attached > 0` and `currentMinBufferRequest > 0` (preserving the pre-Phase-7.5 invariant that a no-opinion Off-tier route never hogs the device). Buffer-size-min negotiation stays tied to the overall refcount, so sharing routes still participate in the buffer min.
+- [x] `bridge_api.cpp::convertRouteConfig` copies the new field; `jbox_engine_poll_route_status` fills in `status_flags` from `r.share_downgraded`.
+
+Swift wrapper + persistence:
+- [x] `RouteConfig.shareDevices: Bool` (default `false`); `Engine.addRoute` threads it through as the new C field.
+- [x] `RouteStatus.statusFlags: UInt32` + convenience `shareDowngraded: Bool` derived from the `JBOX_ROUTE_STATUS_SHARE_DOWNGRADE` bit.
+- [x] `StoredRoute.shareDevices: Bool?` — `nil` means "inherit the global default"; missing key on decode yields `nil` so pre-Phase-7.5 state files still load.
+- [x] `StoredPreferences.shareDevicesByDefault: Bool` (default `false`); additive Codable change, no migration.
+- [x] `AppState` resolves `effective = route.shareDevices ?? preferences.shareDevicesByDefault` at `restoreRoutes` time. `snapshotRoutes` preserves the `Bool?` shape unless the user explicitly diverges from the default. Engine never sees `nil`.
+- [x] `JboxPreferences.shareDevicesByDefaultKey = "com.jbox.shareDevicesByDefault"` and bridged through `readPreferencesFromDefaults` / `writePreferencesIntoDefaults`.
+
+UI:
+- [x] `AddRouteSheet` + `EditRouteSheet`: "Share device with other apps" checkbox below the latency-tier picker. When checked, the Performance tier option is relabelled "Performance — unavailable when sharing" and an inline helper explains. If Performance was selected, the tier snaps to Low on toggle.
+- [x] `PreferencesView` "Audio" tab gains a "Routing defaults" section with the global toggle + helper copy.
+- [x] `RouteRow`: tiny lock glyph next to the latency pill when the route's source device is currently hog-held, with a tooltip naming the route holding hog mode (derived from `persisted.routes` + live status, no extra engine accessor needed).
+- [x] Downgrade indicator on the row: a `SharingPill` companion to `LatencyPill`, rendered only when `route.status.shareDowngraded` is set. Same pill geometry as the latency pill so the two sit in one visual rhythm at the right edge of the row; tinted orange (foreground + 15 % orange background fill) to draw attention. Icon + "Shared · Low" label on-pill; the longer remediation copy lives in the `.help(...)` tooltip with `.contentShape(RoundedRectangle(...))` extending the hover hit region to the full pill. See the UX-iteration deviation below for how we arrived here.
+
+Tests:
+- [x] Catch2 `[route_manager][share_device]` (4 cases): share-path skips `claimExclusive` on the duplex fast path; Performance + share demotes to Low + sets `SHARE_DOWNGRADE`; regression — share=false preserves today's exclusive behaviour; `SHARE_DOWNGRADE` survives a stop + start cycle (guards the effective-mode-local-not-mutating invariant below).
+- [x] Catch2 `[device_io_mux][share_device]` (3 cases): share-only attach never claims; mixed attachments keep hog tied to the non-sharing route (non-sharing first, then sharing first — symmetry both ways); release fires on non-sharing detach regardless of sharing-route lifecycle.
+- [x] Swift Testing: `StoredPreferences.shareDevicesByDefault` round-trips + decodes to `false` on missing key; `StoredRoute.shareDevices` round-trips as `Bool?` with both `true` and `false` pinned, and decodes to `nil` from a pre-Phase-7.5 JSON blob.
+
+Phase 7.5 summary of deviations:
+- **Mux hog gate is AND, not just non_sharing > 0.** The original mini-plan suggested driving hog-mode purely from the `non_sharing_attached_` refcount. That would have regressed the pre-Phase-7.5 invariant "no-opinion Off-tier routes never claim exclusive" — a route with `requested_buffer_frames = 0 && share_device = false` would start hogging the device with no latency win. Fixed by gating on both: `exclusive_claimed iff non_sharing_attached_ > 0 AND currentMinBufferRequest > 0`. The single-route `[device_io_mux][low_latency]` regression test was the one that caught this; keeping the AND means the hog claim still fires for everything that actually wants a buffer size.
+- **Demotion uses a local `effective_mode`, not a mutation of `r.latency_mode`.** An earlier draft mutated the record's `latency_mode` from 2 to 1 when `share_device` forced the demotion. That was invisible after the first start — but on the *second* start (after a stop), the gating check `r.latency_mode == 2` no longer matched, so `share_downgraded` silently cleared and `pollStatus` stopped surfacing `SHARE_DOWNGRADE`. Caught during the review pass. Fixed by computing a stack-local `effective_mode` at the top of `attemptStart` and using it for the fast-path check, ring-sizing switch, and mux-target predicate — `r.latency_mode` stays equal to the user's stored choice across the route's lifetime. Pinned by a new `[route_manager][share_device]` case that cycles start / stop three times and asserts the flag on every poll.
+- **`snapshotRoutes` distinguishes "route was already persisted" from "brand-new UI add" via dictionary key *presence*, not the stored value.** The subtlety: a brand-new route with `shareDevices = false && defaultShare = false` has the same effective bool as a legacy (pre-Phase-7.5) route with `shareDevices = nil && defaultShare = false`. If we collapsed those into the same "matches default, inherit" branch, a brand-new route the user explicitly saved as false would silently flip to true when the user later changed the default. Fixed with `[UUID: Bool?]` + `if let priorStored = priorByPersistId[id]` key-presence check: only previously-persisted routes get to preserve the `nil` inherit-sentinel; new routes always pin a concrete `Bool` so later default changes don't retroactively alter them.
+- **Downgrade indicator landed on its third iteration.** v1 was a bare orange `arrow.down.circle` glyph next to the latency pill — the user flagged it as unexplained (the glyph alone doesn't name the effect, and the tooltip required hover). v2 replaced the glyph with a secondary-coloured caption line ("Sharing device — Performance downgraded to Low") under the mapping summary — removed the hover requirement but was, per manual testing, too quiet to catch on scan. v3 (landed) is a `SharingPill` companion to `LatencyPill`: same pill geometry, orange foreground + 15 % orange fill (warning palette, deliberately loud), on-pill label "Shared · Low", full remediation copy in the tooltip. Two gotchas baked in: (a) a `.contentShape(RoundedRectangle(...))` modifier extends the hover hit region across the pill's padding — without it, SwiftUI's `.help(...)` only fires over the icon + text glyphs themselves, leaving the padded border unresponsive to the tooltip; (b) matching the latency pill's shape keeps the two in one visual rhythm so they don't compete with the Start/Stop/edit/trash cluster to the right.
+- **Lock glyph is derivable from both source *and* destination UIDs.** A first draft only checked `r.config.source.uid == uid`, missing the case where route X has `dest = B` with share=false and route Y has `source = B` — Y's source would be hog-held because of X, but Y would show no lock. Hog mode is per-device at the HAL (not per-direction), so the UI check is now `source.uid == uid || destination.uid == uid`. Still derivable from `store.routes` alone, no ABI addition.
+
+---
+
 ## Phase 8 — Packaging and installation
 
 **Goal.** Produce a real distributable `.app` bundle. Make the installation story clear.
@@ -580,50 +634,12 @@ The items in [spec.md § Appendix A](./spec.md#appendix-a--deferred--out-of-scop
 3. **Per-route gain / trim** — useful once the mixer boundary is carefully drawn.
 4. **Auto-update via Sparkle** — useful once notarization is in place.
 5. **Fan-in / summing** — requires explicit design work because it crosses into mixer territory.
-6. **Device sharing (hog-mode opt-out)** — small, high-value quality-of-life item; see [spec.md § 2.7 "Device sharing (hog-mode opt-out)"](./spec.md#27-per-device-coordination-when-routes-share-a-device). Additive throughout — if the user never touches the new preference, behavior is identical to pre-feature. Detailed mini-plan:
-
-   **Engine layer.**
-   - [ ] Add a `share_device: bool` field to `RouteRecord` (control-thread state). Default `false` to preserve current behavior for any client that doesn't opt in.
-   - [ ] Gate the existing duplex fast-path `claimExclusive` call — `route_manager.cpp` lines ~507-508 — on `!r.share_device`. The shared-client fall-through path is already exercised today when hog-mode acquisition fails, so no new code path is introduced.
-   - [ ] Extend `DeviceIOMux::attach(...)` with the flag and maintain a `non_sharing_attached` counter distinct from the existing overall attach count. Claim exclusive on `0 → 1` of *that* counter (not the overall one), release on `1 → 0`. Routes with `share_device == true` attach to the mux normally but never contribute to the counter and therefore never trigger hog-mode acquisition. Buffer-size negotiation remains tied to the existing overall refcount (sharing routes still participate in the buffer-size min).
-   - [ ] Performance-tier routes with `share_device == true` can't take the direct-monitor fast path (which assumes exclusivity) and can't guarantee small buffers. At route start the engine silently demotes them to Low latency and sets a new `JBOX_ROUTE_STATUS_SHARE_DOWNGRADE` bit readable through `jbox_engine_poll_route_status` so the UI can surface the demotion without the engine reaching up into the UI layer.
-
-   **ABI.**
-   - [ ] `JBOX_ENGINE_ABI_VERSION` MINOR bump. Add `share_device: bool` to `jbox_route_config_t` as the only new field. Existing clients that leave the struct at its previous size get `false` via zero-initialisation — current behavior preserved.
-   - [ ] Add the `JBOX_ROUTE_STATUS_SHARE_DOWNGRADE` constant and the corresponding bit in whatever `jbox_engine_poll_route_status` returns today. No new symbols beyond the constant.
-   - [ ] Keep the global-default value entirely on the Swift side — Preferences holds it, and the view model copies it into each `RouteConfig` at engine-start time. No `jbox_engine_{get,set}_default_share_device` accessors; the engine stays stateless about user preferences. (This is a deliberate change from the earlier sketch — simpler ABI.)
-
-   **Swift layer.**
-   - [ ] `Preferences` (§ 3.1.5 of the spec): new `shareDevicesByDefault: Bool` (default `false`). Persist via the existing Codable path; additive schema change, no migration needed (missing key decodes to default).
-   - [ ] `Route` (§ 3.1.3): new optional `shareDevices: Bool?` — `nil` means "inherit the global default". Optionality matters: routes imported from pre-feature scene files decode to `nil` and honour whatever default the user has picked, rather than being pinned to `false` forever.
-   - [ ] At route-start time, resolve `effective = route.shareDevices ?? preferences.shareDevicesByDefault`, pass the resolved bool into `RouteConfig`. The engine never sees `nil`.
-
-   **UI layer.**
-   - [ ] **Route editor** (§ 4.3): a checkbox "Share device with other apps" below the latency-tier picker. When checked, the Performance tier segmented-control option is disabled with an inline helper "Performance requires exclusive device access." If the user had Performance selected and checks the box, the tier snaps back to Low with a transient toast "Latency tier downgraded to Low — device sharing is on." Unchecking re-enables Performance but does not auto-restore it — the user made a choice.
-   - [ ] **Preferences window** (§ 4.6): new "Routing defaults" group with a single toggle "Share devices with other apps by default" and helper text "New routes inherit this setting. You can override it per route." Affects only newly-created routes; existing routes carry their stored `Bool?` value.
-   - [ ] **Latency pill / route row**: a tiny lock glyph when the route's source device is currently hog-held (either because this route has `share=false` or because another route on the same device does and wins per the mixed-route rule below). Tooltip: "Other apps can't use *<device name>* while this route is active" — or, in the mixed-route case, "Other apps can't use *<device name>* while route *<X>* is active". That tooltip is the cheapest place to surface the one genuinely confusing behavior (see below).
-   - [ ] **Downgrade indicator**: when `JBOX_ROUTE_STATUS_SHARE_DOWNGRADE` is set, the tier picker shows "Low (downgraded)" with a tooltip pointing the user at the "Share device with other apps" checkbox as the cause.
-
-   **The mixed-route gotcha.** Hog mode is per-device in the HAL, so if two routes share the same source and one has `share=false`, the device is hog-held regardless of the other's preference — the non-sharing route always wins. This is correct behaviour (the opposite would silently break the non-sharing route's latency guarantee), but it is surprising. Do not try to fix this in the model. Instead, make it visible in the UI via the tooltip wording above, so the user diagnoses it in three seconds instead of ten minutes. No engine-side flag is needed to drive the tooltip — the lock-glyph state is already derivable from the mux's `non_sharing_attached > 0` check.
-
-   **Tests.**
-   - [ ] Catch2 (`route_manager_test.cpp` + a new `device_io_mux_test.cpp` case if not already covered): with a stub backend, a route configured `share_device = true` must not call `claimExclusive`. Two routes on the same device with mismatched flags must call `claimExclusive` exactly once (driven by the non-sharing route), and `releaseExclusive` exactly once when the non-sharing route detaches, regardless of the sharing route's lifecycle.
-   - [ ] Catch2: a `share_device = true` route configured with Performance tier must surface the `JBOX_ROUTE_STATUS_SHARE_DOWNGRADE` bit after start, and its `LatencyComponents` must reflect the Low-tier setpoint / multiplier, not Performance's.
-   - [ ] Swift Testing: `Preferences.shareDevicesByDefault` round-trips through Codable, decodes to `false` when absent; `Route.shareDevices` round-trips as `Bool?` and decodes to `nil` from pre-feature JSON; the resolution rule `effective = route.shareDevices ?? default` is exercised with all four combinations.
-   - [ ] Swift Testing: the route editor snap-back behavior (Performance → Low when share is toggled on) is exercised via the view model, not by driving actual SwiftUI views.
-
-   **Scope.** Roughly one day for engine + ABI + Swift plumbing + tests; half a day for the UI (editor toggle, pill lock glyph, preferences pane, downgrade indicator + copy). Ships as a single phase commit (per the "no follow-up polish commits" rule), with `make verify` green on the combined diff.
-
-   **Docs to update at implementation time.**
-   - `docs/spec.md` §§ 2.7 (the "Device sharing (hog-mode opt-out)" paragraph added in this deferred-design pass already covers the engine side — verify it still matches at implementation time and adjust), 3.1.3 (`Route` entity gains `shareDevices: Bool?`), 3.1.5 (`Preferences` gains `shareDevicesByDefault: Bool`), 4.3 (route editor), 4.6 (preferences window), 4.5 / pill section (lock glyph).
-   - `docs/plan.md`: move this item from deferred to its own `Phase N` header with a deviations section, and record commit hashes there.
-   - `CLAUDE.md`: likely no change — no new non-obvious constraint for future Claude instances.
-7. **Virtual Core Audio device (Jbox as a selectable input / output)** — larger post-v1 feature; see [spec.md § 2.13](./spec.md#213-deferred-to-future-versions). Rough phase shape (exact scope revisited at implementation time):
+6. **Virtual Core Audio device (Jbox as a selectable input / output)** — larger post-v1 feature; see [spec.md § 2.13](./spec.md#213-deferred-to-future-versions). Rough phase shape (exact scope revisited at implementation time):
    - [ ] HAL plugin skeleton — a userspace `.driver` bundle that registers a virtual device with configurable channel count and sample rate, and exposes an in-process transport (shared-memory ring or Mach port) for samples. Separate SPM target; ad-hoc signed with its own entitlements.
    - [ ] Engine-side contract — teach `RouteManager` / `DeviceIOMux` to recognise the virtual device UID and bypass the HAL `AudioDeviceIOProc` path, feeding samples directly through an SPSC ring that mirrors the existing ring-buffer primitive. Drift correction is unnecessary for this leg (both ends share the host's clock domain), so the route's PI loop degenerates to a rate-identity passthrough when either endpoint is virtual.
    - [ ] Installer path — the HAL plugin directory (`/Library/Audio/Plug-Ins/HAL/`) is system-owned and requires admin authorization to write. Ship a small privileged helper (SMJobBless or the modern equivalent at the time) invoked from the app on first run; make sure uninstall removes the plugin cleanly.
    - [ ] Packaging — likely a `.pkg` rather than `.dmg` lane, since the HAL plugin has to be copied into a system directory. Reassess the "no paid Apple Developer Program" constraint at this point: ad-hoc-signed HAL plugins may work for local install but probably require user-driven Security & Privacy approval each install, which is a worse UX than the v1 Gatekeeper one-time step. Keep the ad-hoc lane available; offer Developer-ID-signed `.pkg` only if the distribution audience demands it.
    - [ ] Testing strategy — the HAL plugin itself needs to be tested against a real Core Audio host (no easy way to stub the HAL's other side); add a Swift test that opens the virtual device from an `AVAudioEngine` client and verifies round-trip samples via a routed path. C++ tests cover the engine-side virtual-endpoint handling with a simulated backend.
-   - [ ] Interaction with the hog-mode opt-out from item 6 — they are independent. The virtual device never hogs itself (nonsensical for an in-process device); real devices behave as today, subject to the per-route flag.
+   - [ ] Interaction with the hog-mode opt-out (landed in Phase 7.5) — they are independent. The virtual device never hogs itself (nonsensical for an in-process device); real devices behave as today, subject to the per-route flag.
 
 Each of these gets its own short spec update and its own mini-plan at the time of implementation.

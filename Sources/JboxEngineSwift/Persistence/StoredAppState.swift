@@ -47,31 +47,40 @@ public struct StoredPreferences: Codable, Equatable, Sendable {
     /// so the user's choice survives relaunch instead of living only
     /// in `UserDefaults` alongside the other preferences.
     public var showDiagnostics: Bool
+    /// Global default for the per-route "Share device with other apps"
+    /// preference (Phase 7.5; spec § 2.7 "Device sharing"). When
+    /// `true`, newly-created routes inherit `shareDevices = true`
+    /// unless the route editor overrides per-route. Default `false`
+    /// preserves pre-Phase-7.5 exclusive behaviour.
+    public var shareDevicesByDefault: Bool
 
     public init(launchAtLogin: Bool = false,
                 bufferSizePolicy: BufferSizePolicy = .useDeviceSetting,
                 resamplerQuality: Engine.ResamplerQuality = .mastering,
                 appearance: AppearanceMode = .system,
                 showMetersInMenuBar: Bool = false,
-                showDiagnostics: Bool = false) {
-        self.launchAtLogin       = launchAtLogin
-        self.bufferSizePolicy    = bufferSizePolicy
-        self.resamplerQuality    = resamplerQuality
-        self.appearance          = appearance
-        self.showMetersInMenuBar = showMetersInMenuBar
-        self.showDiagnostics     = showDiagnostics
+                showDiagnostics: Bool = false,
+                shareDevicesByDefault: Bool = false) {
+        self.launchAtLogin         = launchAtLogin
+        self.bufferSizePolicy      = bufferSizePolicy
+        self.resamplerQuality      = resamplerQuality
+        self.appearance            = appearance
+        self.showMetersInMenuBar   = showMetersInMenuBar
+        self.showDiagnostics       = showDiagnostics
+        self.shareDevicesByDefault = shareDevicesByDefault
     }
 
     // Missing keys fall back to the struct's defaults rather than
     // failing decode — additive fields don't break existing files.
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
-        self.launchAtLogin       = try c.decodeIfPresent(Bool.self, forKey: .launchAtLogin) ?? false
-        self.bufferSizePolicy    = try c.decodeIfPresent(BufferSizePolicy.self, forKey: .bufferSizePolicy) ?? .useDeviceSetting
-        self.resamplerQuality    = try c.decodeIfPresent(Engine.ResamplerQuality.self, forKey: .resamplerQuality) ?? .mastering
-        self.appearance          = try c.decodeIfPresent(AppearanceMode.self, forKey: .appearance) ?? .system
-        self.showMetersInMenuBar = try c.decodeIfPresent(Bool.self, forKey: .showMetersInMenuBar) ?? false
-        self.showDiagnostics     = try c.decodeIfPresent(Bool.self, forKey: .showDiagnostics) ?? false
+        self.launchAtLogin         = try c.decodeIfPresent(Bool.self, forKey: .launchAtLogin) ?? false
+        self.bufferSizePolicy      = try c.decodeIfPresent(BufferSizePolicy.self, forKey: .bufferSizePolicy) ?? .useDeviceSetting
+        self.resamplerQuality      = try c.decodeIfPresent(Engine.ResamplerQuality.self, forKey: .resamplerQuality) ?? .mastering
+        self.appearance            = try c.decodeIfPresent(AppearanceMode.self, forKey: .appearance) ?? .system
+        self.showMetersInMenuBar   = try c.decodeIfPresent(Bool.self, forKey: .showMetersInMenuBar) ?? false
+        self.showDiagnostics       = try c.decodeIfPresent(Bool.self, forKey: .showDiagnostics) ?? false
+        self.shareDevicesByDefault = try c.decodeIfPresent(Bool.self, forKey: .shareDevicesByDefault) ?? false
     }
 }
 
@@ -99,6 +108,13 @@ public struct StoredRoute: Codable, Equatable, Identifiable, Sendable {
     public var modifiedAt: Date
     public var latencyMode: LatencyMode
     public var bufferFrames: UInt32?
+    /// Per-route override of the share-device default (Phase 7.5).
+    /// `nil` means "inherit `StoredPreferences.shareDevicesByDefault`";
+    /// non-nil pins the choice regardless of the global default. The
+    /// optionality matters for routes imported from pre-Phase-7.5
+    /// state files — they decode to `nil` and follow whatever default
+    /// the user has picked rather than being pinned to `false`.
+    public var shareDevices: Bool?
 
     public init(id: UUID,
                 name: String,
@@ -109,7 +125,8 @@ public struct StoredRoute: Codable, Equatable, Identifiable, Sendable {
                 createdAt: Date,
                 modifiedAt: Date,
                 latencyMode: LatencyMode = .off,
-                bufferFrames: UInt32? = nil) {
+                bufferFrames: UInt32? = nil,
+                shareDevices: Bool? = nil) {
         self.id           = id
         self.name         = name
         self.isAutoName   = isAutoName
@@ -120,6 +137,7 @@ public struct StoredRoute: Codable, Equatable, Identifiable, Sendable {
         self.modifiedAt   = modifiedAt
         self.latencyMode  = latencyMode
         self.bufferFrames = bufferFrames
+        self.shareDevices = shareDevices
     }
 
     public init(from decoder: Decoder) throws {
@@ -134,6 +152,7 @@ public struct StoredRoute: Codable, Equatable, Identifiable, Sendable {
         self.modifiedAt   = try c.decode(Date.self, forKey: .modifiedAt)
         self.latencyMode  = try c.decodeIfPresent(LatencyMode.self, forKey: .latencyMode) ?? .off
         self.bufferFrames = try c.decodeIfPresent(UInt32.self, forKey: .bufferFrames)
+        self.shareDevices = try c.decodeIfPresent(Bool.self, forKey: .shareDevices)
     }
 }
 

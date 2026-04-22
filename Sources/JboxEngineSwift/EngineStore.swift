@@ -56,19 +56,26 @@ public struct RouteConfig: Equatable, Sendable {
     /// (currently 64). Non-nil is clamped by the HAL into the
     /// device's supported range when the route starts.
     public var bufferFrames: UInt32?
+    /// Phase 7.5: opt out of Jbox's default hog-mode policy so other
+    /// apps can keep using the route's device(s). The engine silently
+    /// demotes Performance-tier routes with `shareDevices = true` to
+    /// Low and surfaces the downgrade via `RouteStatus.shareDowngraded`.
+    public var shareDevices: Bool
 
     public init(source: DeviceReference,
                 destination: DeviceReference,
                 mapping: [ChannelEdge],
                 name: String? = nil,
                 latencyMode: LatencyMode = .off,
-                bufferFrames: UInt32? = nil) {
+                bufferFrames: UInt32? = nil,
+                shareDevices: Bool = false) {
         self.source = source
         self.destination = destination
         self.mapping = mapping
         self.name = name
         self.latencyMode = latencyMode
         self.bufferFrames = bufferFrames
+        self.shareDevices = shareDevices
     }
 
     public var displayName: String {
@@ -322,7 +329,8 @@ public final class EngineStore {
                 mapping: config.mapping,
                 name: config.name ?? "",
                 latencyMode: config.latencyMode,
-                bufferFrames: config.bufferFrames ?? 0
+                bufferFrames: config.bufferFrames ?? 0,
+                shareDevice: config.shareDevices
             )
             let status = try engine.pollStatus(id)
             let route = Route(id: id, config: config, status: status,
@@ -511,7 +519,8 @@ public final class EngineStore {
                 mapping: newConfig.mapping,
                 name: newConfig.name ?? "",
                 latencyMode: newConfig.latencyMode,
-                bufferFrames: newConfig.bufferFrames ?? 0)
+                bufferFrames: newConfig.bufferFrames ?? 0,
+                shareDevice: newConfig.shareDevices)
         } catch {
             // Best-effort rollback so the user isn't left without their route.
             if wasActive {

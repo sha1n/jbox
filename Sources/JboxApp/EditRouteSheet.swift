@@ -24,6 +24,7 @@ struct EditRouteSheet: View {
     @State private var customName: String = ""
     @State private var latencyMode: LatencyMode = .off
     @State private var bufferFrames: UInt32 = 0
+    @State private var shareDevices: Bool = false
     @State private var errorMessage: String?
 
     private static let kBufferSizeChoices: [UInt32] = [
@@ -66,6 +67,7 @@ struct EditRouteSheet: View {
         if latencyMode != route.config.latencyMode       { return true }
         let effectiveBuffer = bufferFrames == 0 ? nil : bufferFrames
         if effectiveBuffer != route.config.bufferFrames  { return true }
+        if shareDevices != route.config.shareDevices     { return true }
         return false
     }
 
@@ -167,11 +169,19 @@ struct EditRouteSheet: View {
                     Picker("Latency mode", selection: $latencyMode) {
                         Text("Off — safe default").tag(LatencyMode.off)
                         Text("Low").tag(LatencyMode.low)
-                        Text("Performance").tag(LatencyMode.performance)
+                        Text(shareDevices ? "Performance — unavailable when sharing" : "Performance")
+                            .tag(LatencyMode.performance)
                     }
                     .pickerStyle(.menu)
 
-                    if latencyMode == .performance {
+                    Toggle("Share device with other apps", isOn: $shareDevices)
+                    if shareDevices {
+                        Text("Performance requires exclusive device access and is unavailable while sharing.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+
+                    if latencyMode == .performance && !shareDevices {
                         Picker("Buffer size", selection: $bufferFrames) {
                             Text("Default (64)").tag(UInt32(0))
                             ForEach(bufferSizeOptions, id: \.self) { frames in
@@ -206,6 +216,11 @@ struct EditRouteSheet: View {
         }
         .frame(minWidth: 520, minHeight: 460)
         .onAppear(perform: prefillFromRoute)
+        .onChange(of: shareDevices) { _, sharing in
+            if sharing && latencyMode == .performance {
+                latencyMode = .low
+            }
+        }
     }
 
     // MARK: Actions
@@ -217,6 +232,7 @@ struct EditRouteSheet: View {
         customName   = route.config.name ?? ""
         latencyMode  = route.config.latencyMode
         bufferFrames = route.config.bufferFrames ?? 0
+        shareDevices = route.config.shareDevices
     }
 
     private func apply() {
@@ -227,7 +243,8 @@ struct EditRouteSheet: View {
             mapping: MappingPair.toEdges(pairs),
             name: trimmedName.isEmpty ? nil : trimmedName,
             latencyMode: latencyMode,
-            bufferFrames: bufferFrames == 0 ? nil : bufferFrames)
+            bufferFrames: bufferFrames == 0 ? nil : bufferFrames,
+            shareDevices: shareDevices)
         do {
             _ = try store.replaceRoute(route.id, with: newConfig)
             onClose()

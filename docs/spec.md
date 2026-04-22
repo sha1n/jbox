@@ -104,7 +104,7 @@ destination device IOProc (RT thread)
 - Semantic versioning: `MAJOR.MINOR.PATCH`.
   - Additions (new functions, new enum values, new fields appended to structs) are `MINOR` bumps.
   - Breaking changes (removed functions, renamed symbols, reordered struct fields, behavior changes) are `MAJOR` bumps.
-- Current ABI version is `8`. History: v1 initial; v2 appended `estimated_latency_us`; v3 appended `low_latency`; v4 added latency-component polling; v5 renamed `low_latency` → `latency_mode` (three tiers); v6 appended `buffer_frames`; v7 added `jbox_engine_rename_route`; v8 added `jbox_engine_set_resampler_quality` + `jbox_engine_resampler_quality` (engine-wide SRC preset, see § 2.5).
+- Current ABI version is `9`. History: v1 initial; v2 appended `estimated_latency_us`; v3 appended `low_latency`; v4 added latency-component polling; v5 renamed `low_latency` → `latency_mode` (three tiers); v6 appended `buffer_frames`; v7 added `jbox_engine_rename_route`; v8 added `jbox_engine_set_resampler_quality` + `jbox_engine_resampler_quality` (engine-wide SRC preset, see § 2.5); v9 appended `share_device` to `jbox_route_config_t` and `status_flags` to `jbox_route_status_t`, with `JBOX_ROUTE_STATUS_SHARE_DOWNGRADE` for the Performance → Low demotion surface (see § 2.7 "Device sharing").
 - The bridge header `jbox_engine.h` defines a `JBOX_ENGINE_ABI_VERSION` macro; clients may check it at compile time and at runtime via `jbox_engine_abi_version()`.
 
 ---
@@ -289,7 +289,7 @@ The trade-off is inherent to setpoint size: drain headroom before underrun equal
 
 Note: the HAL buffer-frame-size property is visible to every process. Other applications using the same device observe the buffer change for the duration of the route's lifetime; when the route stops and the mux releases exclusive ownership, those apps reconnect and see the restored size. This is documented in the UI copy for the Performance tier.
 
-**Device sharing (hog-mode opt-out).** Hog-mode ownership is what guarantees the requested buffer size actually lands, but it also disconnects every other client of the device for the route's lifetime — Music, browsers, conferencing apps playing through the same device go silent until the route stops. For users who prefer coexistence over a guaranteed small buffer, Jbox exposes a per-route `share_device` flag (default governed by a global preference). When set, the route skips `claimExclusive` entirely and takes the shared-client path that already exists as the fall-through when hog-mode acquisition fails: the route runs at whatever buffer size the HAL currently has (driven by the loudest shared-mode client), and the Performance-tier direct-monitor fast path is unavailable — the UI degrades those tiers to Low latency for the affected route. The flag is advisory when the route is the sole client of the device (no other app contests hog mode, and the buffer request lands either way) and load-bearing when it is not. Engine-side the flag is a single bit on the route record gating the existing `dm_.backend().claimExclusive(...)` call; clients pass it through a new field in `RouteConfig`, which requires a `JBOX_ENGINE_ABI_VERSION` MINOR bump and matching additive symbols for the global default.
+**Device sharing (hog-mode opt-out).** Hog-mode ownership is what guarantees the requested buffer size actually lands, but it also disconnects every other client of the device for the route's lifetime — Music, browsers, conferencing apps playing through the same device go silent until the route stops. Phase 7.5 lands a per-route `share_device` flag (default governed by a global preference). When set, the route skips `claimExclusive` entirely and takes the shared-client path that already exists as the fall-through when hog-mode acquisition fails: the route runs at whatever buffer size the HAL currently has (driven by the loudest shared-mode client), and the Performance-tier direct-monitor fast path is unavailable — the engine silently demotes those routes to Low latency and surfaces the decision through the `JBOX_ROUTE_STATUS_SHARE_DOWNGRADE` bit on `jbox_route_status_t::status_flags` (ABI v9+). Engine-side the flag is a single bit on the route record that gates the duplex fast-path `claimExclusive` call and flows into `DeviceIOMux::attachInput/attachOutput` where a `non_sharing_attached` refcount (parallel to the existing buffer-min refcount) drives the mux's hog-mode claim: `claimExclusive` fires on the 0→1 edge of that counter, `releaseExclusive` on the 1→0. Buffer-size-min negotiation stays tied to the overall refcount so sharing routes still participate. Mixed-mode rule: when two routes share the same device with mismatched flags, the non-sharing route always wins — the device is hog-held until that route detaches. This is correct behaviour (the opposite would silently violate the non-sharing route's latency guarantee); it is surprising, so the route row's lock glyph names the route currently holding hog mode. Clients opt in through the `share_device` field on `jbox_route_config_t` (ABI v9); the Swift layer keeps the global-default value on the `StoredPreferences.shareDevicesByDefault` side, resolving `effective = route.shareDevices ?? default` at route-start time so the engine only ever sees a concrete bool.
 
 ### 2.8 Metering
 
@@ -449,6 +449,8 @@ struct StoredRoute: Codable, Identifiable, Equatable {
 
 `latencyMode` and `bufferFrames` extend the original v1 field list — without persisting them, per-route Performance-mode choices would reset on every relaunch. Both are optional on decode (defaults `.off` and `nil`) so pre-Phase-7 files still load.
 
+Phase 7.5 adds a `shareDevices: Bool?` field (see § 2.7). `nil` means "inherit `StoredPreferences.shareDevicesByDefault`"; non-nil pins the user's explicit per-route choice. Missing key on decode yields `nil` so pre-Phase-7.5 state files still load and pick up whatever default the user has picked.
+
 **v1 invariants** on `mapping`:
 - Each `dst` appears at most once. (Writing two edges into the same destination channel would be summing / fan-in — deferred per Appendix A.)
 - A `src` may appear on multiple edges — 1:N fan-out is allowed. Each such edge gets its own converter output slot; the scratch copy duplicates the sample into every slot.
@@ -487,6 +489,7 @@ struct StoredPreferences: Codable, Equatable {
   var appearance: AppearanceMode                // default: .system
   var showMetersInMenuBar: Bool                 // default: false
   var showDiagnostics: Bool                     // default: false (Advanced tab toggle)
+  var shareDevicesByDefault: Bool               // default: false (Phase 7.5 routing default)
 }
 
 enum BufferSizePolicy: Codable, Equatable {
@@ -500,7 +503,7 @@ enum BufferSizePolicy: Codable, Equatable {
 // invalidate older `state.json` files.
 ```
 
-`BufferSizePolicy` encodes as a single integer on disk (0 = `useDeviceSetting`, N = `explicitOverride(frames: N)`) to keep the `state.json` diff readable and to match the existing `@AppStorage` `storedRaw` representation. `showDiagnostics` extends the original v1 field list — without persisting the Advanced-tab diagnostics toggle, the user's choice resets on every relaunch.
+`BufferSizePolicy` encodes as a single integer on disk (0 = `useDeviceSetting`, N = `explicitOverride(frames: N)`) to keep the `state.json` diff readable and to match the existing `@AppStorage` `storedRaw` representation. `showDiagnostics` extends the original v1 field list — without persisting the Advanced-tab diagnostics toggle, the user's choice resets on every relaunch. `shareDevicesByDefault` is the Phase 7.5 global default for the per-route "Share device with other apps" preference; see § 2.7 and § 4.3 for how it flows through the editor and the route resolution rule.
 
 #### 3.1.6 `AppState`
 
@@ -657,6 +660,7 @@ Opens as a sheet over the main window when the user adds a new route or edits an
 ```
 
 - **Reorderable** — drag items inside either channel list to change which source channel pairs with which destination channel.
+- **Share device with other apps** — Phase 7.5 checkbox. When on, Jbox does not take hog-mode ownership of the route's device, so Music / Zoom / Safari can keep using it while the route runs; the trade-off is that Jbox can no longer force a small HAL buffer, so the **Performance** tier picker option is disabled with inline copy "Performance requires exclusive device access." If Performance was selected when the user toggles sharing on, the tier snaps back to Low. Unchecking sharing re-enables Performance but does not auto-restore it — the user made a choice. Defaults to `StoredPreferences.shareDevicesByDefault`; per-route edits store as `Bool` and survive relaunch.
 - **Validation errors** shown inline: "Source and destination must have the same channel count", "Destination channel already in use" (fan-in is deferred per Appendix A), etc. Duplicate source channels are allowed and produce fan-out.
 - **Save** / **Cancel** buttons. No partial saves; the route is committed atomically.
 
@@ -690,6 +694,7 @@ Standard macOS settings window (`SwiftUI.Settings` scene) with three tabs, imple
 - **Audio** —
     - **Buffer-size policy**: "Use each device's current setting" (default) / "Explicit override: N frames" for each of 32 / 64 / 128 / 256 / 512 / 1024. The selected value seeds the Performance-mode buffer-size picker in `AddRouteSheet` the first time the user switches into that tier on a new route; per-route overrides are preserved and not retroactively reconfigured. Values the currently-selected devices can't honour fall back to the tier default (64) rather than forcing an HAL clamp.
     - **Resampler quality**: Mastering (default) / High Quality. Pushed through the engine via ABI v8 (`jbox_engine_set_resampler_quality`) and applied to newly-started routes only — already-running routes keep the preset their converter was built with until stopped and started again. Footer copy states this explicitly. See § 2.5.
+    - **Routing defaults → Share devices with other apps by default** (Phase 7.5): toggle that governs the initial state of each new route's "Share device with other apps" checkbox. Existing routes carry their stored `Bool?` choice; changing the default does not retroactively rewrite them. See § 2.7.
 - **Advanced** —
     - **Show engine diagnostics** toggle (off by default; when on, the expanded meter panel surfaces the `frames_produced / frames_consumed · u<K>` counters and the per-side estimated-latency breakdown). Already landed pre-Preferences; key preserved.
     - **Open Logs Folder** button — reveals `~/Library/Logs/Jbox` in Finder, creating the directory on demand. The rotating file sink itself lands with Phase 8 packaging; until then `Console.app` / `log stream --predicate 'subsystem == "com.jbox.app"'` is the authoritative source and this button exists primarily to point users at where the files will live.

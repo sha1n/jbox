@@ -113,6 +113,18 @@ struct RouteRecord {
     // path requests. 0 means the tier default is used.
     std::uint32_t buffer_frames_override = 0;
 
+    // Device-sharing opt-out (ABI v9). When true, attemptStart skips
+    // claimExclusive and the mux tracks this route under its
+    // non_sharing_attached counter only as a bystander. Default false
+    // preserves the pre-v9 exclusive behaviour.
+    bool share_device = false;
+    // Runtime flag set during attemptStart when a Performance-tier
+    // route is silently demoted to Low because share_device is set.
+    // Surfaces through jbox_route_status_t::status_flags so the UI
+    // can explain the picker-reads-Low-after-saving-Performance
+    // surprise without the engine reaching up into it.
+    bool share_downgraded = false;
+
     std::uint32_t channels_count        = 0;
     std::uint32_t source_total_channels = 0;
     std::uint32_t dest_total_channels   = 0;
@@ -173,6 +185,10 @@ public:
         // path. 0 means "use the tier default". Clamped by the HAL
         // into the device's supported range on apply.
         std::uint32_t                    buffer_frames = 0;
+        // Opt-out of Jbox's default exclusive-ownership (hog-mode)
+        // policy. See docs/spec.md § 2.7 "Device sharing". Default
+        // false preserves today's behaviour.
+        bool                             share_device  = false;
     };
 
     // Add a route in state STOPPED. Returns the new id on success, or

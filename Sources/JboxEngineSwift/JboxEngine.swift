@@ -103,6 +103,14 @@ public struct RouteStatus: Equatable, Hashable, Sendable {
     /// engine could not determine a sample rate. Not updated while
     /// running; a stop + start refreshes the estimate.
     public let estimatedLatencyUs: UInt64
+    /// ABI v9 status flags. Bit 0 = SHARE_DOWNGRADE (Performance-tier
+    /// route silently demoted to Low because shareDevices is set).
+    public let statusFlags: UInt32
+
+    /// Convenience accessor for the SHARE_DOWNGRADE bit.
+    public var shareDowngraded: Bool {
+        (statusFlags & UInt32(JBOX_ROUTE_STATUS_SHARE_DOWNGRADE)) != 0
+    }
 
     public init(state: RouteState,
                 lastError: jbox_error_code_t,
@@ -110,7 +118,8 @@ public struct RouteStatus: Equatable, Hashable, Sendable {
                 framesConsumed: UInt64,
                 underrunCount: UInt64,
                 overrunCount: UInt64,
-                estimatedLatencyUs: UInt64 = 0) {
+                estimatedLatencyUs: UInt64 = 0,
+                statusFlags: UInt32 = 0) {
         self.state = state
         self.lastError = lastError
         self.framesProduced = framesProduced
@@ -118,6 +127,7 @@ public struct RouteStatus: Equatable, Hashable, Sendable {
         self.underrunCount = underrunCount
         self.overrunCount = overrunCount
         self.estimatedLatencyUs = estimatedLatencyUs
+        self.statusFlags = statusFlags
     }
 }
 
@@ -363,7 +373,8 @@ public final class Engine {
                          mapping: [ChannelEdge],
                          name: String = "",
                          latencyMode: LatencyMode = .off,
-                         bufferFrames: UInt32 = 0) throws -> UInt32 {
+                         bufferFrames: UInt32 = 0,
+                         shareDevice: Bool = false) throws -> UInt32 {
         guard let h = handle else {
             throw JboxError(code: JBOX_ERR_INTERNAL, message: "engine not initialised")
         }
@@ -381,7 +392,8 @@ public final class Engine {
                             mapping_count: cEdges.count,
                             name: name.isEmpty ? nil : namePtr,
                             latency_mode: latencyMode.rawValue,
-                            buffer_frames: bufferFrames
+                            buffer_frames: bufferFrames,
+                            share_device: shareDevice ? 1 : 0
                         )
                         var err = jbox_error_t(code: JBOX_OK, message: nil)
                         let id = jbox_engine_add_route(
@@ -462,7 +474,8 @@ public final class Engine {
             framesConsumed: out.frames_consumed,
             underrunCount: out.underrun_count,
             overrunCount: out.overrun_count,
-            estimatedLatencyUs: out.estimated_latency_us
+            estimatedLatencyUs: out.estimated_latency_us,
+            statusFlags: out.status_flags
         )
     }
 

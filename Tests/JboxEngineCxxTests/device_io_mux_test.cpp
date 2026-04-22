@@ -360,3 +360,85 @@ TEST_CASE("DeviceIOMux: request on input + output of same device shares one shri
     REQUIRE(backend.bufferSizeRequests().size() == 1);
     REQUIRE(backend.currentBufferFrameSize("duplex") == 1024);
 }
+
+// ---------------------------------------------------------------------------
+// Phase 7.5 — share_device parallel counter.
+// ---------------------------------------------------------------------------
+
+TEST_CASE("DeviceIOMux: share_device attach does not claim exclusive",
+          "[device_io_mux][share_device]") {
+    SimulatedBackend backend;
+    backend.addDevice(makeInput("dev", 2));
+
+    DeviceIOMux mux(backend, "dev", /*in*/ 2, /*out*/ 0);
+    InputSink sink;
+    REQUIRE(mux.attachInput(&sink, &inputSinkCallback, &sink,
+                            /*requested_buffer_frames*/ 64,
+                            /*share_device*/ true));
+    // Hog mode must not be held — other apps can keep using the device.
+    REQUIRE_FALSE(backend.isExclusive("dev"));
+    mux.detachInput(&sink);
+    REQUIRE_FALSE(backend.isExclusive("dev"));
+}
+
+TEST_CASE("DeviceIOMux: mixed sharing and non-sharing routes — hog tied to the latter",
+          "[device_io_mux][share_device]") {
+    // The non-sharing route drives hog-mode acquisition; the sharing
+    // route neither bumps nor releases the counter. When the sharing
+    // route detaches first, hog mode stays. When the non-sharing
+    // route detaches, hog mode releases, even though the sharing
+    // route is still attached.
+    SimulatedBackend backend;
+    backend.addDevice(makeInput("dev", 2));
+
+    DeviceIOMux mux(backend, "dev", /*in*/ 2, /*out*/ 0);
+
+    InputSink non_sharing;
+    InputSink sharing;
+
+    // Non-sharing attach first → hog claim should fire on 0→1.
+    REQUIRE(mux.attachInput(&non_sharing, &inputSinkCallback, &non_sharing,
+                            /*req*/ 64, /*share*/ false));
+    REQUIRE(backend.isExclusive("dev"));
+
+    // Sharing attach → counter stays at 1, no additional claim.
+    REQUIRE(mux.attachInput(&sharing, &inputSinkCallback, &sharing,
+                            /*req*/ 64, /*share*/ true));
+    REQUIRE(backend.isExclusive("dev"));
+
+    // Detach the sharing route first → still held by the non-sharing one.
+    mux.detachInput(&sharing);
+    REQUIRE(backend.isExclusive("dev"));
+
+    // Detach the non-sharing route → 1→0 edge, release fires.
+    mux.detachInput(&non_sharing);
+    REQUIRE_FALSE(backend.isExclusive("dev"));
+}
+
+TEST_CASE("DeviceIOMux: sharing route detaches first, non-sharing still holds hog",
+          "[device_io_mux][share_device]") {
+    // Symmetric to the above, but sharing attaches first.
+    SimulatedBackend backend;
+    backend.addDevice(makeInput("dev", 2));
+
+    DeviceIOMux mux(backend, "dev", /*in*/ 2, /*out*/ 0);
+
+    InputSink sharing;
+    InputSink non_sharing;
+
+    REQUIRE(mux.attachInput(&sharing, &inputSinkCallback, &sharing,
+                            /*req*/ 0, /*share*/ true));
+    REQUIRE_FALSE(backend.isExclusive("dev"));
+
+    REQUIRE(mux.attachInput(&non_sharing, &inputSinkCallback, &non_sharing,
+                            /*req*/ 64, /*share*/ false));
+    REQUIRE(backend.isExclusive("dev"));
+
+    mux.detachInput(&non_sharing);
+    REQUIRE_FALSE(backend.isExclusive("dev"));
+
+    // Buffer-size min semantics are independent: the remaining sharing
+    // route's request (0 = no opinion) should not drive a new shrink.
+    mux.detachInput(&sharing);
+    REQUIRE_FALSE(backend.isExclusive("dev"));
+}

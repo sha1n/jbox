@@ -95,6 +95,8 @@ jbox::control::RouteManager::RouteConfig convertRouteConfig(
     const std::uint32_t raw_mode = cfg.latency_mode;
     out.latency_mode  = raw_mode <= 2 ? static_cast<std::uint8_t>(raw_mode) : 0;
     out.buffer_frames = cfg.buffer_frames;
+    // ABI v9: any non-zero treated as true (the C type is uint8_t).
+    out.share_device  = cfg.share_device != 0;
     out.mapping.reserve(cfg.mapping_count);
     for (std::size_t i = 0; i < cfg.mapping_count; ++i) {
         out.mapping.push_back({

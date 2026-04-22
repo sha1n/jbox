@@ -77,7 +77,7 @@ struct BufferSizePolicyCodableTests {
 
 @Suite("StoredPreferences Codable")
 struct StoredPreferencesCodableTests {
-    @Test("defaults match spec § 3.1.5 (+ showDiagnostics extension)")
+    @Test("defaults match spec § 3.1.5 (+ showDiagnostics / shareDevicesByDefault extensions)")
     func defaultsMatchSpec() {
         let p = StoredPreferences()
         #expect(p.launchAtLogin == false)
@@ -86,6 +86,18 @@ struct StoredPreferencesCodableTests {
         #expect(p.appearance == .system)
         #expect(p.showMetersInMenuBar == false)
         #expect(p.showDiagnostics == false)
+        #expect(p.shareDevicesByDefault == false)
+    }
+
+    @Test("shareDevicesByDefault round-trips and defaults to false on missing key")
+    func shareDevicesByDefaultRoundTrip() throws {
+        let on = StoredPreferences(shareDevicesByDefault: true)
+        #expect(try JSON.roundTrip(on).shareDevicesByDefault == true)
+        // Missing key on a pre-Phase-7.5 state.json decodes to the
+        // safe default (preserves today's exclusive behaviour).
+        let data = Data("{}".utf8)
+        let decoded = try JSON.decoder.decode(StoredPreferences.self, from: data)
+        #expect(decoded.shareDevicesByDefault == false)
     }
 
     @Test("showDiagnostics round-trips and defaults to false on missing key")
@@ -193,6 +205,47 @@ struct StoredRouteCodableTests {
         let copy = try JSON.roundTrip(r)
         #expect(copy.mapping == fanout)
         #expect(copy.mapping.count == 3)
+    }
+
+    @Test("shareDevices round-trips as Bool? (nil inherits global default)")
+    func shareDevicesRoundTrip() throws {
+        // nil means "inherit the global default" — the resolution
+        // rule is exercised by AppStateShareDeviceResolutionTests
+        // below. Round-trip here pins the on-disk shape.
+        let withShare = StoredRoute(
+            id: UUID(), name: "share", isAutoName: false,
+            sourceDevice: DeviceReference(uid: "s", lastKnownName: "S"),
+            destDevice:   DeviceReference(uid: "d", lastKnownName: "D"),
+            mapping: [ChannelEdge(src: 0, dst: 0)],
+            createdAt: Date(), modifiedAt: Date(),
+            shareDevices: true)
+        #expect(try JSON.roundTrip(withShare).shareDevices == true)
+
+        let withoutShare = StoredRoute(
+            id: UUID(), name: "explicit-false", isAutoName: false,
+            sourceDevice: DeviceReference(uid: "s", lastKnownName: "S"),
+            destDevice:   DeviceReference(uid: "d", lastKnownName: "D"),
+            mapping: [ChannelEdge(src: 0, dst: 0)],
+            createdAt: Date(), modifiedAt: Date(),
+            shareDevices: false)
+        #expect(try JSON.roundTrip(withoutShare).shareDevices == false)
+    }
+
+    @Test("missing shareDevices key decodes to nil (pre-Phase-7.5 JSON)")
+    func shareDevicesMissingIsNil() throws {
+        let json = """
+        {
+          "id": "\(UUID().uuidString)",
+          "name": "legacy", "isAutoName": true,
+          "sourceDevice": {"uid": "s", "lastKnownName": "S"},
+          "destDevice":   {"uid": "d", "lastKnownName": "D"},
+          "mapping": [{"src": 0, "dst": 0}],
+          "createdAt":  "2026-01-01T00:00:00Z",
+          "modifiedAt": "2026-01-01T00:00:00Z"
+        }
+        """
+        let r = try JSON.decoder.decode(StoredRoute.self, from: Data(json.utf8))
+        #expect(r.shareDevices == nil)
     }
 
     @Test("missing latencyMode decodes to .off; missing bufferFrames to nil")

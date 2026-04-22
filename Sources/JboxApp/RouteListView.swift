@@ -190,9 +190,23 @@ struct RouteRow: View {
 
                 Spacer()
 
+                if route.status.shareDowngraded {
+                    // Phase 7.5: labeled pill — sits in the same
+                    // horizontal rhythm as the latency pill below,
+                    // visible without hover, self-explanatory.
+                    SharingPill()
+                }
+
                 if let latencyText = LatencyFormatter.pillText(
                     microseconds: route.status.estimatedLatencyUs) {
                     LatencyPill(text: latencyText)
+                }
+
+                if let hogHolder = hogHoldingRoute() {
+                    Image(systemName: "lock.fill")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .help(hogHolderTooltip(for: hogHolder))
                 }
 
                 if route.status.state == .running || route.status.state == .starting {
@@ -250,6 +264,32 @@ struct RouteRow: View {
     private var errorText: String? {
         guard route.status.state == .error else { return nil }
         return String(cString: jbox_error_code_name(route.status.lastError))
+    }
+
+    /// Return the running, non-sharing route (if any) that is causing
+    /// `route`'s source device to be hog-held. May be `self`; may be
+    /// another route that uses the same UID on either its source or
+    /// destination side (hog mode is per-device, not per-direction).
+    /// Returns `nil` when the device is not currently held — i.e.,
+    /// no running route has share_device == false on this UID.
+    private func hogHoldingRoute() -> Route? {
+        let uid = route.config.source.uid
+        return store.routes.first { r in
+            let active = r.status.state == .running || r.status.state == .starting
+            guard active, !r.config.shareDevices else { return false }
+            return r.config.source.uid == uid || r.config.destination.uid == uid
+        }
+    }
+
+    private func hogHolderTooltip(for holder: Route) -> String {
+        let device = route.config.source.lastKnownName
+        if holder.id == route.id {
+            return "Other apps can't use \(device) while this route is active."
+        } else {
+            let holderName = holder.config.displayName
+            return "Other apps can't use \(device) while route "
+                + "\"\(holderName)\" is active."
+        }
     }
 
     @ViewBuilder
@@ -329,6 +369,45 @@ struct LatencyPill: View {
                   + "buffers + ring + SRC). Indicative; some drivers "
                   + "under-report. See docs/spec.md § 2.12.")
             .accessibilityLabel("Estimated latency \(text)")
+    }
+}
+
+/// Phase 7.5 companion to `LatencyPill`. Shown on a route row when the
+/// engine silently demoted Performance → Low because the route has
+/// `shareDevices = true` (spec § 2.7). Same shape as `LatencyPill`
+/// (so the two sit in a single visual rhythm at the right edge of
+/// the row), tinted orange to draw attention — the user asked for
+/// Performance and is getting Low, and the colour cue makes that
+/// divergence discoverable without waiting for a tooltip.
+struct SharingPill: View {
+    var body: some View {
+        Label {
+            Text("Shared · Low")
+                .font(.caption2)
+        } icon: {
+            Image(systemName: "arrow.down.circle")
+                .font(.caption2)
+        }
+        .foregroundStyle(.orange)
+        .padding(.horizontal, 6)
+        .padding(.vertical, 2)
+        .background(
+            RoundedRectangle(cornerRadius: 4, style: .continuous)
+                .fill(Color.orange.opacity(0.15))
+        )
+        // Without `.contentShape`, hovering over the padded area
+        // around the icon + text doesn't trigger the tooltip — only
+        // the glyphs themselves are hit-testable. Extending the
+        // shape to the pill's full rounded rect matches its visual
+        // footprint and makes `.help(...)` reliable across the
+        // entire pill.
+        .contentShape(RoundedRectangle(cornerRadius: 4, style: .continuous))
+        .help("Performance latency tier is unavailable while this "
+              + "route is sharing its device with other apps. "
+              + "Running at Low instead. Uncheck \"Share device "
+              + "with other apps\" in the route editor to re-enable "
+              + "Performance.")
+        .accessibilityLabel("Sharing device, latency tier downgraded to Low")
     }
 }
 

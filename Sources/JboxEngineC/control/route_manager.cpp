@@ -313,6 +313,7 @@ jbox_route_id_t RouteManager::addRoute(const RouteConfig& cfg, jbox_error_t* err
     rec->mapping        = cfg.mapping;
     rec->latency_mode   = cfg.latency_mode;
     rec->buffer_frames_override = cfg.buffer_frames;
+    rec->share_device   = cfg.share_device;
     rec->channels_count = static_cast<std::uint32_t>(cfg.mapping.size());
     rec->state          = JBOX_ROUTE_STATE_STOPPED;
     rec->log_queue      = log_queue_;
@@ -379,6 +380,8 @@ jbox_error_code_t RouteManager::pollStatus(jbox_route_id_t id,
     out->underrun_count       = r.underrun_count.load(std::memory_order_relaxed);
     out->overrun_count        = r.overrun_count.load(std::memory_order_relaxed);
     out->estimated_latency_us = r.estimated_latency_us;
+    out->status_flags         = r.share_downgraded
+        ? JBOX_ROUTE_STATUS_SHARE_DOWNGRADE : 0u;
     return JBOX_OK;
 }
 
@@ -442,6 +445,21 @@ jbox_error_code_t RouteManager::attemptStart(RouteRecord& r) {
     r.reported_underrun.store(false, std::memory_order_relaxed);
     r.reported_overrun.store(false, std::memory_order_relaxed);
     r.reported_channel_mismatch.store(false, std::memory_order_relaxed);
+    r.share_downgraded = false;
+
+    // Phase 7.5: a share-device route can't coexist with the
+    // Performance-tier preset (the direct-monitor fast path needs
+    // exclusivity, and the ring/4 setpoint can't be defended without
+    // hog-mode buffer control). Compute an *effective* tier locally
+    // without mutating `r.latency_mode` — otherwise a second start()
+    // after a stop would re-enter with latency_mode already demoted,
+    // miss the check below, and silently drop the SHARE_DOWNGRADE
+    // flag from pollStatus on every subsequent start.
+    std::uint8_t effective_mode = r.latency_mode;
+    if (r.share_device && effective_mode == 2) {
+        effective_mode = 1;
+        r.share_downgraded = true;
+    }
 
     // Clear any stale meter peaks from a previous run. readAndReset
     // both reads (discarded) and atomically zeroes the stored peak.
@@ -484,7 +502,7 @@ jbox_error_code_t RouteManager::attemptStart(RouteRecord& r) {
     // collapses to HAL + one buffer period. Exclusive: the backend
     // refuses the duplex attach if any IOProc already targets the
     // device, so a pre-existing mux on this UID is a hard block.
-    if (r.latency_mode == 2 && r.source_uid == r.dest_uid) {
+    if (effective_mode == 2 && r.source_uid == r.dest_uid) {
         // Exclusivity: no other route on this device.
         if (muxes_.find(r.source_uid) != muxes_.end()) {
             r.state = JBOX_ROUTE_STATE_ERROR;
@@ -520,8 +538,16 @@ jbox_error_code_t RouteManager::attemptStart(RouteRecord& r) {
         // max-across-clients policy collapses to just our request.
         // Failure is non-fatal: we fall through to the shared path
         // and accept whatever buffer size the HAL ends up giving us.
-        r.duplex_exclusive_claimed =
-            dm_.backend().claimExclusive(r.source_uid);
+        //
+        // Phase 7.5: share-device routes skip claimExclusive entirely
+        // so other apps can keep using the device. Performance-tier
+        // is already impossible here because we demoted at the top of
+        // attemptStart, so reaching the duplex fast path with
+        // share_device == true would be a bug — leave the branch
+        // defensive anyway.
+        r.duplex_exclusive_claimed = r.share_device
+            ? false
+            : dm_.backend().claimExclusive(r.source_uid);
 
         // Request a small HAL buffer before opening the IOProc. The
         // target is the user's override if they supplied one
@@ -595,7 +621,7 @@ jbox_error_code_t RouteManager::attemptStart(RouteRecord& r) {
     // (`ring_target_fill_frames`), which we compute from the
     // post-shrink buffer sizes after the attach below.
     const RingSizing sizing = [&]() {
-        switch (r.latency_mode) {
+        switch (effective_mode) {
             case 2: return kRingPerformance;
             case 1: return kRingLowLatency;
             default: return kRingSafe;
@@ -673,13 +699,14 @@ jbox_error_code_t RouteManager::attemptStart(RouteRecord& r) {
     // against apps holding the device at a larger size.
     constexpr std::uint32_t kMuxDefaultBufferTarget = 64;
     const std::uint32_t mux_buffer_target =
-        r.latency_mode > 0
+        effective_mode > 0
             ? (r.buffer_frames_override > 0
                    ? r.buffer_frames_override
                    : kMuxDefaultBufferTarget)
             : 0;
 
-    if (!src_mux.attachInput(&r, &inputIOProcCallback, &r, mux_buffer_target)) {
+    if (!src_mux.attachInput(&r, &inputIOProcCallback, &r,
+                             mux_buffer_target, r.share_device)) {
         destroyMuxIfUnused(r.source_uid);
         releaseRouteResources(r);
         r.state = JBOX_ROUTE_STATE_ERROR;
@@ -695,7 +722,8 @@ jbox_error_code_t RouteManager::attemptStart(RouteRecord& r) {
         r.dest_uid,
         dst->input_channel_count,
         dst->output_channel_count);
-    if (!dst_mux.attachOutput(&r, &outputIOProcCallback, &r, mux_buffer_target)) {
+    if (!dst_mux.attachOutput(&r, &outputIOProcCallback, &r,
+                              mux_buffer_target, r.share_device)) {
         // releaseRouteResources detaches the already-attached input
         // side and cleans up any mux we created.
         releaseRouteResources(r);
