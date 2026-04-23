@@ -30,7 +30,7 @@ The motivating workflow is routing two output channels of a Roland V31 USB sound
 
 - **Not a mixer.** Jbox does 1:N channel mapping (fan-out allowed). No summing / fan-in, no per-channel gain, no mute.
 - **Not a DAW.** No recording, no plugins, no timeline, no MIDI.
-- **Not a virtual audio driver in v1.** Jbox v1 does not create devices that other apps see — it routes between existing Core Audio devices. A userspace HAL plugin that publishes Jbox as a selectable input / output device is a planned post-v1 feature (see § 2.13 and Appendix A); v1 scope remains device-to-device routing only.
+- **Does not ship its own audio driver.** Jbox does not create or install a virtual audio device of its own. The virtual-output feature (§ 2.13) builds on **[BlackHole](https://github.com/ExistentialAudio/BlackHole)** (ExistentialAudio, MIT-licensed, Developer-ID signed + notarized), which the user installs separately via `.pkg` or `brew install blackhole-2ch`. Jbox then recognises BlackHole devices in its enumeration and treats them as virtual endpoints — apps targeting BlackHole as their output end up routed through Jbox to whichever real destination the user configured. An in-house `AudioServerPlugIn` was prototyped (archive branch `archive/phase7.6-own-driver`) and abandoned on 2026-04-23 when ad-hoc-signed bundles failed the macOS 13+ HAL-sandbox codesign check; the project's "no paid Apple Developer Program" constraint rules out Developer-ID signing that would have unblocked the own-driver path. DriverKit kernel extensions remain permanently out of scope.
 - **Not a broadcast router.** No network audio (Dante, AVB, NDI), no IP streaming.
 
 ### Core design principles
@@ -385,13 +385,42 @@ For same-rate routes (the common case) this degenerates to the frame-sum formula
 
 The engine computes this once at `startRoute` (no RT-thread cost) and surfaces it through the route status snapshot as `jbox_route_status_t::estimated_latency_us` (ABI v2+). Clients that need the per-component breakdown (Advanced / diagnostics UI) call `jbox_engine_poll_route_latency_components` (ABI v4+) which returns the frame counts + sample rates for each contributor alongside the same `total_us`. The UI shows an "~NN ms" estimate on the route row; an expanded breakdown is available in the diagnostics view when the user enables Advanced → "Show engine diagnostics". The number is **indicative, not ground truth** — some drivers (notably USB class-compliant) under-report hardware latency. A loopback-based measurement for authoritative verification is a Phase 9 deliverable.
 
-### 2.13 Deferred to future versions
+### 2.13 Virtual output via BlackHole
+
+**Purpose.** Let media apps (a browser streaming a video call, a DAW's monitor bus, anything with a system-output picker) target an in-process-to-Jbox virtual output device, which Jbox forwards to a real destination it continues to hold in hog mode. This decouples the buffer size media apps want (large, because that's what media apps use) from the buffer size Jbox's live-monitoring routes need (small, for lowest latency) — a reconciliation that is impossible on a single shared real device because macOS Core Audio runs all clients of a device at `max(client buffers)`. See § 2.7 for the underlying sharing constraint this feature exists to route around.
+
+**Transport.** Jbox does **not** ship its own HAL plugin. The virtual-output device is provided by **BlackHole** (ExistentialAudio, MIT-licensed, Developer-ID signed + notarized, installed separately by the user via `.pkg` or `brew install blackhole-2ch`). BlackHole publishes loopback devices (`BlackHole 2ch` / `16ch` / `64ch` variants) that appear in Core Audio as both input and output: samples written to BlackHole's output side appear on its input side. Jbox consumes that input like any other Core Audio input device and forwards to the user's chosen real destination. The engine never touches BlackHole internals — from Jbox's perspective, it is an ordinary Core Audio device that happens to be flagged as virtual.
+
+**Why BlackHole, not an in-house driver.** An in-house `AudioServerPlugIn` was designed and prototyped (archive branch `archive/phase7.6-own-driver`, commits `2f87ea3`..`1e6b5de`) but abandoned on 2026-04-23. On macOS 13+, `coreaudiod` loads HAL plugins out-of-process through a sandboxed Remote Driver service that enforces a real Apple-issued team identity; ad-hoc-signed bundles are rejected with `xpc_error=[159]`. The project's "no paid Apple Developer Program" constraint (§ 1.5, `CLAUDE.md § Tooling constraints`) is load-bearing, so Developer-ID signing is not an available escape. BlackHole already does the signing + notarization work on the user's behalf and is stable, free, and widely deployed; building on top of it preserves the constraint while delivering the feature.
+
+**Engine contract.** Devices whose Core Audio UID matches a BlackHole pattern (`BlackHole2ch_UID` / `BlackHole16ch_UID` / `BlackHole64ch_UID`, plus a defensive `^BlackHole` prefix fallback for future variants) carry `is_virtual = true` in `BackendDeviceInfo`. The route manager consults the flag:
+
+- A route whose **source** is virtual never triggers `claimExclusive` on the source device — there is no HAL buffer to shrink on the virtual side and hog mode on a loopback device is nonsensical. The destination side of the same route remains subject to the user's `share_device` preference from § 2.7 exactly as before.
+- `DriftSampler::sampleOnce` short-circuits to rate-identity (`setInputRate == nominal_rate`) when either endpoint is virtual. Both BlackHole and the real destination share the host's clock domain, so no measurable drift exists to correct on the virtual side; the PI loop still operates on the real side where the converter lives.
+- Routes that span two virtual endpoints are rejected at `addRoute` time — that combination is an in-memory copy with no HAL participation and would be better modelled as a dedicated internal-loopback feature if ever wanted.
+- ABI v9 → v10 (MINOR, additive) appends `uint8_t is_virtual` to `jbox_device_info_t`. No entry-point signature changes.
+
+**User installation.** BlackHole is a separate install that the user performs once: download the `.pkg` from [BlackHole's GitHub releases](https://github.com/ExistentialAudio/BlackHole/releases), double-click, approve the system extension in **System Settings → Privacy & Security**; or `brew install blackhole-2ch`. Jbox has no installer code of its own for this — the HAL plugin directory stays untouched by Jbox's `.app`. At first launch, if Jbox's enumeration does not surface any BlackHole device and the user has not previously dismissed the hint, a one-screen info sheet explains the dependency, links to the release page and `brew` command, and is dismissible for users who do not need virtual-output routing.
+
+**UI surfacing.** `AddRouteSheet` / `EditRouteSheet` device pickers label BlackHole entries `<device name> (Virtual device — BlackHole)` with the parenthetical in secondary colour; a tooltip explains that apps targeting this device send audio into Jbox. The route row itself shows no new indicator — virtual endpoints render like any other endpoint and the latency pill reflects only the real-side buffer contribution (BlackHole's internal loopback is an in-`coreaudiod` memcpy and contributes negligible latency at the granularity Jbox reports). Persistence needs no schema change — the virtual UID is just a string; a BlackHole UID referring to an uninstalled-BlackHole parks the route in WAITING until the user installs it, then transitions to RUNNING via the device-listener plumbing from § 2.3.
+
+**Packaging.** The existing ad-hoc-signed `.dmg` lane (§ 1.5) is the only distribution lane. No `.pkg` lane, no privileged installer helper, no `SMAppService` registration, no notarization. The "no paid Apple Developer Program" constraint stays intact end to end.
+
+**Non-goals.**
+
+- **Shipping our own HAL plugin.** Archived — see above.
+- **DriverKit DEXT.** Same signing wall, larger rewrite; no escape.
+- **Multi-BlackHole-device orchestration.** v1 supports any single BlackHole device per route; routing through multiple BlackHole variants in parallel is supported (it's just multiple routes with different source UIDs) but not a specially-surfaced feature.
+- **Bundling BlackHole inside Jbox.** License permits it, but the distribution story is cleaner when BlackHole is the user's explicit install — they own what they installed, Jbox owns Jbox.
+
+The phase checklist, sub-phase breakdown, and deviations live in [plan.md § Phase 7.6](./plan.md#phase-76--virtual-output-via-blackhole).
+
+### 2.14 Deferred to future versions
 
 - **Fan-in / summing mapping** (multiple sources → one destination). Requires mixer-domain decisions (summing attenuation, clipping handling, per-source gain); explicitly out of scope.
 - **Per-route gain and mute.** Would require a small DSP block in the engine; deferred until the user sees a concrete need.
 - **Internal CPU budget telemetry** (percentage of audio cycle used per callback). Nice to have; not required for v1.
 - **Alternative resampler backends** (libsamplerate, SoXr). Apple `AudioConverter` is sufficient; revisit if quality or performance ever disappoints.
-- **Virtual Core Audio device (Jbox as a selectable input / output).** A userspace HAL plugin (`.driver` bundle installed into `/Library/Audio/Plug-Ins/HAL/`) that publishes Jbox as a Core Audio device; other applications can then target it as an output (or record from it as an input), and the engine treats the virtual device as an ordinary source / destination UID. Requires a second signed binary with its own lifecycle, an installer path with admin authorization (the HAL plugin directory is system-owned and not writable from an ad-hoc-signed `.app`), a new engine contract for "source UID backed by an in-process virtual device" that skips the HAL `AudioDeviceIOProc` path and feeds samples through a direct SPSC ring, and a packaging story that survives uninstall cleanly. Complements the per-route hog-mode opt-out rather than replacing it: the opt-out lets other apps keep using a shared real device, the virtual device lets other apps deliberately route *through* Jbox. Not on the v1 path; design work tracked in the plan's deferred section. DriverKit kernel extensions are a separate matter and remain permanently out of scope — a userspace HAL plugin is sufficient.
 
 ---
 
@@ -953,8 +982,8 @@ Consolidated list of items explicitly deferred from v1, for easy cross-reference
 - `.pkg` installer.
 
 **Virtual devices.**
-- Userspace HAL plugin that publishes Jbox as a Core Audio device (as BlackHole / Loopback do). Deferred from v1, planned post-v1 — see § 2.13 for the engine-side contract and the plan's deferred section for the phase checklist. v1 routes between existing devices only.
-- DriverKit kernel extensions. Permanently out of scope — a userspace HAL plugin covers the same use cases without the code-signing burden.
+- Shipping our own HAL plugin that publishes Jbox as a Core Audio device. **Archived out of scope** — see § 2.13 for the BlackHole-based approach Jbox uses instead, and the `archive/phase7.6-own-driver` branch for the in-house HAL-plugin prototype that hit the macOS 13+ code-signing wall.
+- DriverKit kernel extensions. Permanently out of scope — same signing wall as the HAL plugin approach, larger rewrite, no escape.
 
 **UI scope extensions.**
 - Localization.
