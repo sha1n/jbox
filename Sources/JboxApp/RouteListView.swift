@@ -88,7 +88,7 @@ struct RouteListView: View {
                     "Engine error",
                     isPresented: .init(
                         get: { store.lastError != nil },
-                        set: { if !$0 { /* no dismiss hook yet */ } }
+                        set: { if !$0 { store.clearLastError() } }
                     )
                 ) {
                     Button("OK", role: .cancel) {}

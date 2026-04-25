@@ -348,6 +348,13 @@ public final class EngineStore {
         }
     }
 
+    /// Drop the most recent engine-error message. Called from the
+    /// view's "Engine error" alert dismiss binding so the alert doesn't
+    /// re-present on every render after the user taps OK.
+    public func clearLastError() {
+        lastError = nil
+    }
+
     public func startRoute(_ id: UInt32) {
         do {
             try engine.startRoute(id)

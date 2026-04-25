@@ -60,6 +60,38 @@ struct EngineStoreTests {
         #expect(store.routes.isEmpty)
     }
 
+    /// Regression for the infinite "Engine error" alert loop:
+    /// `RouteListView`'s alert was bound to a `Bool` whose setter was a
+    /// no-op, so once `lastError` went non-nil the alert re-fired on
+    /// every render forever. The fix exposes `clearLastError()`; the
+    /// view now calls it from the binding's setter on dismiss.
+    @Test("clearLastError() drops a previously-recorded engine error")
+    func clearLastErrorDropsRecordedError() throws {
+        let store = try makeStore()
+        store.refreshDevices()
+        let src = store.devices.first(where: { $0.directionInput })!
+        let dst = store.devices.first(where: { $0.directionOutput })!
+
+        // Drive lastError non-nil via the existing failure path.
+        do {
+            _ = try store.addRoute(RouteConfig(
+                source: DeviceReference(device: src),
+                destination: DeviceReference(device: dst),
+                mapping: []))
+            Issue.record("expected addRoute to fail with MAPPING_INVALID")
+        } catch is JboxError {
+            // expected — lastError is now set
+        }
+        #expect(store.lastError != nil)
+
+        store.clearLastError()
+        #expect(store.lastError == nil)
+
+        // Idempotent: a second call on a clean state stays clean.
+        store.clearLastError()
+        #expect(store.lastError == nil)
+    }
+
     @Test("addRoute with a duplicate destination edge is rejected before reaching the engine list")
     func addRouteDuplicateDst() throws {
         // Phase 6 refinement #1 flipped the duplicate-src rule —

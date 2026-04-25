@@ -18,7 +18,7 @@
 - [Phase 6 — SwiftUI UI](#phase-6--swiftui-ui)
 - [Phase 7 — Persistence, scenes, launch-at-login](#phase-7--persistence-scenes-launch-at-login)
 - [Phase 7.5 — Device sharing (hog-mode opt-out)](#phase-75--device-sharing-hog-mode-opt-out)
-- [Phase 7.6 — Virtual output via BlackHole](#phase-76--virtual-output-via-blackhole)
+- [Phase 7.6 — Self-routing reliability](#phase-76--self-routing-reliability)
 - [Phase 8 — Packaging and installation](#phase-8--packaging-and-installation)
 - [Phase 9 — Release hardening and device-level testing](#phase-9--release-hardening-and-device-level-testing)
 
@@ -38,7 +38,7 @@
 | 6+    | Logging pipeline                      | `os_log`-visible events for engine lifecycle, route mutations, and RT dropouts.       | 🚧 Option-B slice landed (drainer + Swift `Logger` wrappers + edge-triggered RT producers). Coverage closed in `7f778d2`. Rotating file sink still pending (Phase 8). |
 | 7     | Persistence, scenes, launch-at-login  | Relaunching the app restores configured routes and scenes.                             | 🚧 Persistence slice landed — routes + preferences round-trip through `state.json`. Scenes UI + launch-at-login still pending. |
 | 7.5   | Device sharing (hog-mode opt-out)     | Per-route and global "share device with other apps" preference; lock-glyph indicator when hog mode is active. | ✅ Landed (promoted from the post-v1.0.0 deferred list). |
-| 7.6   | Virtual output via BlackHole          | Jbox recognises a user-installed BlackHole device as a virtual endpoint so media apps can target a virtual output and have Jbox forward to a real destination held in hog mode. | ⏳ Pending. Pivoted from an earlier own-driver approach that hit the macOS 13+ HAL-sandbox codesign wall on ad-hoc bundles; the archived work lives on branch `archive/phase7.6-own-driver`. |
+| 7.6   | Self-routing reliability              | Aggregate-device + hardware-mixer self-routing is durable: first-start always produces audio, device hot-plug and sleep/wake recover cleanly, and engine errors never trap the UI in a popup loop. | 🚧 7.6.1 (alert-loop fix) landed; 7.6.2–7.6.5 pending. Pivoted from an earlier BlackHole-detection plan after the user verified the aggregate-device pattern already covers the v1 use case — see deviations. |
 | 8     | Packaging and installation            | `Jbox.app` runs from `/Applications` on a clean user account.                          | ⏳ Pending |
 | 9     | Release hardening                     | v1.0.0 tagged and published to GitHub Releases.                                        | ⏳ Pending |
 
@@ -544,88 +544,97 @@ Phase 7.5 summary of deviations:
 
 ---
 
-## Phase 7.6 — Virtual output via BlackHole
+## Phase 7.6 — Self-routing reliability
 
-**Status:** ⏳ Pending. Promoted from the post-v1.0.0 deferred list. Previously attempted as an in-house `AudioServerPlugIn`-based HAL plugin (archive branch `archive/phase7.6-own-driver`, commits `2f87ea3`..`1e6b5de`); pivoted on 2026-04-23 when ad-hoc-signed bundles hit the macOS 13+ HAL-sandbox codesign wall — see deviations.
+**Status:** 🚧 In progress. 7.6.1 (alert-loop fix) landed in this commit. 7.6.2–7.6.5 pending. Re-scoped on 2026-04-25 from a BlackHole-detection plan after the project owner validated, on real hardware, that the aggregate-device + hardware-mixer pattern already serves the v1 multi-source-monitoring use case — see deviations. The own-driver path archived earlier (branch `archive/phase7.6-own-driver`) stays archived.
 
-**Goal.** Unblock the two-interface live-monitoring use case that Phase 7.5 share mode cannot serve: shared real devices run at `max(client buffers)` in Core Audio, so a low-latency Jbox route sharing a destination with media apps inherits the apps' large buffer. The fix is a virtual output that media apps render to, which Jbox then forwards to the real destination it continues to hold in hog mode — so low-latency monitoring and app coexistence stop being mutually exclusive. The virtual-output device itself is provided by **[BlackHole](https://github.com/ExistentialAudio/BlackHole)** (ExistentialAudio, MIT-licensed, Developer-ID signed + notarized). Jbox recognises BlackHole devices in its enumeration and treats them as first-class virtual endpoints.
+**Goal.** Make Jbox's existing self-routing path durable enough to ship as v1's recommended topology. The route configuration *aggregate device → aggregate device* with the user's hardware-mixer-equipped interface as the destination already supports both *low-latency live monitoring* and *media apps coexisting on the same physical outputs*. What blocks confident shipping is reliability, not the absence of a virtual driver:
+
+1. **First start can fail silently** on aggregates with multiple sub-devices when only some sub-devices accept hog mode — `requestBufferFrameSize` then fans out to sub-devices we don't actually own and Core Audio's IOProc scheduler stalls (the same caveat documented in [Phase 7.5 deviations](#phase-75--device-sharing-hog-mode-opt-out), here biting the duplex fast path).
+2. **Engine errors trap the UI in a popup loop.** The "Engine error" alert binding's dismiss setter was a documented no-op, so once `EngineStore.lastError` went non-nil the alert re-presented on every render until the app was force-quit.
+3. **Devices "lost" mid-session never recover cleanly.** No HAL property listeners → Jbox doesn't notice when an aggregate's sub-device drops out, when a device hot-unplugs, or when the Mac sleeps; the next user-initiated stop/start tries to operate on stale `device_ids_` mappings, fails with `JBOX_ERR_DEVICE_BUSY`, and hits the popup loop above.
+4. **Teardown failures are masked.** `AudioDeviceDestroyIOProcID` and `AudioObjectSetPropertyData` (hog release) return values are ignored; partial teardown leaves orphan IOProcs / dangling hog mode that subsequent starts hit as "device busy."
+
+The aggregate-device pattern is functionally equivalent to a BlackHole-based transport for the v1 use case (apps target an aggregate output → the user's interface plays it; Jbox routes a hardware source to a different channel pair on the same interface; the interface's hardware mixer sums them onto monitor outs). Both paths require the same fixes below. We choose the aggregate-device path because it has zero install-time dependencies and works on any hardware-mixer-equipped interface — BlackHole remains an optional drop-in substitute for users who prefer it, but Jbox needs no BlackHole-specific code.
 
 **Entry criteria.** Phase 7.5 complete.
 
-**Why BlackHole, not our own driver.**
-
-- **Ad-hoc signing cannot load an `AudioServerPlugIn` on macOS 13+.** `coreaudiod` moved plugin loading out-of-process behind the Remote Driver XPC sandbox, which enforces a real Apple-issued team identity. Ad-hoc signatures satisfy `codesign -v` but fail the sandbox's entitlement check; the load surfaces as `xpc_error=[159]` "Remote driver service was unable to load plug-in".
-- **The project's "no paid Apple Developer Program" constraint is load-bearing**, not a soft preference — it is written into `CLAUDE.md § Tooling constraints`, `README.md § Non-goals`, and the user's standing feedback memory. Taking a Developer ID to unblock the own-driver path reopens that constraint and forces a scope rethink. BlackHole keeps the constraint intact.
-- **BlackHole already solves the transport problem, signed and notarized.** Users install it with a single `.pkg` (or `brew install blackhole-2ch`), approve the System Extension in Privacy & Security once, and the virtual device appears in Core Audio as an ordinary input + output. Jbox then consumes it like any other Core Audio device — no HAL plugin code, no cross-process shared-memory transport, no privileged installer helper, no `.pkg` distribution lane on our side.
-- **Tradeoff we accept:** dependency on a third-party app for the virtual-output flow. Mitigated by a one-screen first-run sheet that names the dependency, links to BlackHole's GitHub releases page + the `brew` one-liner, and is dismissible so the app never blocks launch. Onboarding friction is comparable to the first-run admin-prompt the in-house installer would have required, minus the signing wall.
-
 **Exit criteria.**
 
-- [ ] Jbox's device enumeration flags any device whose Core Audio UID matches a known BlackHole pattern (`BlackHole2ch_UID`, `BlackHole16ch_UID`, `BlackHole64ch_UID`, plus a defensive `BlackHole*` prefix fallback) as `is_virtual = true`.
-- [ ] `BackendDeviceInfo` carries `is_virtual: bool`; ABI v9 → v10 (MINOR, additive) appends `uint8_t is_virtual` to `jbox_device_info_t`.
-- [ ] `RouteManager` treats routes whose **source** is virtual as "never hog the virtual side" — `claimExclusive` never fires against a BlackHole UID. The destination side remains subject to the user's `share_device` preference from Phase 7.5.
-- [ ] `DriftSampler::sampleOnce` short-circuits to rate-identity when either endpoint of the route is virtual. A route-create-time assertion rejects routes where **both** endpoints are virtual (two virtual endpoints on the same host clock is a no-op routing that belongs in a dedicated feature, not v1).
-- [ ] `AddRouteSheet` / `EditRouteSheet` device pickers surface BlackHole entries with a "Virtual device (BlackHole)" label and a tooltip explaining the flow. No new indicator on the route row itself — virtual endpoints render like any other device.
-- [ ] First-run flow: if no BlackHole device is in the current enumeration AND the user has not previously dismissed the sheet (tracked in `StoredPreferences.blackholeInstallSheetDismissed: Bool`), `JboxApp` presents a one-screen info sheet on launch with the direct-download + `brew` options and a "Don't remind me" checkbox.
-- [ ] `StoredRoute` schema unchanged — the virtual UID is just a string. `restoreRoutes` tolerates a BlackHole UID referring to an uninstalled-BlackHole by parking the route in WAITING (same code path as any disconnected device); the scheduler's WAITING → RUNNING transition fires automatically once the user installs BlackHole and the UID appears.
-- [ ] `make verify` green on the combined diff, including new `[route_manager][virtual_device]` and `[device_manager][blackhole]` Catch2 cases.
-- [ ] README gains a three-line "Virtual output" subsection in the quick-start region pointing at BlackHole's install options.
+- [x] **7.6.1.** "Engine error" alert never re-presents after the user dismisses it. Regression test in `EngineStoreTests`.
+- [ ] **7.6.2.** Duplex-fast-path `requestBufferFrameSize` is gated on a *fully* successful aggregate hog claim (aggregate + every active sub-device). Partial-hog paths leave the device at its current buffer size and surface the un-shrunk number in the latency pill. New `[route_manager][aggregate][partial_hog]` cases.
+- [ ] **7.6.3.** `closeCallback`, `releaseExclusive`, and `releaseRouteResources` check return codes; failed teardown leaves the in-memory record alive so the next stop/dispose retries instead of silently leaking. New `[core_audio_backend][teardown_failure]` cases.
+- [ ] **7.6.4.** `DeviceChangeWatcher` installs HAL property listeners (`kAudioHardwarePropertyDevices`, `kAudioDevicePropertyDeviceIsAlive`, `kAudioAggregateDevicePropertyActiveSubDeviceList`); device-loss events transition affected routes to WAITING and clean up hog + IOProc; reappearance auto-recovers via the existing WAITING → RUNNING tick. New `[route_manager][device_loss]` cases.
+- [ ] **7.6.5.** `PowerStateWatcher` installs `IORegisterForSystemPower`; `kIOMessageSystemWillSleep` stops + releases every running route and replies `IOAllowPowerChange`; `kIOMessageSystemHasPoweredOn` refreshes enumeration and best-effort restarts the snapshot of pre-sleep routes.
+- [ ] `make verify` green on the combined diff.
+- [ ] Manual hardware acceptance on a real aggregate device confirms (a) first start always produces audio without a stop/start cycle, (b) hot-unplugging a sub-device transitions the route to WAITING and replugging recovers, (c) sleep/wake cycle restarts the route within a few seconds, (d) any engine error popup is dismissed in one click and never re-presents.
 
-The phase is broken into two sub-slices, each shippable and reviewable on its own.
+The phase is broken into five sub-slices, each independently shippable.
 
-### Sub-phase 7.6.1 — BlackHole detection + `is_virtual` flag
+### Sub-phase 7.6.1 — Clear lastError on alert dismiss
 
-**Goal.** Teach the enumeration layer that some devices are virtual, without changing any route-execution behaviour yet. All of 7.6.1 can land without a working BlackHole install — tests use `SimulatedBackend.registerVirtualDevice(uid, channels)`.
+**Goal.** Stop the "Engine error" SwiftUI alert from re-presenting on every render after the user taps OK.
 
-- [ ] UID-pattern matcher for the known BlackHole variants. Lives in `device_manager.cpp` (or a small dedicated helper header); matches the three canonical v1 UIDs exactly AND a defensive `^BlackHole` prefix fallback so user-configured channel counts don't silently drop to "real device".
-- [ ] `BackendDeviceInfo` gains `is_virtual: bool`. `CoreAudioBackend::enumerate` fills it via the UID matcher. `SimulatedBackend::enumerate` fills it from a new `registerVirtualDevice(uid, channels)` test seam.
-- [ ] `jbox_engine.h` ABI v9 → v10 (MINOR, additive): append `uint8_t is_virtual` to `jbox_device_info_t`. Documented in `spec.md § 1.6`. No entry-point signature changes; `JBOX_ENGINE_ABI_VERSION` bump.
-- [ ] `bridge_api.cpp::jbox_engine_list_devices` writes the new field. `JboxEngineSwift.DeviceInfo.isVirtual: Bool`.
-- [ ] Catch2 `[device_manager][blackhole]` cases: each canonical UID → `is_virtual = true`; a realistic non-BlackHole UID (e.g., `AppleHDAEngineOutput:1B,0,1,1:0`) → `is_virtual = false`; prefix-fallback case for a `BlackHole32ch_UID` hypothetical. Swift Testing case: `DeviceInfo.isVirtual` decodes correctly from a simulated engine list.
+- [x] `EngineStore.clearLastError()` (`Sources/JboxEngineSwift/EngineStore.swift`) sets `lastError = nil`. The view's binding setter calls it instead of being a no-op.
+- [x] `RouteListView.swift:87-97` — `set: { if !$0 { store.clearLastError() } }`.
+- [x] Swift Testing regression in `EngineStoreTests` ("clearLastError() drops a previously-recorded engine error"): drive `lastError` non-nil via the existing `addRoute` failure path → call `clearLastError()` → expect `lastError == nil`. Idempotent on a clean state.
+- No engine code, no ABI change.
 
-### Sub-phase 7.6.2 — Engine + UI behaviour on virtual endpoints
+### Sub-phase 7.6.2 — Aggregate hog-claim completeness gating
 
-**Goal.** Make `is_virtual = true` actually mean something end-to-end. This is the slice that closes the two-interface live-monitoring use case.
+**Goal.** Stop the duplex fast path from issuing `requestBufferFrameSize` against an aggregate that is only partially under hog mode. The same caveat fixed for the mux path in Phase 7.5 deviations applies here; fixing it on the duplex path eliminates the silent first-start failure.
 
-- [ ] `RouteManager::attemptStart`: when `config.source.is_virtual`, skip `claimExclusive` on the source device — BlackHole is never hog-held. Destination-side rules are unchanged (the user's `share_device` preference from Phase 7.5 still governs). Assertion at `addRoute` time rejects routes where both endpoints are `is_virtual` (error code, propagated through the Swift layer as a user-visible "route rejected: at least one endpoint must be a real device").
-- [ ] `DriftSampler::sampleOnce`: early-return with rate-identity (`setInputRate == nominal_rate`) when either endpoint is virtual. The PI loop never engages on virtual endpoints because they share the host clock domain with whichever real device drives the IOProc.
-- [ ] `DeviceIOMux` needs no polymorphic tail — BlackHole devices are ordinary HAL-backed Core Audio devices from the engine's point of view (BlackHole ships a conforming `AudioServerPlugIn`). This is a notable simplification vs. the archived own-driver path; the `VirtualDeviceIOMux` class that plan anticipated is not needed.
-- [ ] `AddRouteSheet` / `EditRouteSheet` device pickers:
-  - [ ] Label BlackHole entries as `"<device name>  (Virtual device — BlackHole)"` with the parenthetical in secondary colour.
-  - [ ] Tooltip on each BlackHole entry: "Apps that target this device send audio into Jbox. Pick it as a source to route media-app audio to a real destination."
-  - [ ] Group order in the picker: real devices first, virtual devices second, offline (last-known) devices third. Keeps scanning easy as device count grows.
-- [ ] `RouteRow`: no new indicator. Latency pill reflects only the real-side buffer contribution (virtual endpoints' buffer cost is BlackHole's internal loopback, which is a single-memcpy in `coreaudiod` — effectively zero at the granularity Jbox reports).
-- [ ] `JboxApp` first-run flow: on launch, `DeviceManager` is asked "does any BlackHole device appear in the current enumeration?". If not and `StoredPreferences.blackholeInstallSheetDismissed == false`, present a one-screen info sheet:
-  - Title: "Enable virtual-output routing (optional)."
-  - Body: "Jbox can forward audio from any macOS app through your existing routes, but macOS does not ship a virtual audio driver. Install **BlackHole** (free, open-source) to add one."
-  - Primary action: `Open BlackHole Releases` button that opens the GitHub releases page in the default browser.
-  - Secondary: copy-on-click `brew install blackhole-2ch` block.
-  - Footer: a "Don't show again" checkbox bound to `StoredPreferences.blackholeInstallSheetDismissed`.
-- [ ] Persistence: `StoredRoute` schema unchanged. `StoredPreferences` gains `blackholeInstallSheetDismissed: Bool` (default `false`, additive Codable, no migration).
-- [ ] Catch2 `[route_manager][virtual_device]` cases:
-  - [ ] Virtual-source → real-destination route: hog-mode claim only on destination, `claimExclusive` never fires for the source UID, drift loop stays at rate-identity.
-  - [ ] Real-source → real-destination route (regression): Phase-7.5 behaviour preserved.
-  - [ ] `addRoute` rejects both-endpoints-virtual with the dedicated error code.
-  - [ ] Hot-removing a BlackHole device while a route targets it transitions the route to WAITING; reinstalling BlackHole while the app is running transitions back to RUNNING via the existing device-listener plumbing (Phase 5).
-  - [ ] Share-mode regression: `share_device` flag on a virtual-source route has no effect on the source side (hog is already skipped by virtue of virtuality) and governs the destination side exactly as today.
-- [ ] Swift Testing: the first-run sheet fires on a simulated "BlackHole absent" enumeration and does NOT fire on a simulated "BlackHole present" enumeration; dismissal persists across app relaunches.
+- [ ] `CoreAudioBackend::claimExclusive` exposes per-direction hog success — return a struct (or fill an out-parameter) carrying `aggregate_hogged: bool` AND `all_subs_hogged: bool` instead of the current single bool. Existing callers in `route_manager.cpp:548-550` and `device_io_mux.cpp:281-337` are updated to read the new shape.
+- [ ] In the duplex fast path (`route_manager.cpp:563-569`), only call `requestBufferFrameSize` when both flags are true. On partial-hog, log a numeric `RtLogQueue` event (proposed `kLogAggregatePartialHog`) and continue with the device's current buffer; the latency pill reflects the un-shrunk number so the user sees the honest cost.
+- [ ] Catch2 `[route_manager][aggregate][partial_hog]`: simulated backend with two sub-devices, one refusing hog → assert `bufferSizeRequests()` stays empty, route reaches RUNNING, latency pill carries the un-shrunk buffer.
+
+### Sub-phase 7.6.3 — Robust teardown (return-code checking + idempotency on degraded devices)
+
+**Goal.** Stop teardown from masking failures. When a destroy or hog-release call fails on a degraded / hot-unplugged device, the in-memory bookkeeping must record that so the next opportunity retries — instead of nulling the pointer and silently leaking the kernel-side resource.
+
+- [ ] `core_audio_backend.cpp:567-582` (`closeCallback`) — check the return code of `AudioDeviceStop` and `AudioDeviceDestroyIOProcID`. On non-`noErr` from destroy, log via `RtLogQueue` and **leave** `rec.ca_proc_id` set; the next teardown opportunity will retry. Same treatment for the hog-release path in `core_audio_backend.cpp:761-786` — on non-`noErr` from `AudioObjectSetPropertyData(kAudioDevicePropertyHogMode)`, retain the `exclusive_state_` entry so the next enumeration / device-event cycle can reconcile.
+- [ ] `route_manager.cpp:779-835` (`releaseRouteResources`) — invoke `closeCallback` regardless of any prior error in the same path; verify state is fully drained before returning. The state machine treats "teardown returned an error" as "the resource is still ours; try again next tick" rather than "the resource is gone; forget it."
+- [ ] Catch2 `[core_audio_backend][teardown_failure]`: simulated backend gains a destroy-failure injection. Inject failure → assert IOProc record persists, hog state retained → flip the failure off → assert subsequent teardown clears them.
+
+### Sub-phase 7.6.4 — HAL property listeners + auto-recovery
+
+**Goal.** Notice device topology changes the moment they happen, instead of relying on the user to click Refresh. Routes whose devices have disappeared transition to WAITING (the existing state already does the right thing on reappearance via `attemptStart`'s tick).
+
+- [ ] New `DeviceChangeWatcher` (control-thread C++) under `Sources/JboxEngineC/control/`. Owns:
+  - `AudioObjectAddPropertyListener` on `kAudioObjectSystemObject` for `kAudioHardwarePropertyDevices` (device list churn).
+  - Per-device `kAudioDevicePropertyDeviceIsAlive` listener for every device referenced by a running route.
+  - Per-aggregate `kAudioAggregateDevicePropertyActiveSubDeviceList` listener so sub-device drop-out is treated as device-loss for the aggregate.
+- [ ] Listener callbacks post numeric events into a SPSC queue drained on the existing control-thread tick. Handlers transition affected routes to WAITING, call `releaseRouteResources`, and clear `last_error`. Routes already in WAITING auto-retry via `route_manager.cpp:442-480` when the device reappears in the next enumeration.
+- [ ] Debounce inbound events (~200 ms coalescing window) — macOS posts `ActiveSubDeviceList` changes during sample-rate cascades and we don't want to flap.
+- [ ] No public ABI change; no new C entry point. The existing route status (WAITING / RUNNING) carries the user-visible state.
+- [ ] Catch2 `[route_manager][device_loss]`: simulated backend gains `simulateDeviceRemoval(uid)` / `simulateDeviceReappearance(uid)`; assert running route → WAITING on removal, hog/IOProc cleared, `last_error` cleared, then WAITING → RUNNING on reappearance.
+
+### Sub-phase 7.6.5 — Sleep/wake handling
+
+**Goal.** Survive a sleep/wake cycle without the user touching anything. USB devices typically reset on wake; Jbox needs to release exclusive + IOProcs before sleep and rebuild after wake.
+
+- [ ] New `PowerStateWatcher` (control-thread C++, lives next to `DeviceChangeWatcher`) using `IORegisterForSystemPower`.
+- [ ] On `kIOMessageSystemWillSleep`: snapshot the IDs of routes currently RUNNING, stop each, release exclusive, then reply with `IOAllowPowerChange`. (The reply is required; `coreaudiod` blocks the sleep transition until every registered participant replies.)
+- [ ] On `kIOMessageSystemHasPoweredOn`: refresh device enumeration, then attempt to restart the snapshot. Routes whose source/dest UIDs are no longer present remain in WAITING and recover via the listener path from 7.6.4.
+- [ ] Bound retries (≤ 3 with linear backoff). If a route still can't start after the bound, surface the engine error once via the (now-non-looping) alert and leave it in WAITING.
+- [ ] Tests: control-thread unit tests against an injectable `PowerEventBus` that delivers fake will-sleep / has-powered-on events.
 
 Phase 7.6 summary of deviations:
 
-- **Pivot from in-house HAL plugin to BlackHole (2026-04-23).** *Symptom:* ad-hoc-signed `JboxVirtualDriver.driver` (commits `0aa5cfe`..`8438da3` on the archive branch) installed into `/Library/Audio/Plug-Ins/HAL/` on macOS 26.4.1 under SIP fails to load; `coreaudiod` emits `HALS_RemotePlugInRegistrar.mm:418 Throwing Exception: Remote driver service was unable to load plug-in: JboxVirtualDriver.driver`, followed by `xpc_error=[159]` on a bootstrap lookup. *Root cause:* since macOS 13, `coreaudiod` loads HAL plugins out-of-process via a sandboxed Remote Driver service that enforces a real Apple-issued team identity on the bundle. Ad-hoc signatures pass `codesign -v` (cryptographic integrity is fine) but fail the sandbox's team-identity check. The own-driver path therefore requires either a paid Apple Developer Program membership (explicitly off the table) or a SIP-disabled dev-box workflow (untenable for testers). *Fix:* rebuild Phase 7.6 on top of BlackHole, which already ships Developer-ID signed + notarized so the HAL sandbox accepts it. Archived the HAL-plugin path including the cross-process SPSC ring, the `JboxVirtualDriver` target, the `JboxShmTail` manual-verification CLI, the `scripts/build_driver.sh` script, the `docs/phase7.6-virtual-device-design.md` design brief, and the SIP-workaround institutional-memory commit at branch `archive/phase7.6-own-driver`. *Regression test:* N/A — the pivot removes the code path rather than fixing a bug in it; future-us reading the archive branch benefits from the forensics without it polluting master history.
+- **Pivot from BlackHole detection to self-routing reliability (2026-04-25).** *Symptom:* the project owner validated, on a real aggregate device combining two interfaces with one hardware-mixer-equipped destination, that the v1 multi-source-monitoring use case (live hardware source + media apps both reaching the destination's monitor outs) **already works** with no virtual driver — Jbox routes the hardware source into a channel pair on the destination interface, the destination's hardware mixer sums it with whatever the macOS aggregate output is delivering, and the result lands on the monitor outs at the latency the user wanted. The same hardware test surfaced two reproducible bugs that block shipping the path: a first-start silent failure on aggregates and a "device busy" lock-in after a while, accompanied by an "Engine error" SwiftUI alert that re-presented on every render. *Root cause:* the aggregate-device path and the BlackHole-detection path require exactly the same downstream fixes — partial-hog gating, return-code-aware teardown, HAL property listeners, sleep/wake handling, and the alert-binding fix. BlackHole-specific code (`is_virtual` flag, UID matchers, ABI bump, install-prompt sheet) adds surface area Jbox can skip once the bugs are fixed; once a BlackHole device looks like an ordinary HAL-backed device with a non-aggregate UID, it inherits the same reliability the new sub-phases give every other device. *Fix:* re-scope Phase 7.6 from "Virtual output via BlackHole" to "Self-routing reliability" — keep the project's "no paid Apple Developer Program" constraint intact, drop the install-prompt sheet, drop the `is_virtual` ABI surface, drop the BlackHole UID matcher. *Regression test:* none specific to the pivot; each sub-phase carries its own. The aggregate-device topology is documented as the recommended pattern in `spec.md § 2.13`; BlackHole continues to work as a drop-in substitute for users who prefer it but receives no Jbox-side detection or special handling.
+- **Earlier pivot from in-house HAL plugin to BlackHole (2026-04-23).** *Symptom:* ad-hoc-signed `JboxVirtualDriver.driver` (commits `0aa5cfe`..`8438da3` on the archive branch) installed into `/Library/Audio/Plug-Ins/HAL/` on macOS 26.4.1 under SIP fails to load; `coreaudiod` emits `HALS_RemotePlugInRegistrar.mm:418 Throwing Exception: Remote driver service was unable to load plug-in: JboxVirtualDriver.driver`, followed by `xpc_error=[159]` on a bootstrap lookup. *Root cause:* since macOS 13, `coreaudiod` loads HAL plugins out-of-process via a sandboxed Remote Driver service that enforces a real Apple-issued team identity on the bundle. Ad-hoc signatures pass `codesign -v` (cryptographic integrity is fine) but fail the sandbox's team-identity check. The own-driver path therefore requires either a paid Apple Developer Program membership (explicitly off the table) or a SIP-disabled dev-box workflow (untenable for testers). *Fix:* archived the HAL-plugin path including the cross-process SPSC ring, the `JboxVirtualDriver` target, the `JboxShmTail` manual-verification CLI, the `scripts/build_driver.sh` script, the `docs/phase7.6-virtual-device-design.md` design brief, and the SIP-workaround institutional-memory commit at branch `archive/phase7.6-own-driver`. Initially rebuilt Phase 7.6 on top of BlackHole (Developer-ID signed + notarized so the HAL sandbox accepts it); subsequent re-scope (above) dropped that path too. *Regression test:* N/A — the pivot removes the code path rather than fixing a bug in it.
 
 **Forecast risks.**
 
-- **BlackHole maintenance continuity.** If ExistentialAudio abandons BlackHole or stops signing for a new macOS release, Jbox's virtual-output feature inherits that outage. BlackHole is MIT-licensed, so a worst-case fork + self-sign is technically possible — but it reopens the Developer-ID question this phase exists to avoid. Revisit only if triggered.
-- **BlackHole UID pattern drift.** The three canonical UIDs (`BlackHole2ch_UID` / `16ch` / `64ch`) are stable across current BlackHole releases, but the user can rename the device in BlackHole's preferences. The UID string, which is what we match on, is not affected by the display name; but if ExistentialAudio ever changes the UID format we lose the match. The `^BlackHole` prefix fallback is the defensive hedge; if that fails in the wild we add an allowlist mechanism in `StoredPreferences` that advanced users can populate.
-- **Sample-rate mismatch between BlackHole and the real destination.** BlackHole defaults to 48 kHz, user-configurable. Real-destination rate may differ. The existing drift / resampling path on the real-destination side handles the conversion; the drift PI loop collapses to identity on the virtual side but still runs on the real side. No new handling needed — but worth confirming in a manual test during 7.6.2 on a real rig with BlackHole@48k and a hardware interface at 44.1k.
-- **User confusion over "which device to pick."** The UI label and tooltip do heavy lifting here; a manual UX test with a fresh user is part of 7.6.2's exit criteria. If the sheet + label combination still reads as noise, the backup plan is a small Preferences toggle ("Show Jbox virtual-output hints") rather than restructuring the picker.
+- **Sleep/wake auto-restart UX.** Aggressive auto-restart against a USB interface that hasn't fully re-enumerated post-wake can spin against a still-resetting device. Mitigation: bounded retry count with linear backoff, fall back to WAITING, surface a single (now-non-looping) toast.
+- **Aggregate sub-device listeners are noisy during sample-rate cascades.** Debouncing at 200 ms in `DeviceChangeWatcher` should cover the worst-case observed cascade duration; if real-world testing shows flap-and-recover events shorter than the debounce window we extend it.
+- **Partial-hog gating may degrade observed latency** for users whose aggregate's sub-devices are partly held by other apps. Acceptable: the user sees the un-shrunk buffer in the latency pill and has the existing share-mode escape hatch from Phase 7.5.
 
 **Explicitly out of scope for Phase 7.6:**
 
-- Shipping our own HAL plugin or DriverKit DEXT. Archived — see deviation above.
-- Privileged installer helper (`SMAppService.daemon`). BlackHole's installer handles its own registration; Jbox does not need one.
-- `.pkg` distribution lane. The existing `.dmg` lane is sufficient — Jbox stays ad-hoc-signed and drag-to-install; BlackHole is the user's own separate install.
+- Shipping our own HAL plugin or DriverKit DEXT. Archived — see deviations above.
+- BlackHole-specific detection, `is_virtual` ABI surface, install-prompt sheet, or any first-run UI for virtual-output transports. BlackHole works as an ordinary HAL-backed Core Audio device for users who choose to install it; Jbox does not need to know.
+- Privileged installer helper or `.pkg` distribution. The existing `.dmg` lane is sufficient.
 
 ---
 
