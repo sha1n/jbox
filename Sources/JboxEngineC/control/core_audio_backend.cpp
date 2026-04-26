@@ -628,9 +628,9 @@ std::uint32_t CoreAudioBackend::currentBufferFrameSize(const std::string& uid) {
 }
 
 namespace {
-// Core Audio aggregate devices expose their member devices via
-// `kAudioAggregateDevicePropertyActiveSubDeviceList`. A non-aggregate
-// device returns an error / no data and we get an empty vector back.
+
+// Active sub-devices of an aggregate device, queried via the
+// HAL property. Returns an empty list for non-aggregate devices.
 std::vector<AudioObjectID> getActiveSubDevices(AudioObjectID aggregate) {
     AudioObjectPropertyAddress addr{
         kAudioAggregateDevicePropertyActiveSubDeviceList,
@@ -641,7 +641,7 @@ std::vector<AudioObjectID> getActiveSubDevices(AudioObjectID aggregate) {
                                        &size) != noErr || size == 0) {
         return {};
     }
-    const size_t count = size / sizeof(AudioObjectID);
+    const std::size_t count = size / sizeof(AudioObjectID);
     std::vector<AudioObjectID> ids(count);
     if (AudioObjectGetPropertyData(aggregate, &addr, 0, nullptr,
                                    &size, ids.data()) != noErr) {
@@ -650,207 +650,57 @@ std::vector<AudioObjectID> getActiveSubDevices(AudioObjectID aggregate) {
     return ids;
 }
 
-bool hogDeviceID(AudioObjectID id) {
-    AudioObjectPropertyAddress addr{kAudioDevicePropertyHogMode,
-                                    kAudioObjectPropertyScopeGlobal,
-                                    kAudioObjectPropertyElementMain};
-    pid_t desired = getpid();
-    if (AudioObjectSetPropertyData(id, &addr, 0, nullptr,
-                                   sizeof(desired), &desired) != noErr) {
-        return false;
-    }
-    pid_t current = -1;
-    UInt32 size = sizeof(current);
-    if (AudioObjectGetPropertyData(id, &addr, 0, nullptr,
-                                   &size, &current) != noErr) {
-        return false;
-    }
-    return current == getpid();
-}
-
-void unhogDeviceID(AudioObjectID id) {
-    AudioObjectPropertyAddress addr{kAudioDevicePropertyHogMode,
-                                    kAudioObjectPropertyScopeGlobal,
-                                    kAudioObjectPropertyElementMain};
-    pid_t unowned = -1;
-    (void)AudioObjectSetPropertyData(id, &addr, 0, nullptr,
-                                     sizeof(unowned), &unowned);
-}
-
-std::uint32_t setBufferFramesOnID(AudioObjectID id, std::uint32_t frames) {
-    AudioObjectPropertyAddress rangeAddr{
-        kAudioDevicePropertyBufferFrameSizeRange,
-        kAudioObjectPropertyScopeGlobal,
-        kAudioObjectPropertyElementMain};
-    AudioValueRange range{0.0, 0.0};
-    UInt32 rangeSize = sizeof(range);
-    std::uint32_t target = frames;
-    if (AudioObjectGetPropertyData(id, &rangeAddr, 0, nullptr,
-                                   &rangeSize, &range) == noErr) {
-        if (range.mMinimum > 0 && target < static_cast<std::uint32_t>(range.mMinimum)) {
-            target = static_cast<std::uint32_t>(range.mMinimum);
-        }
-        if (range.mMaximum > 0 && target > static_cast<std::uint32_t>(range.mMaximum)) {
-            target = static_cast<std::uint32_t>(range.mMaximum);
-        }
-    }
-    AudioObjectPropertyAddress setAddr{
+// Single Core Audio property write. Returns the post-write
+// readback so callers can log discrepancies (the HAL may clamp
+// into the device's range; max-across-clients may force a
+// larger value). RT-unsafe; control thread only.
+std::uint32_t writeBufferFrameSize(AudioObjectID id,
+                                   std::uint32_t frames) {
+    AudioObjectPropertyAddress addr{
         kAudioDevicePropertyBufferFrameSize,
         kAudioObjectPropertyScopeGlobal,
         kAudioObjectPropertyElementMain};
-    UInt32 value = target;
-    (void)AudioObjectSetPropertyData(id, &setAddr, 0, nullptr,
+    UInt32 value = frames;
+    (void)AudioObjectSetPropertyData(id, &addr, 0, nullptr,
                                      sizeof(value), &value);
     UInt32 after = 0;
     UInt32 afterSize = sizeof(after);
-    if (AudioObjectGetPropertyData(id, &setAddr, 0, nullptr,
+    if (AudioObjectGetPropertyData(id, &addr, 0, nullptr,
                                    &afterSize, &after) != noErr) {
         return 0;
     }
     return after;
 }
+
 }  // namespace
 
-bool CoreAudioBackend::claimExclusive(const std::string& uid) {
+void CoreAudioBackend::setBufferFrameSize(const std::string& uid,
+                                          std::uint32_t frames) {
+    if (frames == 0) return;
     auto it = device_ids_.find(uid);
-    if (it == device_ids_.end()) return false;
+    if (it == device_ids_.end()) return;
     const AudioDeviceID id = it->second;
 
-    // Aggregate devices (created in Audio MIDI Setup) wrap one or more
-    // physical devices. Hogging the aggregate alone does not evict
-    // other apps from the *member* devices, and those members are
-    // where the actual HAL buffer size lives — so the buffer-shrink
-    // request is ignored. Snapshot then hog every active sub-device
-    // first, then the aggregate itself. The snapshots are keyed by
-    // the aggregate UID so `releaseExclusive` can restore each member
-    // to its own pre-claim buffer size.
-    ExclusiveState state;
-    const auto subs = getActiveSubDevices(id);
-    for (AudioObjectID sub : subs) {
-        ExclusiveEntry e;
-        e.id                     = sub;
-        e.original_buffer_frames = getBufferFrameSize(sub);
-        e.hogged                 = hogDeviceID(sub);
-        if (e.hogged) {
-            os_log_info(backendLog(),
-                        "hogged sub-device 0x%x (original buffer=%u) under aggregate %{public}s",
-                        sub, e.original_buffer_frames, uid.c_str());
-        } else {
-            os_log(backendLog(),
-                   "failed to hog sub-device 0x%x under aggregate %{public}s",
-                   sub, uid.c_str());
-        }
-        state.sub_devices.push_back(e);
-    }
-
-    state.self.id                     = id;
-    state.self.original_buffer_frames = getBufferFrameSize(id);
-    state.self.hogged                 = hogDeviceID(id);
-    if (state.self.hogged) {
-        os_log_info(backendLog(),
-                    "hogged aggregate %{public}s (original buffer=%u)",
-                    uid.c_str(), state.self.original_buffer_frames);
-    } else {
-        os_log(backendLog(), "failed to hog aggregate %{public}s", uid.c_str());
-    }
-
-    exclusive_state_[uid] = std::move(state);
-    return exclusive_state_[uid].self.hogged;
-}
-
-void CoreAudioBackend::releaseExclusive(const std::string& uid) {
-    auto it = exclusive_state_.find(uid);
-    if (it == exclusive_state_.end()) return;
-
-    // Restore buffers first — while we still hold hog mode — so the
-    // HAL has no other clients contending. Then release hog in
-    // reverse order (aggregate first, sub-devices after) so external
-    // apps reconnect and re-read the restored buffer sizes.
-    if (it->second.self.original_buffer_frames > 0) {
-        (void)setBufferFramesOnID(
-            it->second.self.id, it->second.self.original_buffer_frames);
-    }
-    for (const auto& sub : it->second.sub_devices) {
-        if (sub.original_buffer_frames > 0) {
-            (void)setBufferFramesOnID(sub.id, sub.original_buffer_frames);
-        }
-    }
-
-    if (it->second.self.hogged) {
-        unhogDeviceID(it->second.self.id);
-    }
-    for (const auto& sub : it->second.sub_devices) {
-        if (sub.hogged) unhogDeviceID(sub.id);
-    }
-    exclusive_state_.erase(it);
-}
-
-IDeviceBackend::BufferFrameSizeRange
-CoreAudioBackend::supportedBufferFrameSizeRange(const std::string& uid) {
-    auto it = device_ids_.find(uid);
-    if (it == device_ids_.end()) return {};
-    const AudioDeviceID id = it->second;
-
-    auto readRange = [](AudioObjectID obj) -> BufferFrameSizeRange {
-        AudioObjectPropertyAddress addr{
-            kAudioDevicePropertyBufferFrameSizeRange,
-            kAudioObjectPropertyScopeGlobal,
-            kAudioObjectPropertyElementMain};
-        AudioValueRange r{0.0, 0.0};
-        UInt32 size = sizeof(r);
-        if (AudioObjectGetPropertyData(obj, &addr, 0, nullptr, &size, &r) != noErr) {
-            return {};
-        }
-        return {static_cast<std::uint32_t>(r.mMinimum),
-                static_cast<std::uint32_t>(r.mMaximum)};
-    };
-
-    // For an aggregate device: intersect every active sub-device's
-    // range with the aggregate's own so the returned window is what
-    // every member can honour simultaneously. Empty range (min == 0)
-    // from a member means "unknown / not exposed"; skip it.
-    BufferFrameSizeRange r = readRange(id);
+    // For aggregate devices the effective buffer is `max(member
+    // buffer_frame_size)`. To get the aggregate to actually run at
+    // `frames` the request has to land on each member; writing the
+    // aggregate's own property is a no-op when a member is held
+    // larger by another client. We enumerate the active sub-device
+    // list and write to each member directly — exactly the way
+    // Superior Drummer / any vanilla Core Audio client writes
+    // `kAudioDevicePropertyBufferFrameSize`. No hog mode is
+    // claimed here; macOS resolves with `max-across-clients` so
+    // co-resident apps stay alive.
     for (AudioObjectID sub : getActiveSubDevices(id)) {
-        BufferFrameSizeRange s = readRange(sub);
-        if (s.minimum == 0 && s.maximum == 0) continue;
-        if (r.minimum == 0 && r.maximum == 0) {
-            r = s;
-            continue;
-        }
-        if (s.minimum > r.minimum) r.minimum = s.minimum;
-        if (s.maximum < r.maximum) r.maximum = s.maximum;
-    }
-    if (r.maximum > 0 && r.minimum > r.maximum) {
-        // Empty intersection — fall back to the aggregate's own.
-        return readRange(id);
-    }
-    return r;
-}
-
-std::uint32_t CoreAudioBackend::requestBufferFrameSize(const std::string& uid,
-                                                      std::uint32_t frames) {
-    auto it = device_ids_.find(uid);
-    if (it == device_ids_.end() || frames == 0) return 0;
-    const AudioDeviceID id = it->second;
-
-    // Aggregate devices: apply to every active sub-device first, then
-    // the aggregate itself. Setting the aggregate's buffer alone has
-    // no effect if a sub-device is held at a larger size by another
-    // app — the aggregate's effective buffer is determined by its
-    // members. Pushing the change into each member is what actually
-    // works; the aggregate then naturally aligns.
-    const auto subs = getActiveSubDevices(id);
-    for (AudioObjectID sub : subs) {
-        const std::uint32_t applied = setBufferFramesOnID(sub, frames);
+        const std::uint32_t applied = writeBufferFrameSize(sub, frames);
         os_log_info(backendLog(),
-                    "sub-device 0x%x buffer request=%u applied=%u",
-                    sub, frames, applied);
+                    "buffer-frames request %u → 0x%x applied=%u (sub of %{public}s)",
+                    frames, sub, applied, uid.c_str());
     }
-    const std::uint32_t applied = setBufferFramesOnID(id, frames);
+    const std::uint32_t applied = writeBufferFrameSize(id, frames);
     os_log_info(backendLog(),
-                "device %{public}s buffer request=%u applied=%u",
-                uid.c_str(), frames, applied);
-    return applied;
+                "buffer-frames request %u → %{public}s applied=%u",
+                frames, uid.c_str(), applied);
 }
 
 }  // namespace jbox::control

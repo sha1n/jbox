@@ -59,7 +59,7 @@ struct StateStoreTests {
                 mapping: [ChannelEdge(src: 0, dst: 0)],
                 createdAt: Date(timeIntervalSince1970: 1_700_000_000),
                 modifiedAt: Date(timeIntervalSince1970: 1_700_000_100),
-                latencyMode: .performance, bufferFrames: 64)],
+                latencyMode: .performance)],
             preferences: StoredPreferences(resamplerQuality: .highQuality))
 
         store.save(original)

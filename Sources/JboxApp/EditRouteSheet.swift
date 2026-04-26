@@ -5,8 +5,8 @@ import JboxEngineSwift
 /// the route's current `RouteConfig`. On Apply:
 ///   - If only the user-chosen name changed, the store routes the call
 ///     through `jbox_engine_rename_route` — no audio interruption.
-///   - Any other change (devices, mapping, latency mode, buffer frames)
-///     forces a reconfig: the old route is stopped and removed, and a
+///   - Any other change (devices, mapping, latency mode) forces a
+///     reconfig: the old route is stopped and removed, and a
 ///     replacement is added with a fresh engine id. If the old route
 ///     was running, the replacement is started automatically.
 ///
@@ -24,11 +24,10 @@ struct EditRouteSheet: View {
     @State private var customName: String = ""
     @State private var latencyMode: LatencyMode = .off
     @State private var bufferFrames: UInt32 = 0
-    @State private var shareDevices: Bool = false
     @State private var errorMessage: String?
 
     private static let kBufferSizeChoices: [UInt32] = [
-        32, 64, 128, 256, 512, 1024, 2048]
+        16, 32, 64, 128, 256, 512, 1024, 2048]
 
     // MARK: Derived
 
@@ -65,9 +64,8 @@ struct EditRouteSheet: View {
         if destUID   != route.config.destination.uid     { return true }
         if edges     != route.config.mapping             { return true }
         if latencyMode != route.config.latencyMode       { return true }
-        let effectiveBuffer = bufferFrames == 0 ? nil : bufferFrames
+        let effectiveBuffer: UInt32? = bufferFrames == 0 ? nil : bufferFrames
         if effectiveBuffer != route.config.bufferFrames  { return true }
-        if shareDevices != route.config.shareDevices     { return true }
         return false
     }
 
@@ -92,28 +90,6 @@ struct EditRouteSheet: View {
         return "Apply"
     }
 
-    private var bufferSizeOptions: [UInt32] {
-        var range: ClosedRange<UInt32>? = nil
-        if !sourceUID.isEmpty,
-           let r = store.bufferFrameRange(forDeviceUid: sourceUID) {
-            range = r
-        }
-        if sourceUID != destUID, !destUID.isEmpty,
-           let r = store.bufferFrameRange(forDeviceUid: destUID) {
-            if let existing = range {
-                let lo = max(existing.lowerBound, r.lowerBound)
-                let hi = min(existing.upperBound, r.upperBound)
-                range = lo <= hi ? lo...hi : nil
-            } else {
-                range = r
-            }
-        }
-        if let range {
-            return Self.kBufferSizeChoices.filter { range.contains($0) }
-        }
-        return Self.kBufferSizeChoices
-    }
-
     private var latencyModeFooter: String {
         switch latencyMode {
         case .off:
@@ -125,12 +101,14 @@ struct EditRouteSheet: View {
                  + "if you hear clicks."
         case .performance:
             return "Lowest latency tier. Smallest ring + aggressive "
-                 + "drift setpoint. When source and destination are "
-                 + "the same device (e.g. an aggregate), takes "
-                 + "exclusive control of the device to force a small "
-                 + "HAL buffer — other apps using the device are "
-                 + "disconnected while the route is running. Underruns "
-                 + "are expected on bursty sources."
+                 + "drift setpoint; for same-device routes (e.g. an "
+                 + "aggregate) the engine takes a duplex fast path "
+                 + "that bypasses the ring entirely. The Buffer size "
+                 + "below is a *preference*: macOS resolves the actual "
+                 + "value as the max across all active clients, so "
+                 + "another app asking for a bigger buffer (Music, a "
+                 + "video call, a DAW with a larger session) will "
+                 + "pull the buffer up while it's running."
         }
     }
 
@@ -169,22 +147,14 @@ struct EditRouteSheet: View {
                     Picker("Latency mode", selection: $latencyMode) {
                         Text("Off — safe default").tag(LatencyMode.off)
                         Text("Low").tag(LatencyMode.low)
-                        Text(shareDevices ? "Performance — unavailable when sharing" : "Performance")
-                            .tag(LatencyMode.performance)
+                        Text("Performance").tag(LatencyMode.performance)
                     }
                     .pickerStyle(.menu)
 
-                    Toggle("Share device with other apps", isOn: $shareDevices)
-                    if shareDevices {
-                        Text("Performance requires exclusive device access and is unavailable while sharing.")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
-
-                    if latencyMode == .performance && !shareDevices {
+                    if latencyMode == .performance {
                         Picker("Buffer size", selection: $bufferFrames) {
-                            Text("Default (64)").tag(UInt32(0))
-                            ForEach(bufferSizeOptions, id: \.self) { frames in
+                            Text("No preference (use device's current)").tag(UInt32(0))
+                            ForEach(Self.kBufferSizeChoices, id: \.self) { frames in
                                 Text("\(frames) frames").tag(frames)
                             }
                         }
@@ -216,11 +186,6 @@ struct EditRouteSheet: View {
         }
         .frame(minWidth: 520, minHeight: 460)
         .onAppear(perform: prefillFromRoute)
-        .onChange(of: shareDevices) { _, sharing in
-            if sharing && latencyMode == .performance {
-                latencyMode = .low
-            }
-        }
     }
 
     // MARK: Actions
@@ -232,7 +197,6 @@ struct EditRouteSheet: View {
         customName   = route.config.name ?? ""
         latencyMode  = route.config.latencyMode
         bufferFrames = route.config.bufferFrames ?? 0
-        shareDevices = route.config.shareDevices
     }
 
     private func apply() {
@@ -243,8 +207,7 @@ struct EditRouteSheet: View {
             mapping: MappingPair.toEdges(pairs),
             name: trimmedName.isEmpty ? nil : trimmedName,
             latencyMode: latencyMode,
-            bufferFrames: bufferFrames == 0 ? nil : bufferFrames,
-            shareDevices: shareDevices)
+            bufferFrames: bufferFrames == 0 ? nil : bufferFrames)
         do {
             _ = try store.replaceRoute(route.id, with: newConfig)
             onClose()

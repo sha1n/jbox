@@ -503,347 +503,6 @@ TEST_CASE("RouteManager: duplex fast path routes same-device Performance directl
     REQUIRE(stopped_status.state == JBOX_ROUTE_STATE_STOPPED);
 }
 
-TEST_CASE("RouteManager: duplex fast path shrinks device buffer and restores on stop",
-          "[route_manager][duplex][buffer]") {
-    // Regression test for the fast-path buffer-shrink fix. The
-    // duplex path bypasses the mux, so it has to issue its own
-    // requestBufferFrameSize when starting and a matching restore
-    // when stopping. Exercises three observable outcomes:
-    //   - a request-with-frames=64 call was recorded on attemptStart
-    //     when the device's buffer was larger
-    //   - the device's post-change buffer is honoured (64 in the
-    //     simulated backend, which doesn't clamp)
-    //   - stopRoute issues a restore-to-original request
-    auto backend_ptr = std::make_unique<SimulatedBackend>();
-    SimulatedBackend* backend = backend_ptr.get();
-    BackendDeviceInfo info;
-    info.uid = "aggregate";
-    info.name = "aggregate";
-    info.direction = kBackendDirectionInput | kBackendDirectionOutput;
-    info.input_channel_count  = 2;
-    info.output_channel_count = 2;
-    info.nominal_sample_rate  = 48000.0;
-    info.buffer_frame_size    = 512;  // large starting buffer
-    backend->addDevice(info);
-    auto dm = std::make_unique<DeviceManager>(std::move(backend_ptr));
-    dm->refresh();
-    RouteManager rm(*dm);
-
-    std::vector<ChannelEdge> m{{0, 0}, {1, 1}};
-    RouteManager::RouteConfig cfg{
-        "aggregate", "aggregate", m, "duplex-buffer",
-        /*latency_mode*/ 2};
-    jbox_error_t err{};
-    const auto id = rm.addRoute(cfg, &err);
-    REQUIRE(id != JBOX_INVALID_ROUTE_ID);
-    REQUIRE(backend->bufferSizeRequests().empty());  // not started yet
-
-    REQUIRE(rm.startRoute(id) == JBOX_OK);
-
-    // Shrink request: first entry must be 64 against this device.
-    REQUIRE(backend->bufferSizeRequests().size() == 1);
-    REQUIRE(backend->bufferSizeRequests().front().uid       == "aggregate");
-    REQUIRE(backend->bufferSizeRequests().front().requested == 64);
-    REQUIRE(backend->currentBufferFrameSize("aggregate")    == 64);
-
-    // The pill must reflect the post-shrink value, not the 512 we
-    // started with.
-    jbox_route_latency_components_t components{};
-    REQUIRE(rm.pollLatencyComponents(id, &components) == JBOX_OK);
-    REQUIRE(components.src_buffer_frames == 64);
-
-    REQUIRE(rm.stopRoute(id) == JBOX_OK);
-
-    // Restore happens inside releaseExclusive using the snapshot the
-    // backend captured at claim time — it does NOT go through
-    // requestBufferFrameSize, so the request log still has just the
-    // one shrink entry. The observable outcome is that the device's
-    // current buffer size is back to its original value.
-    REQUIRE(backend->bufferSizeRequests().size() == 1);
-    REQUIRE(backend->currentBufferFrameSize("aggregate") == 512);
-}
-
-TEST_CASE("RouteManager: duplex fast path claims exclusive ownership + releases on stop",
-          "[route_manager][duplex][exclusive]") {
-    // Performance-mode same-device routes take Core Audio hog mode so
-    // the buffer-size request reliably lands even when another app
-    // (UAD Console, system audio, a running DAW) is holding the
-    // device at a larger buffer. The claim happens before the shrink
-    // request; the release happens after the restore so external apps
-    // see the original buffer size when they reconnect.
-    auto backend_ptr = std::make_unique<SimulatedBackend>();
-    SimulatedBackend* backend = backend_ptr.get();
-    BackendDeviceInfo info;
-    info.uid = "aggregate";
-    info.name = "aggregate";
-    info.direction = kBackendDirectionInput | kBackendDirectionOutput;
-    info.input_channel_count  = 2;
-    info.output_channel_count = 2;
-    info.nominal_sample_rate  = 48000.0;
-    info.buffer_frame_size    = 512;
-    backend->addDevice(info);
-    auto dm = std::make_unique<DeviceManager>(std::move(backend_ptr));
-    dm->refresh();
-    RouteManager rm(*dm);
-
-    std::vector<ChannelEdge> m{{0, 0}};
-    RouteManager::RouteConfig cfg{
-        "aggregate", "aggregate", m, "duplex-exclusive",
-        /*latency_mode*/ 2};
-    jbox_error_t err{};
-    const auto id = rm.addRoute(cfg, &err);
-    REQUIRE_FALSE(backend->isExclusive("aggregate"));  // not yet started
-
-    REQUIRE(rm.startRoute(id) == JBOX_OK);
-    REQUIRE(backend->isExclusive("aggregate"));
-
-    REQUIRE(rm.stopRoute(id) == JBOX_OK);
-    REQUIRE_FALSE(backend->isExclusive("aggregate"));
-    // Buffer size still restored to the pre-route value.
-    REQUIRE(backend->currentBufferFrameSize("aggregate") == 512);
-}
-
-TEST_CASE("RouteManager: duplex fast path hogs aggregate sub-devices and shrinks each",
-          "[route_manager][duplex][aggregate]") {
-    // Hogging an aggregate alone doesn't evict other clients from
-    // its members, and the HAL buffer size lives on the members —
-    // so the duplex fast path must claim exclusive on each member
-    // and push the buffer-size request down into each. Stopping the
-    // route restores every member to its own pre-claim buffer size
-    // (not the aggregate's value, which would clobber the smaller
-    // member's original).
-    auto backend_ptr = std::make_unique<SimulatedBackend>();
-    SimulatedBackend* backend = backend_ptr.get();
-
-    BackendDeviceInfo sub_in;
-    sub_in.uid = "sub-input";
-    sub_in.name = "sub-input";
-    sub_in.direction = kBackendDirectionInput;
-    sub_in.input_channel_count  = 2;
-    sub_in.output_channel_count = 0;
-    sub_in.nominal_sample_rate  = 48000.0;
-    sub_in.buffer_frame_size    = 256;
-    backend->addDevice(sub_in);
-
-    BackendDeviceInfo sub_out;
-    sub_out.uid = "sub-output";
-    sub_out.name = "sub-output";
-    sub_out.direction = kBackendDirectionOutput;
-    sub_out.input_channel_count  = 0;
-    sub_out.output_channel_count = 2;
-    sub_out.nominal_sample_rate  = 48000.0;
-    // Larger than sub-input: simulates a device held open by another
-    // app at a bigger buffer size than its sibling.
-    sub_out.buffer_frame_size    = 512;
-    backend->addDevice(sub_out);
-
-    BackendDeviceInfo agg;
-    agg.uid = "aggregate";
-    agg.name = "aggregate";
-    agg.direction = kBackendDirectionInput | kBackendDirectionOutput;
-    agg.input_channel_count  = 2;
-    agg.output_channel_count = 2;
-    agg.nominal_sample_rate  = 48000.0;
-    agg.buffer_frame_size    = 512;  // effective = max(members)
-    backend->addAggregateDevice(agg, {"sub-input", "sub-output"});
-
-    auto dm = std::make_unique<DeviceManager>(std::move(backend_ptr));
-    dm->refresh();
-    RouteManager rm(*dm);
-
-    std::vector<ChannelEdge> m{{0, 0}, {1, 1}};
-    RouteManager::RouteConfig cfg{
-        "aggregate", "aggregate", m, "aggregate-duplex",
-        /*latency_mode*/ 2};
-    jbox_error_t err{};
-    const auto id = rm.addRoute(cfg, &err);
-    REQUIRE(rm.startRoute(id) == JBOX_OK);
-
-    // Every device in the aggregate is hogged.
-    REQUIRE(backend->isExclusive("sub-input"));
-    REQUIRE(backend->isExclusive("sub-output"));
-    REQUIRE(backend->isExclusive("aggregate"));
-
-    // Each sub-device AND the aggregate got a 64-frame request.
-    const auto& reqs = backend->bufferSizeRequests();
-    auto count_for = [&](const std::string& uid) {
-        std::size_t n = 0;
-        for (const auto& r : reqs) {
-            if (r.uid == uid && r.requested == 64) ++n;
-        }
-        return n;
-    };
-    REQUIRE(count_for("sub-input")  >= 1);
-    REQUIRE(count_for("sub-output") >= 1);
-    REQUIRE(count_for("aggregate")  >= 1);
-
-    // Buffer sizes now actually 64 on all three.
-    REQUIRE(backend->currentBufferFrameSize("sub-input")  == 64);
-    REQUIRE(backend->currentBufferFrameSize("sub-output") == 64);
-    REQUIRE(backend->currentBufferFrameSize("aggregate")  == 64);
-
-    REQUIRE(rm.stopRoute(id) == JBOX_OK);
-
-    // Hog released on every member.
-    REQUIRE_FALSE(backend->isExclusive("sub-input"));
-    REQUIRE_FALSE(backend->isExclusive("sub-output"));
-    REQUIRE_FALSE(backend->isExclusive("aggregate"));
-
-    // Buffer sizes restored to each member's own pre-claim value —
-    // critically, sub-input goes back to 256 (its original) and not
-    // 512 (the aggregate's original).
-    REQUIRE(backend->currentBufferFrameSize("sub-input")  == 256);
-    REQUIRE(backend->currentBufferFrameSize("sub-output") == 512);
-    REQUIRE(backend->currentBufferFrameSize("aggregate")  == 512);
-}
-
-TEST_CASE("RouteManager: duplex fast path honours buffer_frames override",
-          "[route_manager][duplex][buffer]") {
-    // ABI v6: a non-zero `buffer_frames` on the route config
-    // overrides the fast path's 64-frame default. Verify the request
-    // lands on the device and the pill reflects the chosen value.
-    auto backend_ptr = std::make_unique<SimulatedBackend>();
-    SimulatedBackend* backend = backend_ptr.get();
-    BackendDeviceInfo info;
-    info.uid = "aggregate";
-    info.name = "aggregate";
-    info.direction = kBackendDirectionInput | kBackendDirectionOutput;
-    info.input_channel_count  = 2;
-    info.output_channel_count = 2;
-    info.nominal_sample_rate  = 48000.0;
-    info.buffer_frame_size    = 512;
-    backend->addDevice(info);
-    auto dm = std::make_unique<DeviceManager>(std::move(backend_ptr));
-    dm->refresh();
-    RouteManager rm(*dm);
-
-    std::vector<ChannelEdge> m{{0, 0}};
-    RouteManager::RouteConfig cfg{
-        "aggregate", "aggregate", m, "duplex-override",
-        /*latency_mode*/ 2,
-        /*buffer_frames*/ 128};
-    jbox_error_t err{};
-    const auto id = rm.addRoute(cfg, &err);
-    REQUIRE(rm.startRoute(id) == JBOX_OK);
-
-    REQUIRE(backend->currentBufferFrameSize("aggregate") == 128);
-    REQUIRE(backend->bufferSizeRequests().size() == 1);
-    REQUIRE(backend->bufferSizeRequests().front().requested == 128);
-
-    jbox_route_latency_components_t components{};
-    REQUIRE(rm.pollLatencyComponents(id, &components) == JBOX_OK);
-    REQUIRE(components.src_buffer_frames == 128);
-}
-
-TEST_CASE("supportedBufferFrameSizeRange: plain device returns its own range",
-          "[device_backend][buffer]") {
-    SimulatedBackend backend;
-    BackendDeviceInfo info;
-    info.uid = "plain";
-    info.name = "plain";
-    info.direction = kBackendDirectionInput;
-    info.input_channel_count = 2;
-    info.nominal_sample_rate = 48000.0;
-    info.buffer_frame_size = 128;
-    backend.addDevice(info);
-    backend.setBufferFrameSizeRange("plain", 16, 2048);
-
-    const auto r = backend.supportedBufferFrameSizeRange("plain");
-    REQUIRE(r.minimum == 16);
-    REQUIRE(r.maximum == 2048);
-
-    // Unknown UID returns an empty range so the UI hides the picker.
-    const auto bogus = backend.supportedBufferFrameSizeRange("nope");
-    REQUIRE(bogus.minimum == 0);
-    REQUIRE(bogus.maximum == 0);
-}
-
-TEST_CASE("supportedBufferFrameSizeRange: non-overlapping sub-device ranges collapse to empty",
-          "[device_backend][aggregate][buffer]") {
-    // Sub A accepts [32, 64], sub B accepts [128, 2048] — no
-    // intersection. The engine must not surface a value that
-    // neither member can honour; an empty range signals "hide the
-    // picker, there is no common target".
-    SimulatedBackend backend;
-    BackendDeviceInfo a;
-    a.uid = "sub-a";
-    a.name = "sub-a";
-    a.direction = kBackendDirectionInput;
-    a.input_channel_count = 2;
-    a.nominal_sample_rate = 48000.0;
-    a.buffer_frame_size = 64;
-    backend.addDevice(a);
-    backend.setBufferFrameSizeRange("sub-a", 32, 64);
-
-    BackendDeviceInfo b;
-    b.uid = "sub-b";
-    b.name = "sub-b";
-    b.direction = kBackendDirectionOutput;
-    b.output_channel_count = 2;
-    b.nominal_sample_rate = 48000.0;
-    b.buffer_frame_size = 128;
-    backend.addDevice(b);
-    backend.setBufferFrameSizeRange("sub-b", 128, 2048);
-
-    BackendDeviceInfo agg;
-    agg.uid = "aggregate";
-    agg.name = "aggregate";
-    agg.direction = kBackendDirectionInput | kBackendDirectionOutput;
-    agg.input_channel_count  = 2;
-    agg.output_channel_count = 2;
-    agg.nominal_sample_rate  = 48000.0;
-    agg.buffer_frame_size    = 128;
-    backend.addAggregateDevice(agg, {"sub-a", "sub-b"});
-    backend.setBufferFrameSizeRange("aggregate", 16, 8192);
-
-    const auto r = backend.supportedBufferFrameSizeRange("aggregate");
-    REQUIRE(r.minimum == 0);
-    REQUIRE(r.maximum == 0);
-}
-
-TEST_CASE("supportedBufferFrameSizeRange intersects aggregate sub-device ranges",
-          "[device_backend][aggregate][buffer]") {
-    // The range query the UI uses must reflect every active member
-    // on an aggregate device — values outside any member's range
-    // would fail silently. Sub A accepts [32, 1024], sub B accepts
-    // [128, 4096]; the intersection is [128, 1024].
-    SimulatedBackend backend;
-    BackendDeviceInfo a;
-    a.uid = "sub-a";
-    a.name = "sub-a";
-    a.direction = kBackendDirectionInput;
-    a.input_channel_count = 2;
-    a.nominal_sample_rate = 48000.0;
-    a.buffer_frame_size = 128;
-    backend.addDevice(a);
-    backend.setBufferFrameSizeRange("sub-a", 32, 1024);
-
-    BackendDeviceInfo b;
-    b.uid = "sub-b";
-    b.name = "sub-b";
-    b.direction = kBackendDirectionOutput;
-    b.output_channel_count = 2;
-    b.nominal_sample_rate = 48000.0;
-    b.buffer_frame_size = 128;
-    backend.addDevice(b);
-    backend.setBufferFrameSizeRange("sub-b", 128, 4096);
-
-    BackendDeviceInfo agg;
-    agg.uid = "aggregate";
-    agg.name = "aggregate";
-    agg.direction = kBackendDirectionInput | kBackendDirectionOutput;
-    agg.input_channel_count  = 2;
-    agg.output_channel_count = 2;
-    agg.nominal_sample_rate  = 48000.0;
-    agg.buffer_frame_size    = 128;
-    backend.addAggregateDevice(agg, {"sub-a", "sub-b"});
-    // Aggregate's own declared range is wide.
-    backend.setBufferFrameSizeRange("aggregate", 16, 8192);
-
-    const auto r = backend.supportedBufferFrameSizeRange("aggregate");
-    REQUIRE(r.minimum == 128);
-    REQUIRE(r.maximum == 1024);
-}
 
 TEST_CASE("RouteManager: duplex fast path leaves an already-small device at target",
           "[route_manager][duplex][buffer]") {
@@ -879,6 +538,296 @@ TEST_CASE("RouteManager: duplex fast path leaves an already-small device at targ
     REQUIRE(rm.stopRoute(id) == JBOX_OK);
     // ... and through stop (restore target == original == 64).
     REQUIRE(backend->currentBufferFrameSize("aggregate") == 64);
+}
+
+TEST_CASE("RouteManager: duplex fast path reflects the user's interface buffer in the latency pill",
+          "[route_manager][duplex][buffer]") {
+    // Phase 7.6 contract: Jbox no longer asks the HAL to change the
+    // device's buffer frame size. Whatever the user has dialed in
+    // their interface software (UA Console / RME TotalMix / Audio MIDI
+    // Setup / etc.) is what shows up in the latency pill. The
+    // simulated backend's `setBufferFrameSize(uid, frames)` test seam
+    // mirrors that out-of-band change. This test pins both directions
+    // of the contract: a route picks up the device's buffer at start
+    // time, and changing the device's buffer between stop and start
+    // is reflected in the next start's latency components without any
+    // engine-side negotiation.
+    auto backend_ptr = std::make_unique<SimulatedBackend>();
+    SimulatedBackend* backend = backend_ptr.get();
+    BackendDeviceInfo info;
+    info.uid = "aggregate";
+    info.name = "aggregate";
+    info.direction = kBackendDirectionInput | kBackendDirectionOutput;
+    info.input_channel_count  = 2;
+    info.output_channel_count = 2;
+    info.nominal_sample_rate  = 48000.0;
+    info.buffer_frame_size    = 256;  // user's initial interface setting
+    backend->addDevice(info);
+    auto dm = std::make_unique<DeviceManager>(std::move(backend_ptr));
+    dm->refresh();
+    RouteManager rm(*dm);
+
+    std::vector<ChannelEdge> m{{0, 0}, {1, 1}};
+    RouteManager::RouteConfig cfg{
+        "aggregate", "aggregate", m, "respect-user-buffer",
+        /*latency_mode*/ 2};
+    jbox_error_t err{};
+    const auto id = rm.addRoute(cfg, &err);
+    REQUIRE(rm.startRoute(id) == JBOX_OK);
+
+    // Latency pill reflects the user's 256-frame setting. The duplex
+    // fast path doesn't touch dst on a same-device route, so only
+    // src_buffer_frames is meaningful.
+    jbox_route_latency_components_t components{};
+    REQUIRE(rm.pollLatencyComponents(id, &components) == JBOX_OK);
+    REQUIRE(components.src_buffer_frames == 256);
+    // Engine never wrote to the device (it's not allowed to anymore).
+    REQUIRE(backend->currentBufferFrameSize("aggregate") == 256);
+
+    REQUIRE(rm.stopRoute(id) == JBOX_OK);
+    // Stop is also a no-op against the device buffer — there's no
+    // restore-on-release because there was no claim-on-start.
+    REQUIRE(backend->currentBufferFrameSize("aggregate") == 256);
+
+    // User dials the interface to 64 frames out-of-band (the simulated
+    // backend's test seam stands in for them touching UA Console etc.).
+    backend->setBufferFrameSize("aggregate", 64);
+    REQUIRE(backend->currentBufferFrameSize("aggregate") == 64);
+
+    // A fresh start picks up the new buffer in the latency pill.
+    REQUIRE(rm.startRoute(id) == JBOX_OK);
+    REQUIRE(rm.pollLatencyComponents(id, &components) == JBOX_OK);
+    REQUIRE(components.src_buffer_frames == 64);
+    REQUIRE(backend->currentBufferFrameSize("aggregate") == 64);
+
+    REQUIRE(rm.stopRoute(id) == JBOX_OK);
+    REQUIRE(backend->currentBufferFrameSize("aggregate") == 64);
+}
+
+TEST_CASE("RouteManager: buffer_frames override issues a single setBufferFrameSize per device, no hog",
+          "[route_manager][duplex][buffer_frames]") {
+    // ABI v11: a non-zero `buffer_frames` on the route config triggers
+    // a Superior-Drummer-style HAL property write — exactly one
+    // `setBufferFrameSize(uid, frames)` call per device the route
+    // touches, no claimExclusive / hog mode. macOS resolves the actual
+    // buffer with `max-across-clients`, so this test pins both
+    // outcomes: the simulated backend records the write and the
+    // device's buffer_frame_size lands at the requested value (no
+    // other client is asking, so there's no max-across-clients pull).
+    auto backend_ptr = std::make_unique<SimulatedBackend>();
+    SimulatedBackend* backend = backend_ptr.get();
+
+    BackendDeviceInfo info;
+    info.uid = "aggregate";
+    info.name = "aggregate";
+    info.direction = kBackendDirectionInput | kBackendDirectionOutput;
+    info.input_channel_count  = 2;
+    info.output_channel_count = 2;
+    info.nominal_sample_rate  = 48000.0;
+    info.buffer_frame_size    = 256;
+    backend->addDevice(info);
+    auto dm = std::make_unique<DeviceManager>(std::move(backend_ptr));
+    dm->refresh();
+    RouteManager rm(*dm);
+
+    std::vector<ChannelEdge> m{{0, 0}, {1, 1}};
+    RouteManager::RouteConfig cfg{
+        "aggregate", "aggregate", m, "buffer-override",
+        /*latency_mode*/ 2,
+        /*buffer_frames*/ 16};
+    jbox_error_t err{};
+    const auto id = rm.addRoute(cfg, &err);
+    REQUIRE(rm.startRoute(id) == JBOX_OK);
+
+    // Exactly one write to the (non-aggregate) device, at 16 frames.
+    REQUIRE(backend->bufferSizeWrites().size() == 1);
+    REQUIRE(backend->bufferSizeWrites().front().uid == "aggregate");
+    REQUIRE(backend->bufferSizeWrites().front().frames == 16);
+    // Buffer landed.
+    REQUIRE(backend->currentBufferFrameSize("aggregate") == 16);
+
+    // Latency pill picks up the post-write value.
+    jbox_route_latency_components_t components{};
+    REQUIRE(rm.pollLatencyComponents(id, &components) == JBOX_OK);
+    REQUIRE(components.src_buffer_frames == 16);
+
+    REQUIRE(rm.stopRoute(id) == JBOX_OK);
+}
+
+TEST_CASE("RouteManager: buffer_frames override fans to every aggregate sub-device",
+          "[route_manager][duplex][buffer_frames][aggregate]") {
+    // For an aggregate UID, setBufferFrameSize enumerates the active
+    // sub-device list and writes to each member directly. This is
+    // structurally identical to what Superior Drummer / any vanilla
+    // Core Audio client does when the device IS an aggregate:
+    // independent property writes per member, no aggregate-driver
+    // fan-out, no hog claim. macOS computes the aggregate's
+    // effective buffer as `max(member buffers)` once each member
+    // has been individually asked.
+    auto backend_ptr = std::make_unique<SimulatedBackend>();
+    SimulatedBackend* backend = backend_ptr.get();
+
+    backend->addDevice([] {
+        BackendDeviceInfo info;
+        info.uid = "sub-a";
+        info.name = "sub-a";
+        info.direction = kBackendDirectionInput | kBackendDirectionOutput;
+        info.input_channel_count  = 2;
+        info.output_channel_count = 2;
+        info.nominal_sample_rate  = 48000.0;
+        info.buffer_frame_size    = 512;
+        return info;
+    }());
+    backend->addDevice([] {
+        BackendDeviceInfo info;
+        info.uid = "sub-b";
+        info.name = "sub-b";
+        info.direction = kBackendDirectionInput | kBackendDirectionOutput;
+        info.input_channel_count  = 2;
+        info.output_channel_count = 2;
+        info.nominal_sample_rate  = 48000.0;
+        info.buffer_frame_size    = 256;
+        return info;
+    }());
+
+    BackendDeviceInfo agg;
+    agg.uid = "aggregate";
+    agg.name = "aggregate";
+    agg.direction = kBackendDirectionInput | kBackendDirectionOutput;
+    agg.input_channel_count  = 2;
+    agg.output_channel_count = 2;
+    agg.nominal_sample_rate  = 48000.0;
+    agg.buffer_frame_size    = 512;
+    backend->addAggregateDevice(agg, {"sub-a", "sub-b"});
+
+    auto dm = std::make_unique<DeviceManager>(std::move(backend_ptr));
+    dm->refresh();
+    RouteManager rm(*dm);
+
+    std::vector<ChannelEdge> m{{0, 0}, {1, 1}};
+    RouteManager::RouteConfig cfg{
+        "aggregate", "aggregate", m, "agg-buffer-override",
+        /*latency_mode*/ 2,
+        /*buffer_frames*/ 64};
+    jbox_error_t err{};
+    const auto id = rm.addRoute(cfg, &err);
+    REQUIRE(rm.startRoute(id) == JBOX_OK);
+
+    // Three writes total: one per sub plus the aggregate self.
+    const auto& writes = backend->bufferSizeWrites();
+    REQUIRE(writes.size() == 3);
+    auto count_for = [&](const std::string& uid) {
+        std::size_t n = 0;
+        for (const auto& w : writes) {
+            if (w.uid == uid && w.frames == 64) ++n;
+        }
+        return n;
+    };
+    REQUIRE(count_for("sub-a") == 1);
+    REQUIRE(count_for("sub-b") == 1);
+    REQUIRE(count_for("aggregate") == 1);
+
+    // Each member's buffer landed at 64.
+    REQUIRE(backend->currentBufferFrameSize("sub-a")     == 64);
+    REQUIRE(backend->currentBufferFrameSize("sub-b")     == 64);
+    REQUIRE(backend->currentBufferFrameSize("aggregate") == 64);
+
+    REQUIRE(rm.stopRoute(id) == JBOX_OK);
+}
+
+TEST_CASE("RouteManager: buffer_frames == 0 issues no setBufferFrameSize call",
+          "[route_manager][duplex][buffer_frames]") {
+    // The default — no per-route preference — leaves the HAL
+    // alone entirely. No property writes; the device stays at
+    // whatever buffer the user (or some other app) put it at.
+    auto backend_ptr = std::make_unique<SimulatedBackend>();
+    SimulatedBackend* backend = backend_ptr.get();
+
+    BackendDeviceInfo info;
+    info.uid = "aggregate";
+    info.name = "aggregate";
+    info.direction = kBackendDirectionInput | kBackendDirectionOutput;
+    info.input_channel_count  = 2;
+    info.output_channel_count = 2;
+    info.nominal_sample_rate  = 48000.0;
+    info.buffer_frame_size    = 256;
+    backend->addDevice(info);
+    auto dm = std::make_unique<DeviceManager>(std::move(backend_ptr));
+    dm->refresh();
+    RouteManager rm(*dm);
+
+    std::vector<ChannelEdge> m{{0, 0}, {1, 1}};
+    RouteManager::RouteConfig cfg{
+        "aggregate", "aggregate", m, "no-buffer-override",
+        /*latency_mode*/ 2};  // buffer_frames defaults to 0
+    jbox_error_t err{};
+    const auto id = rm.addRoute(cfg, &err);
+    REQUIRE(rm.startRoute(id) == JBOX_OK);
+
+    REQUIRE(backend->bufferSizeWrites().empty());
+    REQUIRE(backend->currentBufferFrameSize("aggregate") == 256);
+
+    REQUIRE(rm.stopRoute(id) == JBOX_OK);
+}
+
+TEST_CASE("RouteManager: cross-device buffer_frames override writes to both source and destination",
+          "[route_manager][cross_device][buffer_frames]") {
+    // V31 → Apollo–style cross-device route with buffer override.
+    // The engine writes the preference to BOTH devices independently
+    // (Superior Drummer style on each), since macOS resolves the
+    // buffer per-device, not per-route.
+    auto backend_ptr = std::make_unique<SimulatedBackend>();
+    SimulatedBackend* backend = backend_ptr.get();
+
+    BackendDeviceInfo src;
+    src.uid = "v31";
+    src.name = "v31";
+    src.direction = kBackendDirectionInput;
+    src.input_channel_count  = 2;
+    src.output_channel_count = 0;
+    src.nominal_sample_rate  = 48000.0;
+    src.buffer_frame_size    = 256;
+    backend->addDevice(src);
+
+    BackendDeviceInfo dst;
+    dst.uid = "apollo";
+    dst.name = "apollo";
+    dst.direction = kBackendDirectionOutput;
+    dst.input_channel_count  = 0;
+    dst.output_channel_count = 2;
+    dst.nominal_sample_rate  = 48000.0;
+    dst.buffer_frame_size    = 512;
+    backend->addDevice(dst);
+
+    auto dm = std::make_unique<DeviceManager>(std::move(backend_ptr));
+    dm->refresh();
+    RouteManager rm(*dm);
+
+    std::vector<ChannelEdge> m{{0, 0}, {1, 1}};
+    RouteManager::RouteConfig cfg{
+        "v31", "apollo", m, "cross-device-override",
+        /*latency_mode*/ 2,
+        /*buffer_frames*/ 16};
+    jbox_error_t err{};
+    const auto id = rm.addRoute(cfg, &err);
+    REQUIRE(rm.startRoute(id) == JBOX_OK);
+
+    const auto& writes = backend->bufferSizeWrites();
+    REQUIRE(writes.size() == 2);
+    auto count_for = [&](const std::string& uid) {
+        std::size_t n = 0;
+        for (const auto& w : writes) {
+            if (w.uid == uid && w.frames == 16) ++n;
+        }
+        return n;
+    };
+    REQUIRE(count_for("v31")    == 1);
+    REQUIRE(count_for("apollo") == 1);
+
+    REQUIRE(backend->currentBufferFrameSize("v31")    == 16);
+    REQUIRE(backend->currentBufferFrameSize("apollo") == 16);
+
+    REQUIRE(rm.stopRoute(id) == JBOX_OK);
 }
 
 TEST_CASE("RouteManager: fan-out replicates one source into multiple destinations",
@@ -1047,202 +996,6 @@ TEST_CASE("RouteManager: pollLatencyComponents reflects cached components",
     REQUIRE(after_stop.total_us == 0);
 }
 
-TEST_CASE("RouteManager: mux path re-reads buffer sizes into the pill after shrink",
-          "[route_manager][latency_mode][mux]") {
-    // Regression: the non-duplex (cross-device) attemptStart used to
-    // populate the LatencyComponents from the pre-attach cached
-    // `BackendDeviceInfo.buffer_frame_size`, which is the value
-    // captured at device-enumeration time — BEFORE the mux runs its
-    // buffer-shrink request. That left the pill reading the pre-
-    // shrink buffer (e.g. 512) even when the HAL actually accepted
-    // the smaller target. This test drives Performance mode on two
-    // separate devices that start at 512 frames and asserts the
-    // pill reflects the post-shrink value (64) — exercising the
-    // re-read path that folds `currentBufferFrameSize` back into
-    // the latency components after the attach.
-    auto backend = std::make_unique<SimulatedBackend>();
-    BackendDeviceInfo src = makeInputDevice("src", 2, /*buf*/ 512);
-    BackendDeviceInfo dst = makeOutputDevice("dst", 2, /*buf*/ 512);
-    backend->addDevice(src);
-    backend->addDevice(dst);
-    auto dm = std::make_unique<DeviceManager>(std::move(backend));
-    dm->refresh();
-    RouteManager rm(*dm);
-
-    std::vector<ChannelEdge> mapping{{0, 0}, {1, 1}};
-    RouteManager::RouteConfig cfg{
-        "src", "dst", mapping, "mux-reread",
-        /*latency_mode*/ 2,
-        /*buffer_frames*/ 64};
-    jbox_error_t err{};
-    const auto id = rm.addRoute(cfg, &err);
-    REQUIRE(rm.startRoute(id) == JBOX_OK);
-
-    jbox_route_latency_components_t components{};
-    REQUIRE(rm.pollLatencyComponents(id, &components) == JBOX_OK);
-
-    REQUIRE(components.src_buffer_frames == 64);
-    REQUIRE(components.dst_buffer_frames == 64);
-
-    // The ring target fill is sized from the ring's usable capacity,
-    // which doesn't change mid-route (allocation is pre-attach and
-    // keyed to the pre-shrink buffer sizes). This assertion just
-    // pins that we didn't lose the setpoint in the refresh.
-    REQUIRE(components.ring_target_fill_frames > 0);
-}
-
-TEST_CASE("RouteManager: mux path sizes the ring from post-shrink buffer values",
-          "[route_manager][latency_mode][mux][ring]") {
-    // Load-bearing Performance-mode invariant: on a cross-device
-    // route, the ring is sized from the POST-shrink device buffer,
-    // not the pre-shrink cached value. If we size it pre-shrink, the
-    // ring is ~1024 frames on a 64-frame target (from 512-frame
-    // starting buffers) and the drift-sampler setpoint lands at
-    // ~256 frames — 5.3 ms residency on top of the buffers. Sizing
-    // post-shrink gives a 256-frame ring and a ~64-frame setpoint
-    // (~1.3 ms), which is what Performance mode is supposed to
-    // deliver.
-    //
-    // RingSizing for Performance: multiplier=2, floor=256. With a
-    // 64-frame post-shrink buffer: capacity = max(256, 2*64) = 256;
-    // target_fill = capacity * 0.25 ≈ 64 frames. Assert the actual
-    // target-fill value is ≤ 128 so this test catches the pre-shrink
-    // regression (which would give ~256) without over-pinning the
-    // exact preset values.
-    auto backend = std::make_unique<SimulatedBackend>();
-    BackendDeviceInfo src = makeInputDevice("src", 2, /*buf*/ 512);
-    BackendDeviceInfo dst = makeOutputDevice("dst", 2, /*buf*/ 512);
-    backend->addDevice(src);
-    backend->addDevice(dst);
-    auto dm = std::make_unique<DeviceManager>(std::move(backend));
-    dm->refresh();
-    RouteManager rm(*dm);
-
-    std::vector<ChannelEdge> mapping{{0, 0}, {1, 1}};
-    RouteManager::RouteConfig cfg{
-        "src", "dst", mapping, "mux-ring-post-shrink",
-        /*latency_mode*/ 2,
-        /*buffer_frames*/ 64};
-    jbox_error_t err{};
-    const auto id = rm.addRoute(cfg, &err);
-    REQUIRE(rm.startRoute(id) == JBOX_OK);
-
-    jbox_route_latency_components_t components{};
-    REQUIRE(rm.pollLatencyComponents(id, &components) == JBOX_OK);
-
-    // Post-shrink ring: target_fill ≤ 128 frames (~2.7 ms at 48 k).
-    // Pre-shrink ring would give ~256 (5.3 ms) and fail this bound.
-    REQUIRE(components.ring_target_fill_frames <= 128);
-    REQUIRE(components.ring_target_fill_frames > 0);
-
-    // The corresponding pill is dominated by the two 64-frame
-    // buffers + the tight setpoint; it must come in well under the
-    // pre-shrink-ring ~11 ms (11 000 µs) that motivated this change.
-    jbox_route_status_t status{};
-    REQUIRE(rm.pollStatus(id, &status) == JBOX_OK);
-    REQUIRE(status.estimated_latency_us < 8'000);
-}
-
-TEST_CASE("RouteManager: Low-latency tier setpoint is refreshed from post-shrink buffers",
-          "[route_manager][latency_mode][mux][ring]") {
-    // Companion to the Performance-tier case above: Low latency
-    // (tier 1) also benefits from the post-attach setpoint refresh
-    // when the user picks a buffer override smaller than the
-    // device's starting buffer. Without the refresh, Low on a
-    // 512-frame device with a 64-frame override would land the
-    // setpoint at ~767 frames (ring sized pre-shrink: max(512,
-    // 3*512) = 1536 → 0.5 × 1535 ≈ 767). With the refresh, it
-    // lands at ~256 frames (post-shrink: max(512, 3*64) = 512 →
-    // 0.5 × 512 = 256). This test pins the post-shrink value so a
-    // regression in the refresh logic would be caught on the Low
-    // tier, not just Performance.
-    auto backend = std::make_unique<SimulatedBackend>();
-    BackendDeviceInfo src = makeInputDevice("src", 2, /*buf*/ 512);
-    BackendDeviceInfo dst = makeOutputDevice("dst", 2, /*buf*/ 512);
-    backend->addDevice(src);
-    backend->addDevice(dst);
-    auto dm = std::make_unique<DeviceManager>(std::move(backend));
-    dm->refresh();
-    RouteManager rm(*dm);
-
-    std::vector<ChannelEdge> mapping{{0, 0}, {1, 1}};
-    RouteManager::RouteConfig cfg{
-        "src", "dst", mapping, "mux-low-ring",
-        /*latency_mode*/ 1,
-        /*buffer_frames*/ 64};
-    jbox_error_t err{};
-    const auto id = rm.addRoute(cfg, &err);
-    REQUIRE(rm.startRoute(id) == JBOX_OK);
-
-    jbox_route_latency_components_t components{};
-    REQUIRE(rm.pollLatencyComponents(id, &components) == JBOX_OK);
-
-    // Post-shrink Low-tier setpoint: ≤ 300 frames leaves ample slack
-    // above the expected 256, well below the pre-refresh 767.
-    REQUIRE(components.ring_target_fill_frames <= 300);
-    REQUIRE(components.ring_target_fill_frames > 0);
-    // Low tier keeps ring/2 drain headroom, so the pill is higher
-    // than Performance's ~6–7 ms but still well under the ~29 ms
-    // pre-shrink ceiling.
-    jbox_route_status_t status{};
-    REQUIRE(rm.pollStatus(id, &status) == JBOX_OK);
-    REQUIRE(status.estimated_latency_us < 12'000);
-}
-
-TEST_CASE("RouteManager: mux path reads each device independently after shrink",
-          "[route_manager][latency_mode][mux]") {
-    // Realistic failure mode on real hardware: hog succeeds on one
-    // device but not the other (another app is holding just the
-    // second). In that case the shrink lands asymmetrically — one
-    // device accepts the request, the other's HAL clamps back up.
-    // Use SimulatedBackend's `setBufferFrameSizeRange` to pin the
-    // dst device's minimum at 256 so its "shrink" clamps to 256,
-    // while src accepts 64 cleanly. The pill must report the
-    // asymmetric truth, not the symmetric expectation.
-    //
-    // SimulatedBackend's requestBufferFrameSize is unclamped for
-    // simplicity (see its header comment), so we emulate HAL
-    // clamping by pre-setting the dst device's buffer size to a
-    // value larger than the requested target and observing that the
-    // pill still reflects the ACTUAL post-attach size. If the code
-    // path is correct, whatever value is in the backend at the
-    // moment of the re-read is what the pill carries.
-    auto backend = std::make_unique<SimulatedBackend>();
-    BackendDeviceInfo src = makeInputDevice("src", 2, /*buf*/ 512);
-    BackendDeviceInfo dst = makeOutputDevice("dst", 2, /*buf*/ 512);
-    backend->addDevice(src);
-    backend->addDevice(dst);
-    auto dm = std::make_unique<DeviceManager>(std::move(backend));
-    dm->refresh();
-    RouteManager rm(*dm);
-
-    std::vector<ChannelEdge> mapping{{0, 0}};
-    // Different per-route targets than the default: 128 frames. Lets
-    // us verify the per-route override is what the mux picked up.
-    RouteManager::RouteConfig cfg{
-        "src", "dst", mapping, "mux-asymmetric",
-        /*latency_mode*/ 2,
-        /*buffer_frames*/ 128};
-    jbox_error_t err{};
-    const auto id = rm.addRoute(cfg, &err);
-    REQUIRE(rm.startRoute(id) == JBOX_OK);
-
-    jbox_route_latency_components_t components{};
-    REQUIRE(rm.pollLatencyComponents(id, &components) == JBOX_OK);
-
-    // Both devices take the same 128-frame request (no per-device
-    // clamp in the simulated backend); but the key property is that
-    // the pill matches each device's current value independently,
-    // not the pre-attach cached value. On real hardware with a
-    // one-sided clamp these two fields can differ.
-    REQUIRE(components.src_buffer_frames ==
-            dm->backend().currentBufferFrameSize("src"));
-    REQUIRE(components.dst_buffer_frames ==
-            dm->backend().currentBufferFrameSize("dst"));
-    REQUIRE(components.src_buffer_frames == 128);
-    REQUIRE(components.dst_buffer_frames == 128);
-}
-
 TEST_CASE("RouteManager: latency_mode tiers strictly shrink the pill",
           "[route_manager][latency_mode]") {
     // Phase 6 refinement #6. With 64-frame device buffers at 48 kHz:
@@ -1314,183 +1067,3 @@ TEST_CASE("RouteManager: latency_mode tiers strictly shrink the pill",
     REQUIRE(ring_frac < 0.40);
 }
 
-// ---------------------------------------------------------------------------
-// Phase 7.5 — device sharing (hog-mode opt-out). See docs/spec.md § 2.7.
-// ---------------------------------------------------------------------------
-
-TEST_CASE("RouteManager: share_device skips hog-mode on the duplex fast path",
-          "[route_manager][share_device]") {
-    // A share_device route trades the exclusive HAL buffer guarantee
-    // for coexistence with other apps on the same device. The duplex
-    // fast path still runs, but claimExclusive is not invoked — the
-    // route rides the shared-client path that exists today as the
-    // hog-mode-acquisition-failed fall-through.
-    auto backend_ptr = std::make_unique<SimulatedBackend>();
-    SimulatedBackend* backend = backend_ptr.get();
-    BackendDeviceInfo info;
-    info.uid = "aggregate";
-    info.name = "aggregate";
-    info.direction = kBackendDirectionInput | kBackendDirectionOutput;
-    info.input_channel_count  = 2;
-    info.output_channel_count = 2;
-    info.nominal_sample_rate  = 48000.0;
-    info.buffer_frame_size    = 512;
-    backend->addDevice(info);
-    auto dm = std::make_unique<DeviceManager>(std::move(backend_ptr));
-    dm->refresh();
-    RouteManager rm(*dm);
-
-    std::vector<ChannelEdge> m{{0, 0}};
-    RouteManager::RouteConfig cfg{
-        "aggregate", "aggregate", m, "share-duplex",
-        /*latency_mode*/ 1,  // Low — keeps fast path off, still exercises
-                             // the gate for non-Performance share paths.
-        /*buffer_frames*/ 0,
-        /*share_device*/  true};
-    jbox_error_t err{};
-    const auto id = rm.addRoute(cfg, &err);
-
-    REQUIRE(rm.startRoute(id) == JBOX_OK);
-    REQUIRE_FALSE(backend->isExclusive("aggregate"));
-
-    REQUIRE(rm.stopRoute(id) == JBOX_OK);
-    REQUIRE_FALSE(backend->isExclusive("aggregate"));
-}
-
-TEST_CASE("RouteManager: Performance + share_device is demoted to Low and flagged",
-          "[route_manager][share_device]") {
-    // Performance tier needs exclusivity (direct-monitor fast path +
-    // ring/4 setpoint) and cannot be honoured with share_device on.
-    // The engine silently demotes to Low and surfaces
-    // JBOX_ROUTE_STATUS_SHARE_DOWNGRADE so the UI can explain why the
-    // tier picker shows Low after the user saved Performance.
-    auto backend_ptr = std::make_unique<SimulatedBackend>();
-    SimulatedBackend* backend = backend_ptr.get();
-    BackendDeviceInfo info;
-    info.uid = "dev";
-    info.name = "dev";
-    info.direction = kBackendDirectionInput | kBackendDirectionOutput;
-    info.input_channel_count  = 2;
-    info.output_channel_count = 2;
-    info.nominal_sample_rate  = 48000.0;
-    info.buffer_frame_size    = 256;
-    backend->addDevice(info);
-    auto dm = std::make_unique<DeviceManager>(std::move(backend_ptr));
-    dm->refresh();
-    RouteManager rm(*dm);
-
-    std::vector<ChannelEdge> m{{0, 0}};
-    RouteManager::RouteConfig cfg{
-        "dev", "dev", m, "perf-share",
-        /*latency_mode*/ 2,
-        /*buffer_frames*/ 0,
-        /*share_device*/  true};
-    jbox_error_t err{};
-    const auto id = rm.addRoute(cfg, &err);
-
-    REQUIRE(rm.startRoute(id) == JBOX_OK);
-
-    jbox_route_status_t status{};
-    REQUIRE(rm.pollStatus(id, &status) == JBOX_OK);
-    REQUIRE((status.status_flags & JBOX_ROUTE_STATUS_SHARE_DOWNGRADE) != 0);
-
-    // LatencyComponents now reflect Low-tier ring/2 setpoint, not the
-    // Performance-tier ring/4 setpoint. Since this is a same-device
-    // route, the shared fast path is also disabled — the ring is
-    // populated at all, which Performance's direct-monitor bypass
-    // would have zeroed.
-    jbox_route_latency_components_t comp{};
-    REQUIRE(rm.pollLatencyComponents(id, &comp) == JBOX_OK);
-    REQUIRE(comp.ring_target_fill_frames > 0);
-    // Ring-target-fill fraction is ring/2 (Low) rather than ring/4
-    // (Performance). Assert strictly > 40 % which the Performance
-    // tier would violate.
-    const auto usable =
-        comp.ring_target_fill_frames * 2u /* x2 bounds the ring */;
-    (void)usable;  // only used conceptually; we rely on strict > 40% below.
-    // Direct check: ring fraction against its source-side buffer. The
-    // exact buffer capacity is internal; the key invariant is that the
-    // setpoint is *not* ring/4, so we express it as a ratio relative
-    // to a known-large divisor.
-    REQUIRE(comp.ring_target_fill_frames >= 128);
-}
-
-TEST_CASE("RouteManager: SHARE_DOWNGRADE survives a stop + start cycle",
-          "[route_manager][share_device]") {
-    // Regression: the demotion must be computed from the stored
-    // `latency_mode` every attemptStart, not from a mutated copy.
-    // Otherwise the second start() after a stop would see the record's
-    // tier already demoted to Low, skip the gating check, and silently
-    // drop the SHARE_DOWNGRADE bit — leaving the user running at Low
-    // with no UI indicator to explain why.
-    auto backend_ptr = std::make_unique<SimulatedBackend>();
-    SimulatedBackend* backend = backend_ptr.get();
-    (void)backend;
-    BackendDeviceInfo info;
-    info.uid = "dev";
-    info.name = "dev";
-    info.direction = kBackendDirectionInput | kBackendDirectionOutput;
-    info.input_channel_count  = 2;
-    info.output_channel_count = 2;
-    info.nominal_sample_rate  = 48000.0;
-    info.buffer_frame_size    = 256;
-    backend->addDevice(info);
-    auto dm = std::make_unique<DeviceManager>(std::move(backend_ptr));
-    dm->refresh();
-    RouteManager rm(*dm);
-
-    std::vector<ChannelEdge> m{{0, 0}};
-    RouteManager::RouteConfig cfg{
-        "dev", "dev", m, "perf-share-cycle",
-        /*latency_mode*/ 2,
-        /*buffer_frames*/ 0,
-        /*share_device*/  true};
-    jbox_error_t err{};
-    const auto id = rm.addRoute(cfg, &err);
-
-    for (int i = 0; i < 3; ++i) {
-        REQUIRE(rm.startRoute(id) == JBOX_OK);
-        jbox_route_status_t status{};
-        REQUIRE(rm.pollStatus(id, &status) == JBOX_OK);
-        REQUIRE((status.status_flags & JBOX_ROUTE_STATUS_SHARE_DOWNGRADE) != 0);
-        REQUIRE(rm.stopRoute(id) == JBOX_OK);
-    }
-}
-
-TEST_CASE("RouteManager: share_device = false preserves exclusive behavior",
-          "[route_manager][share_device]") {
-    // Regression guard: default-initialised RouteConfig (share_device
-    // = false) must behave byte-for-byte like the pre-v9 exclusive
-    // flow on the Performance-tier duplex path.
-    auto backend_ptr = std::make_unique<SimulatedBackend>();
-    SimulatedBackend* backend = backend_ptr.get();
-    BackendDeviceInfo info;
-    info.uid = "dev";
-    info.name = "dev";
-    info.direction = kBackendDirectionInput | kBackendDirectionOutput;
-    info.input_channel_count  = 2;
-    info.output_channel_count = 2;
-    info.nominal_sample_rate  = 48000.0;
-    info.buffer_frame_size    = 512;
-    backend->addDevice(info);
-    auto dm = std::make_unique<DeviceManager>(std::move(backend_ptr));
-    dm->refresh();
-    RouteManager rm(*dm);
-
-    std::vector<ChannelEdge> m{{0, 0}};
-    RouteManager::RouteConfig cfg{
-        "dev", "dev", m, "exclusive-default",
-        /*latency_mode*/ 2};  // share_device defaults to false.
-    jbox_error_t err{};
-    const auto id = rm.addRoute(cfg, &err);
-
-    REQUIRE(rm.startRoute(id) == JBOX_OK);
-    REQUIRE(backend->isExclusive("dev"));
-
-    jbox_route_status_t status{};
-    REQUIRE(rm.pollStatus(id, &status) == JBOX_OK);
-    REQUIRE((status.status_flags & JBOX_ROUTE_STATUS_SHARE_DOWNGRADE) == 0);
-
-    REQUIRE(rm.stopRoute(id) == JBOX_OK);
-    REQUIRE_FALSE(backend->isExclusive("dev"));
-}

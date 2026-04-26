@@ -75,19 +75,11 @@ enum JboxPreferences {
     /// Raw value of `AppearanceMode`. Default: `.system`.
     public static let appearanceKey       = "com.jbox.appearance"
     // Audio
-    /// Raw `UInt32`: 0 = use device setting (default); non-zero = explicit
-    /// override frame count matching `BufferSizePolicy.frameChoices`.
-    public static let bufferSizePolicyKey = "com.jbox.bufferSizePolicy"
     /// Raw value of `Engine.ResamplerQuality.rawValue`. Default: `.mastering`.
     public static let resamplerQualityKey = "com.jbox.resamplerQuality"
     // Advanced
     /// Bool; diagnostics toggle (Phase 6 refinement #4). Default: off.
     public static let showDiagnosticsKey  = "com.jbox.showDiagnostics"
-    // Routing defaults
-    /// Bool; global "Share device with other apps by default" (Phase
-    /// 7.5). Newly-created routes inherit this; existing routes carry
-    /// their stored `Bool?` choice. Default: off (preserve exclusive).
-    public static let shareDevicesByDefaultKey = "com.jbox.shareDevicesByDefault"
 }
 
 struct PreferencesView: View {
@@ -162,22 +154,16 @@ struct GeneralPreferencesView: View {
     }
 }
 
-/// Audio tab: buffer-size policy + resampler quality. Both are
-/// engine-facing: buffer policy seeds the per-route default in
-/// `AddRouteSheet`, resampler quality pushes through to the engine's
-/// `AudioConverterWrapper` constructor for newly-started routes.
+/// Audio tab: resampler quality + an informational hint about the
+/// HAL buffer size. Resampler quality is engine-facing and pushes
+/// through to the `AudioConverterWrapper` constructor for newly-
+/// started routes; HAL buffer is the user's interface-software job
+/// (Phase 7.6 simplification — the engine no longer negotiates it).
 struct AudioPreferencesView: View {
     let appState: AppState
 
-    @AppStorage(JboxPreferences.bufferSizePolicyKey) private var bufferPolicyRaw: Int = 0
     @AppStorage(JboxPreferences.resamplerQualityKey) private var resamplerRaw: Int
         = Int(Engine.ResamplerQuality.mastering.rawValue)
-    @AppStorage(JboxPreferences.shareDevicesByDefaultKey) private var shareDevicesByDefault: Bool = false
-
-    private static let bufferFooter =
-        "Applies to newly-added Performance-mode routes. The HAL clamps "
-        + "the value into each device's supported range at start time. "
-        + "Existing routes keep the size they were created with."
 
     private static let resamplerFooter =
         "Mastering is Apple's highest-fidelity SRC preset. High Quality "
@@ -186,18 +172,20 @@ struct AudioPreferencesView: View {
         + "newly-started routes — stop and start a running route to "
         + "re-build its converter."
 
-    private static let sharingFooter =
-        "New routes inherit this setting. You can override it per route "
-        + "in the route editor. When on, other apps can keep using a "
-        + "device while a Jbox route is active — at the cost of Jbox "
-        + "no longer being able to force a small HAL buffer, so "
-        + "Performance tier is unavailable."
+    private static let bufferHintFooter =
+        "Jbox has no global HAL buffer-size setting. Per-route, the "
+        + "Performance latency tier exposes a Buffer size preference "
+        + "(written via kAudioDevicePropertyBufferFrameSize, no hog "
+        + "mode); macOS resolves the actual buffer as the max across "
+        + "all active clients. Set the device default in your "
+        + "interface software (UA Console, RME TotalMix, MOTU CueMix, "
+        + "Audio MIDI Setup); routes without a per-route preference "
+        + "respect whatever the device is at."
 
     var body: some View {
         Form {
-            bufferSection
             resamplerSection
-            sharingSection
+            bufferHintSection
         }
         .formStyle(.grouped)
         .padding()
@@ -206,20 +194,17 @@ struct AudioPreferencesView: View {
         }
     }
 
-    private var bufferSection: some View {
+    private var bufferHintSection: some View {
         Section {
-            Picker("Policy", selection: $bufferPolicyRaw) {
-                Text("Use each device's current setting").tag(0)
-                ForEach(BufferSizePolicy.frameChoices, id: \.self) { frames in
-                    Text("Explicit override: \(frames) frames")
-                        .tag(Int(frames))
-                }
-            }
-            .pickerStyle(.menu)
+            // Read-only informational note. There is no global HAL
+            // buffer-size preference; per-route, the Performance tier
+            // exposes a Buffer size picker that writes
+            // kAudioDevicePropertyBufferFrameSize (no hog mode).
+            EmptyView()
         } header: {
             Text("Buffer size")
         } footer: {
-            Text(Self.bufferFooter)
+            Text(Self.bufferHintFooter)
         }
     }
 
@@ -236,17 +221,6 @@ struct AudioPreferencesView: View {
             Text("Resampler quality")
         } footer: {
             Text(Self.resamplerFooter)
-        }
-    }
-
-    private var sharingSection: some View {
-        Section {
-            Toggle("Share devices with other apps by default",
-                   isOn: $shareDevicesByDefault)
-        } header: {
-            Text("Routing defaults")
-        } footer: {
-            Text(Self.sharingFooter)
         }
     }
 
@@ -462,20 +436,14 @@ final class AppState {
     // MARK: - Restore on launch
 
     private func restoreRoutes(into store: EngineStore) {
-        let defaultShare = persisted.preferences.shareDevicesByDefault
         for sr in persisted.routes {
-            // Phase 7.5 resolution rule: per-route nil inherits the
-            // global default. The engine never sees nil; it always
-            // receives a concrete bool.
-            let effectiveShare = sr.shareDevices ?? defaultShare
             let cfg = RouteConfig(
                 source: sr.sourceDevice,
                 destination: sr.destDevice,
                 mapping: sr.mapping,
                 name: sr.isAutoName ? nil : sr.name,
                 latencyMode: sr.latencyMode,
-                bufferFrames: sr.bufferFrames,
-                shareDevices: effectiveShare)
+                bufferFrames: sr.bufferFrames)
             do {
                 _ = try store.addRoute(cfg,
                                        persistId: sr.id,
@@ -492,23 +460,18 @@ final class AppState {
     private func readPreferencesFromDefaults() -> StoredPreferences {
         let d = UserDefaults.standard
         let appearanceRaw = d.string(forKey: JboxPreferences.appearanceKey) ?? AppearanceMode.default.rawValue
-        let bufferRaw     = UInt32(max(0, d.integer(forKey: JboxPreferences.bufferSizePolicyKey)))
         let resamplerRaw  = UInt32(max(0, d.integer(forKey: JboxPreferences.resamplerQualityKey)))
         return StoredPreferences(
-            bufferSizePolicy: BufferSizePolicy(storedRaw: bufferRaw),
             resamplerQuality: Engine.ResamplerQuality(rawValue: resamplerRaw) ?? .mastering,
             appearance: AppearanceMode(rawValueOrDefault: appearanceRaw),
-            showDiagnostics: d.bool(forKey: JboxPreferences.showDiagnosticsKey),
-            shareDevicesByDefault: d.bool(forKey: JboxPreferences.shareDevicesByDefaultKey))
+            showDiagnostics: d.bool(forKey: JboxPreferences.showDiagnosticsKey))
     }
 
     private func writePreferencesIntoDefaults(_ p: StoredPreferences) {
         let d = UserDefaults.standard
         d.set(p.appearance.rawValue,        forKey: JboxPreferences.appearanceKey)
-        d.set(Int(p.bufferSizePolicy.storedRaw), forKey: JboxPreferences.bufferSizePolicyKey)
         d.set(Int(p.resamplerQuality.rawValue),  forKey: JboxPreferences.resamplerQualityKey)
         d.set(p.showDiagnostics,            forKey: JboxPreferences.showDiagnosticsKey)
-        d.set(p.shareDevicesByDefault,      forKey: JboxPreferences.shareDevicesByDefaultKey)
     }
 
     private func snapshotPreferences() {
@@ -526,34 +489,9 @@ final class AppState {
 
     private func snapshotRoutes() {
         guard let store = store else { return }
-        // Phase 7.5: preserve the on-disk `shareDevices: Bool?` shape.
-        // The "inherit" sentinel (`nil`) only makes sense for routes
-        // that were already in persisted.routes with that value —
-        // typically pre-Phase-7.5 state files. Brand-new routes
-        // created through the UI always pin a concrete Bool because
-        // the user made an explicit choice.
-        let priorByPersistId: [UUID: Bool?] = Dictionary(
-            uniqueKeysWithValues: persisted.routes.map { ($0.id, $0.shareDevices) })
-        let defaultShare = persisted.preferences.shareDevicesByDefault
 
         persisted.routes = store.routes.map { r in
             let trimmedName = r.config.name?.trimmingCharacters(in: .whitespaces) ?? ""
-            let storedShare: Bool?
-            if let priorStored = priorByPersistId[r.persistId] {
-                // Route was already persisted. Preserve its Bool? shape
-                // unless the user's effective choice has diverged from
-                // what that shape would resolve to today.
-                if r.config.shareDevices == (priorStored ?? defaultShare) {
-                    storedShare = priorStored
-                } else {
-                    storedShare = r.config.shareDevices
-                }
-            } else {
-                // Brand-new route — pin the user's concrete choice on
-                // disk so a future change to the global default does
-                // not silently flip this route.
-                storedShare = r.config.shareDevices
-            }
             return StoredRoute(
                 id: r.persistId,
                 name: trimmedName.isEmpty ? r.config.displayName : trimmedName,
@@ -564,8 +502,7 @@ final class AppState {
                 createdAt: r.createdAt,
                 modifiedAt: r.modifiedAt,
                 latencyMode: r.config.latencyMode,
-                bufferFrames: r.config.bufferFrames,
-                shareDevices: storedShare)
+                bufferFrames: r.config.bufferFrames)
         }
         scheduleSave()
     }

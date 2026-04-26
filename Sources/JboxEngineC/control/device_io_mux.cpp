@@ -44,9 +44,7 @@ DeviceIOMux::~DeviceIOMux() {
 
 bool DeviceIOMux::attachInput(void* key,
                               InputIOProcCallback callback,
-                              void* user_data,
-                              std::uint32_t requested_buffer_frames,
-                              bool share_device) {
+                              void* user_data) {
     if (input_channel_count_ == 0 || callback == nullptr) return false;
 
     auto next = std::make_unique<InputList>();
@@ -57,8 +55,7 @@ bool DeviceIOMux::attachInput(void* key,
             next->push_back(e);
         }
     }
-    next->push_back({key, callback, user_data, requested_buffer_frames, share_device});
-    if (!share_device) ++non_sharing_attached_;
+    next->push_back({key, callback, user_data});
 
     const bool first = (input_ioproc_id_ == kInvalidIOProcId);
     if (first) {
@@ -80,7 +77,6 @@ bool DeviceIOMux::attachInput(void* key,
         // receive callbacks either way.
         backend_.startDevice(uid_);
     }
-    updateBufferRequest();
     return true;
 }
 
@@ -89,18 +85,10 @@ void DeviceIOMux::detachInput(void* key) {
 
     auto next = std::make_unique<InputList>();
     next->reserve(input_list_->size());
-    bool detached_was_non_sharing = false;
     for (const auto& e : *input_list_) {
-        if (e.key != key) {
-            next->push_back(e);
-        } else if (!e.share_device) {
-            detached_was_non_sharing = true;
-        }
+        if (e.key != key) next->push_back(e);
     }
     if (next->size() == input_list_->size()) return;  // key not found
-    if (detached_was_non_sharing && non_sharing_attached_ > 0) {
-        --non_sharing_attached_;
-    }
 
     const bool now_empty = next->empty();
     const InputList* published = now_empty ? nullptr : next.get();
@@ -119,14 +107,11 @@ void DeviceIOMux::detachInput(void* key) {
         input_ioproc_id_ = kInvalidIOProcId;
     }
     maybeStopDevice();
-    updateBufferRequest();
 }
 
 bool DeviceIOMux::attachOutput(void* key,
                                OutputIOProcCallback callback,
-                               void* user_data,
-                               std::uint32_t requested_buffer_frames,
-                               bool share_device) {
+                               void* user_data) {
     if (output_channel_count_ == 0 || callback == nullptr) return false;
 
     auto next = std::make_unique<OutputList>();
@@ -137,8 +122,7 @@ bool DeviceIOMux::attachOutput(void* key,
             next->push_back(e);
         }
     }
-    next->push_back({key, callback, user_data, requested_buffer_frames, share_device});
-    if (!share_device) ++non_sharing_attached_;
+    next->push_back({key, callback, user_data});
 
     const bool first = (output_ioproc_id_ == kInvalidIOProcId);
     if (first) {
@@ -155,7 +139,6 @@ bool DeviceIOMux::attachOutput(void* key,
     if (first) {
         backend_.startDevice(uid_);
     }
-    updateBufferRequest();
     return true;
 }
 
@@ -164,18 +147,10 @@ void DeviceIOMux::detachOutput(void* key) {
 
     auto next = std::make_unique<OutputList>();
     next->reserve(output_list_->size());
-    bool detached_was_non_sharing = false;
     for (const auto& e : *output_list_) {
-        if (e.key != key) {
-            next->push_back(e);
-        } else if (!e.share_device) {
-            detached_was_non_sharing = true;
-        }
+        if (e.key != key) next->push_back(e);
     }
     if (next->size() == output_list_->size()) return;
-    if (detached_was_non_sharing && non_sharing_attached_ > 0) {
-        --non_sharing_attached_;
-    }
 
     const bool now_empty = next->empty();
     const OutputList* published = now_empty ? nullptr : next.get();
@@ -193,7 +168,6 @@ void DeviceIOMux::detachOutput(void* key) {
         output_ioproc_id_ = kInvalidIOProcId;
     }
     maybeStopDevice();
-    updateBufferRequest();
 }
 
 bool DeviceIOMux::hasAnyInput() const {
@@ -260,79 +234,6 @@ void DeviceIOMux::maybeStopDevice() {
     if (input_ioproc_id_ == kInvalidIOProcId &&
         output_ioproc_id_ == kInvalidIOProcId) {
         backend_.stopDevice(uid_);
-    }
-}
-
-std::uint32_t DeviceIOMux::currentMinBufferRequest() const {
-    std::uint32_t min = 0;
-    auto take = [&min](std::uint32_t v) {
-        if (v == 0) return;
-        if (min == 0 || v < min) min = v;
-    };
-    if (input_list_) {
-        for (const auto& e : *input_list_) take(e.requested_buffer_frames);
-    }
-    if (output_list_) {
-        for (const auto& e : *output_list_) take(e.requested_buffer_frames);
-    }
-    return min;
-}
-
-void DeviceIOMux::updateBufferRequest() {
-    const std::uint32_t target = currentMinBufferRequest();
-
-    // Phase 7.5: hog mode is claimed iff we have at least one
-    // non-sharing route *and* at least one active buffer request.
-    // The AND preserves the pre-Phase-7.5 invariant that no-opinion
-    // Off-tier routes never hog the device; the non_sharing clause
-    // adds the share-device opt-out semantics. A mux hosting only
-    // share_device routes never claims exclusive — the HAL's max-
-    // across-clients policy may then clamp our request upward,
-    // which is the documented trade-off.
-    const bool want_exclusive = (non_sharing_attached_ > 0) && (target > 0);
-    if (!want_exclusive) {
-        if (exclusive_claimed_) {
-            backend_.releaseExclusive(uid_);
-            exclusive_claimed_ = false;
-        }
-    } else if (!exclusive_claimed_) {
-        // Claim failure (another app already holds hog) is non-fatal
-        // — the route runs on the shared-client path at whatever
-        // buffer size the device currently has. We don't try to
-        // force a shrink on a device we don't own: see the
-        // `!exclusive_claimed_` gate below for the aggregate-stall
-        // reason.
-        exclusive_claimed_ = backend_.claimExclusive(uid_);
-    }
-
-    // Only issue the buffer-size request when we actually hold hog
-    // mode. Without exclusivity the request is unreliable (Core
-    // Audio's max-across-clients policy clamps it upward when
-    // another app holds the device larger), and on aggregate
-    // devices the backend's per-sub-device fan-out of
-    // `setBufferFramesOnID` can silently stall the aggregate's
-    // IOProc scheduler — callbacks stop firing, route stays in
-    // RUNNING state with no audio and no error. Skipping the
-    // request in share mode matches the mode's contract: coexist
-    // with other apps at whatever buffer size the device is
-    // already running. `last_requested_frames_` is reset so that a
-    // subsequent non-sharing attach (which does claim hog) re-issues
-    // the request cleanly.
-    if (!exclusive_claimed_) {
-        last_requested_frames_ = 0;
-        return;
-    }
-
-    if (target == 0) {
-        last_requested_frames_ = 0;
-        return;
-    }
-
-    // Re-apply only if the min changed, to avoid churning the HAL
-    // every time a new route attaches with the same target.
-    if (target != last_requested_frames_) {
-        (void)backend_.requestBufferFrameSize(uid_, target);
-        last_requested_frames_ = target;
     }
 }
 

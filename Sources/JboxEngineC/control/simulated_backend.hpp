@@ -96,37 +96,18 @@ public:
     bool startDevice(const std::string& uid) override;
     void stopDevice(const std::string& uid) override;
     std::uint32_t currentBufferFrameSize(const std::string& uid) override;
-    std::uint32_t requestBufferFrameSize(const std::string& uid,
-                                         std::uint32_t frames) override;
-    bool claimExclusive(const std::string& uid) override;
-    void releaseExclusive(const std::string& uid) override;
-    BufferFrameSizeRange supportedBufferFrameSizeRange(
-        const std::string& uid) override;
+    void setBufferFrameSize(const std::string& uid,
+                            std::uint32_t frames) override;
 
-    // Tests can override the default simulated range — (1, 65535) —
-    // with a specific range to exercise per-device constraints.
-    void setBufferFrameSizeRange(const std::string& uid,
-                                 std::uint32_t minimum,
-                                 std::uint32_t maximum);
-
-    // Test introspection: history of every `requestBufferFrameSize`
-    // call against this backend (one entry per call, in order). Lets
-    // tests assert both the request amount and how many times the
-    // refcounted mux logic crossed a threshold.
-    struct BufferSizeRequest {
+    // Test introspection: every `setBufferFrameSize` call (after
+    // aggregate fan-out, one entry per uid) is recorded so tests
+    // can assert which UIDs were touched and with what frame count.
+    struct BufferSizeWrite {
         std::string   uid;
-        std::uint32_t requested;  // what the caller passed
-        std::uint32_t applied;    // what the backend clamped to / returned
+        std::uint32_t frames = 0;
     };
-    const std::vector<BufferSizeRequest>& bufferSizeRequests() const {
-        return buffer_size_requests_;
-    }
-
-    // Introspection for tests: returns whether `claimExclusive` is
-    // currently held on the device. Unknown UID → false.
-    bool isExclusive(const std::string& uid) const {
-        auto it = devices_.find(uid);
-        return it != devices_.end() && it->second.exclusive_claimed;
+    const std::vector<BufferSizeWrite>& bufferSizeWrites() const {
+        return buffer_size_writes_;
     }
 
 private:
@@ -146,22 +127,10 @@ private:
         void*                duplex_ud = nullptr;
         IOProcId             duplex_id = kInvalidIOProcId;
 
-        // claimExclusive / releaseExclusive state. Tests introspect
-        // via `isExclusive(uid)` to confirm the fast path hogged the
-        // device.
-        bool                 exclusive_claimed = false;
-
         // Non-empty iff this device is an aggregate; each UID
         // references another device in `devices_`. Matches macOS
         // aggregate-device semantics.
         std::vector<std::string> sub_device_uids;
-
-        // Simulated per-device buffer frame size range (inclusive),
-        // used by `supportedBufferFrameSizeRange`. Defaults to a
-        // permissive (1, 65535) until a test sets it via
-        // `setBufferFrameSizeRange`.
-        std::uint32_t buffer_frame_size_min = 1;
-        std::uint32_t buffer_frame_size_max = 65535;
 
         // Test-seeded per-channel names; empty until the test populates
         // them via setChannelNames(). Element index i corresponds to
@@ -178,25 +147,10 @@ private:
     // allocation in tests. Grown as needed.
     std::vector<float> output_scratch_;
 
-    // Records every requestBufferFrameSize invocation for test
-    // inspection. Does not affect behavior.
-    std::vector<BufferSizeRequest> buffer_size_requests_;
-
-    // Buffer-size snapshots captured by `claimExclusive` and
-    // restored by `releaseExclusive`. Keyed by the claimed UID; each
-    // entry holds the UID's own pre-claim buffer size plus the same
-    // for every aggregate sub-device. Mirrors CoreAudioBackend's
-    // ExclusiveState so the simulated-path tests and the real-
-    // hardware path share the same contract.
-    struct ExclusiveSnapshot {
-        struct Entry {
-            std::string   uid;
-            std::uint32_t original_buffer_frames = 0;
-        };
-        Entry              self;
-        std::vector<Entry> sub_devices;
-    };
-    std::unordered_map<std::string, ExclusiveSnapshot> exclusive_state_;
+    // Test introspection storage; populated by every
+    // `setBufferFrameSize` call (one entry per uid touched, including
+    // each aggregate sub-device fan-out target).
+    std::vector<BufferSizeWrite> buffer_size_writes_;
 };
 
 }  // namespace jbox::control

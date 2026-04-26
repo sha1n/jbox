@@ -94,36 +94,27 @@ struct RouteRecord {
     // yielding drum-monitoring-grade latency. Only set while running.
     bool          duplex_mode                    = false;
     IOProcId      duplex_ioproc_id               = kInvalidIOProcId;
-    // True iff we successfully claimed Core Audio hog mode on the
-    // device for this route. Released in releaseRouteResources.
-    // Hog mode lets us override a shared buffer size that another
-    // app was enforcing. The buffer-frame-size snapshots (including
-    // each aggregate member's) live inside the backend's exclusive
-    // state, keyed by device UID — the RouteRecord doesn't track
-    // them here.
-    bool          duplex_exclusive_claimed       = false;
 
     std::vector<float> input_scratch;
     std::vector<float> output_scratch;
 
     // Latency tier captured at addRoute time; honoured at every
     // subsequent attemptStart. 0 = safe, 1 = low, 2 = performance.
+    // Phase 7.6: tiers govern Jbox-internal ring sizing + drift
+    // sampler setpoint; for self-routes (src == dst) Performance
+    // picks the duplex fast path. The HAL buffer size is set
+    // separately via `buffer_frames_override` (Superior-Drummer-
+    // style: a single `kAudioDevicePropertyBufferFrameSize` write
+    // with no hog claim; macOS resolves with max-across-clients).
     std::uint8_t  latency_mode          = 0;
-    // Optional user override of the HAL buffer frame size the fast
-    // path requests. 0 means the tier default is used.
-    std::uint32_t buffer_frames_override = 0;
 
-    // Device-sharing opt-out (ABI v9). When true, attemptStart skips
-    // claimExclusive and the mux tracks this route under its
-    // non_sharing_attached counter only as a bystander. Default false
-    // preserves the pre-v9 exclusive behaviour.
-    bool share_device = false;
-    // Runtime flag set during attemptStart when a Performance-tier
-    // route is silently demoted to Low because share_device is set.
-    // Surfaces through jbox_route_status_t::status_flags so the UI
-    // can explain the picker-reads-Low-after-saving-Performance
-    // surprise without the engine reaching up into it.
-    bool share_downgraded = false;
+    // Optional user override of the HAL buffer-frame-size for the
+    // route's source / destination devices. 0 = no preference (use
+    // whatever the device is at). Non-zero triggers a single
+    // `setBufferFrameSize` write per device at attemptStart. NOT
+    // a hog claim — co-resident apps stay alive; macOS picks the
+    // max across all asking clients.
+    std::uint32_t buffer_frames_override = 0;
 
     std::uint32_t channels_count        = 0;
     std::uint32_t source_total_channels = 0;
@@ -181,14 +172,13 @@ public:
         // Tiered latency preset: 0 = safe (default), 1 = low latency,
         // 2 = performance. See docs/spec.md § 2.3.
         std::uint8_t                     latency_mode  = 0;
-        // User-chosen HAL buffer frame size override for the fast
-        // path. 0 means "use the tier default". Clamped by the HAL
-        // into the device's supported range on apply.
+        // Optional HAL buffer-frame-size override. 0 = no preference
+        // (route runs at whatever buffer the devices are currently
+        // at). Non-zero issues a single Superior-Drummer-style
+        // `kAudioDevicePropertyBufferFrameSize` write to the route's
+        // device(s) at start time — no hog mode, no eviction;
+        // macOS resolves with `max-across-clients`.
         std::uint32_t                    buffer_frames = 0;
-        // Opt-out of Jbox's default exclusive-ownership (hog-mode)
-        // policy. See docs/spec.md § 2.7 "Device sharing". Default
-        // false preserves today's behaviour.
-        bool                             share_device  = false;
     };
 
     // Add a route in state STOPPED. Returns the new id on success, or

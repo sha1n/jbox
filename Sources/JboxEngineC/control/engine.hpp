@@ -57,8 +57,6 @@ public:
     jbox_error_code_t pollLatencyComponents(
         jbox_route_id_t id,
         jbox_route_latency_components_t* out) const;
-    IDeviceBackend::BufferFrameSizeRange supportedBufferFrameSizeRange(
-        const std::string& uid);
     std::size_t       pollMeters(jbox_route_id_t id,
                                  jbox_meter_side_t side,
                                  float* out_peaks,

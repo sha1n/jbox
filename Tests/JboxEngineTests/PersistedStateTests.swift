@@ -32,72 +32,18 @@ private enum JSON {
     }
 }
 
-// MARK: - BufferSizePolicy Codable
-
-@Suite("BufferSizePolicy Codable")
-struct BufferSizePolicyCodableTests {
-    @Test(".useDeviceSetting encodes as 0")
-    func useDeviceSettingEncodesAsZero() throws {
-        let data = try JSON.encoder.encode(BufferSizePolicy.useDeviceSetting)
-        let text = String(decoding: data, as: UTF8.self)
-        #expect(text == "0")
-    }
-
-    @Test(".explicitOverride encodes as the frame count")
-    func explicitOverrideEncodesAsFrames() throws {
-        let data = try JSON.encoder.encode(BufferSizePolicy.explicitOverride(frames: 256))
-        let text = String(decoding: data, as: UTF8.self)
-        #expect(text == "256")
-    }
-
-    @Test("decoding 0 yields .useDeviceSetting")
-    func decodeZeroIsUseDeviceSetting() throws {
-        let data = Data("0".utf8)
-        let policy = try JSON.decoder.decode(BufferSizePolicy.self, from: data)
-        #expect(policy == .useDeviceSetting)
-    }
-
-    @Test("decoding N yields .explicitOverride(N)")
-    func decodeNonZeroIsOverride() throws {
-        let data = Data("512".utf8)
-        let policy = try JSON.decoder.decode(BufferSizePolicy.self, from: data)
-        #expect(policy == .explicitOverride(frames: 512))
-    }
-
-    @Test("round-trip preserves every frame choice")
-    func roundTripFrameChoices() throws {
-        for frames in BufferSizePolicy.frameChoices {
-            let value = BufferSizePolicy.explicitOverride(frames: frames)
-            #expect(try JSON.roundTrip(value) == value)
-        }
-    }
-}
-
 // MARK: - StoredPreferences
 
 @Suite("StoredPreferences Codable")
 struct StoredPreferencesCodableTests {
-    @Test("defaults match spec § 3.1.5 (+ showDiagnostics / shareDevicesByDefault extensions)")
+    @Test("defaults match spec § 3.1.5 (+ showDiagnostics extension)")
     func defaultsMatchSpec() {
         let p = StoredPreferences()
         #expect(p.launchAtLogin == false)
-        #expect(p.bufferSizePolicy == .useDeviceSetting)
         #expect(p.resamplerQuality == .mastering)
         #expect(p.appearance == .system)
         #expect(p.showMetersInMenuBar == false)
         #expect(p.showDiagnostics == false)
-        #expect(p.shareDevicesByDefault == false)
-    }
-
-    @Test("shareDevicesByDefault round-trips and defaults to false on missing key")
-    func shareDevicesByDefaultRoundTrip() throws {
-        let on = StoredPreferences(shareDevicesByDefault: true)
-        #expect(try JSON.roundTrip(on).shareDevicesByDefault == true)
-        // Missing key on a pre-Phase-7.5 state.json decodes to the
-        // safe default (preserves today's exclusive behaviour).
-        let data = Data("{}".utf8)
-        let decoded = try JSON.decoder.decode(StoredPreferences.self, from: data)
-        #expect(decoded.shareDevicesByDefault == false)
     }
 
     @Test("showDiagnostics round-trips and defaults to false on missing key")
@@ -119,7 +65,6 @@ struct StoredPreferencesCodableTests {
     func nonDefaultRoundTrip() throws {
         let p = StoredPreferences(
             launchAtLogin: true,
-            bufferSizePolicy: .explicitOverride(frames: 128),
             resamplerQuality: .highQuality,
             appearance: .dark,
             showMetersInMenuBar: true)
@@ -166,11 +111,11 @@ struct StoredRouteCodableTests {
         #expect(try JSON.roundTrip(r) == r)
     }
 
-    @Test("latencyMode and bufferFrames survive the round-trip")
+    @Test("latencyMode survives the round-trip")
     func latencyFieldsRoundTrip() throws {
-        // Extension to spec § 3.1.3: without persisting these, users lose
-        // their tier / per-route buffer-size override on every relaunch,
-        // which defeats the point of per-route Performance mode.
+        // Extension to spec § 3.1.3: without persisting `latencyMode`,
+        // users lose their tier choice on every relaunch, which
+        // defeats the point of per-route Performance mode.
         let r = StoredRoute(
             id: UUID(),
             name: "custom", isAutoName: false,
@@ -178,11 +123,46 @@ struct StoredRouteCodableTests {
             destDevice:   DeviceReference(uid: "b", lastKnownName: "B"),
             mapping: [ChannelEdge(src: 0, dst: 0)],
             createdAt: Date(), modifiedAt: Date(),
-            latencyMode: .performance,
-            bufferFrames: 64)
+            latencyMode: .performance)
         let copy = try JSON.roundTrip(r)
         #expect(copy.latencyMode == .performance)
-        #expect(copy.bufferFrames == 64)
+    }
+
+    @Test("bufferFrames survives the round-trip and decodes to nil when absent")
+    func bufferFramesRoundTrip() throws {
+        // ABI v11: per-route HAL buffer-frame-size preference. Pinned
+        // on disk so the user's drum-monitoring 16-frame override
+        // doesn't reset to "no preference" on every relaunch.
+        let r = StoredRoute(
+            id: UUID(),
+            name: "perf-16", isAutoName: false,
+            sourceDevice: DeviceReference(uid: "a", lastKnownName: "A"),
+            destDevice:   DeviceReference(uid: "b", lastKnownName: "B"),
+            mapping: [ChannelEdge(src: 0, dst: 0)],
+            createdAt: Date(), modifiedAt: Date(),
+            latencyMode: .performance,
+            bufferFrames: 16)
+        let copy = try JSON.roundTrip(r)
+        #expect(copy.bufferFrames == 16)
+
+        // Missing key on a pre-v11 state.json decodes to nil
+        // ("no preference"), preserving the relaunch contract.
+        let id = UUID().uuidString
+        let json = """
+        {
+          "id": "\(id)",
+          "name": "no-buf",
+          "isAutoName": false,
+          "sourceDevice": {"uid": "a", "lastKnownName": "A"},
+          "destDevice":   {"uid": "b", "lastKnownName": "B"},
+          "mapping": [{"src": 0, "dst": 0}],
+          "createdAt":  "2026-01-01T00:00:00Z",
+          "modifiedAt": "2026-01-01T00:00:00Z",
+          "latencyMode": 2
+        }
+        """
+        let decoded = try JSON.decoder.decode(StoredRoute.self, from: Data(json.utf8))
+        #expect(decoded.bufferFrames == nil)
     }
 
     @Test("fan-out mapping (1:N) round-trips intact")
@@ -207,48 +187,7 @@ struct StoredRouteCodableTests {
         #expect(copy.mapping.count == 3)
     }
 
-    @Test("shareDevices round-trips as Bool? (nil inherits global default)")
-    func shareDevicesRoundTrip() throws {
-        // nil means "inherit the global default" — the resolution
-        // rule is exercised by AppStateShareDeviceResolutionTests
-        // below. Round-trip here pins the on-disk shape.
-        let withShare = StoredRoute(
-            id: UUID(), name: "share", isAutoName: false,
-            sourceDevice: DeviceReference(uid: "s", lastKnownName: "S"),
-            destDevice:   DeviceReference(uid: "d", lastKnownName: "D"),
-            mapping: [ChannelEdge(src: 0, dst: 0)],
-            createdAt: Date(), modifiedAt: Date(),
-            shareDevices: true)
-        #expect(try JSON.roundTrip(withShare).shareDevices == true)
-
-        let withoutShare = StoredRoute(
-            id: UUID(), name: "explicit-false", isAutoName: false,
-            sourceDevice: DeviceReference(uid: "s", lastKnownName: "S"),
-            destDevice:   DeviceReference(uid: "d", lastKnownName: "D"),
-            mapping: [ChannelEdge(src: 0, dst: 0)],
-            createdAt: Date(), modifiedAt: Date(),
-            shareDevices: false)
-        #expect(try JSON.roundTrip(withoutShare).shareDevices == false)
-    }
-
-    @Test("missing shareDevices key decodes to nil (pre-Phase-7.5 JSON)")
-    func shareDevicesMissingIsNil() throws {
-        let json = """
-        {
-          "id": "\(UUID().uuidString)",
-          "name": "legacy", "isAutoName": true,
-          "sourceDevice": {"uid": "s", "lastKnownName": "S"},
-          "destDevice":   {"uid": "d", "lastKnownName": "D"},
-          "mapping": [{"src": 0, "dst": 0}],
-          "createdAt":  "2026-01-01T00:00:00Z",
-          "modifiedAt": "2026-01-01T00:00:00Z"
-        }
-        """
-        let r = try JSON.decoder.decode(StoredRoute.self, from: Data(json.utf8))
-        #expect(r.shareDevices == nil)
-    }
-
-    @Test("missing latencyMode decodes to .off; missing bufferFrames to nil")
+    @Test("missing latencyMode decodes to .off (pre-Phase-7 v1 shape)")
     func legacyMissingFieldsUseDefaults() throws {
         let src = UUID().uuidString
         let dst = UUID().uuidString
@@ -268,7 +207,56 @@ struct StoredRouteCodableTests {
         """
         let r = try JSON.decoder.decode(StoredRoute.self, from: Data(json.utf8))
         #expect(r.latencyMode == .off)
-        #expect(r.bufferFrames == nil)
+    }
+
+    @Test("Phase-7.5/Phase-6-shape state.json with dropped fields decodes cleanly (silent discard)")
+    func phase75ShapeDecodesWithDroppedFieldsDiscarded() throws {
+        // Phase 7.6 removed `bufferFrames` from StoredRoute and
+        // `bufferSizePolicy` / `shareDevicesByDefault` from
+        // StoredPreferences (along with the per-route `shareDevices`).
+        // The plan-deviation note claims old `state.json` files still
+        // decode cleanly because JSONDecoder ignores unknown keys and
+        // surviving fields use `decodeIfPresent` with defaults. This
+        // test pins that promise: a payload carrying every dropped
+        // key on both StoredRoute and StoredPreferences must decode
+        // into the new shape with the dropped values silently
+        // discarded and the surviving fields intact.
+        let id = UUID().uuidString
+        let routeJson = """
+        {
+          "id": "\(id)",
+          "name": "v75-route",
+          "isAutoName": false,
+          "sourceDevice": {"uid": "s", "lastKnownName": "S"},
+          "destDevice":   {"uid": "d", "lastKnownName": "D"},
+          "mapping": [{"src": 0, "dst": 0}],
+          "createdAt":  "2026-01-01T00:00:00Z",
+          "modifiedAt": "2026-01-01T00:00:00Z",
+          "latencyMode": 2,
+          "bufferFrames": 64,
+          "shareDevices": true
+        }
+        """
+        let route = try JSON.decoder.decode(StoredRoute.self, from: Data(routeJson.utf8))
+        #expect(route.name == "v75-route")
+        #expect(route.latencyMode == .performance)
+
+        let prefsJson = """
+        {
+          "launchAtLogin": true,
+          "bufferSizePolicy": 128,
+          "resamplerQuality": 1,
+          "appearance": "dark",
+          "showMetersInMenuBar": false,
+          "showDiagnostics": true,
+          "shareDevicesByDefault": true
+        }
+        """
+        let prefs = try JSON.decoder.decode(StoredPreferences.self, from: Data(prefsJson.utf8))
+        #expect(prefs.launchAtLogin == true)
+        #expect(prefs.resamplerQuality == .highQuality)
+        #expect(prefs.appearance == .dark)
+        #expect(prefs.showDiagnostics == true)
     }
 }
 
@@ -338,7 +326,6 @@ struct StoredAppStateCodableTests {
                                 activationMode: .exclusive)
         let prefs = StoredPreferences(
             launchAtLogin: true,
-            bufferSizePolicy: .explicitOverride(frames: 128),
             resamplerQuality: .highQuality,
             appearance: .dark,
             showMetersInMenuBar: false)

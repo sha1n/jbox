@@ -313,7 +313,6 @@ jbox_route_id_t RouteManager::addRoute(const RouteConfig& cfg, jbox_error_t* err
     rec->mapping        = cfg.mapping;
     rec->latency_mode   = cfg.latency_mode;
     rec->buffer_frames_override = cfg.buffer_frames;
-    rec->share_device   = cfg.share_device;
     rec->channels_count = static_cast<std::uint32_t>(cfg.mapping.size());
     rec->state          = JBOX_ROUTE_STATE_STOPPED;
     rec->log_queue      = log_queue_;
@@ -380,8 +379,6 @@ jbox_error_code_t RouteManager::pollStatus(jbox_route_id_t id,
     out->underrun_count       = r.underrun_count.load(std::memory_order_relaxed);
     out->overrun_count        = r.overrun_count.load(std::memory_order_relaxed);
     out->estimated_latency_us = r.estimated_latency_us;
-    out->status_flags         = r.share_downgraded
-        ? JBOX_ROUTE_STATUS_SHARE_DOWNGRADE : 0u;
     return JBOX_OK;
 }
 
@@ -445,21 +442,6 @@ jbox_error_code_t RouteManager::attemptStart(RouteRecord& r) {
     r.reported_underrun.store(false, std::memory_order_relaxed);
     r.reported_overrun.store(false, std::memory_order_relaxed);
     r.reported_channel_mismatch.store(false, std::memory_order_relaxed);
-    r.share_downgraded = false;
-
-    // Phase 7.5: a share-device route can't coexist with the
-    // Performance-tier preset (the direct-monitor fast path needs
-    // exclusivity, and the ring/4 setpoint can't be defended without
-    // hog-mode buffer control). Compute an *effective* tier locally
-    // without mutating `r.latency_mode` — otherwise a second start()
-    // after a stop would re-enter with latency_mode already demoted,
-    // miss the check below, and silently drop the SHARE_DOWNGRADE
-    // flag from pollStatus on every subsequent start.
-    std::uint8_t effective_mode = r.latency_mode;
-    if (r.share_device && effective_mode == 2) {
-        effective_mode = 1;
-        r.share_downgraded = true;
-    }
 
     // Clear any stale meter peaks from a previous run. readAndReset
     // both reads (discarded) and atomically zeroes the stored peak.
@@ -502,7 +484,14 @@ jbox_error_code_t RouteManager::attemptStart(RouteRecord& r) {
     // collapses to HAL + one buffer period. Exclusive: the backend
     // refuses the duplex attach if any IOProc already targets the
     // device, so a pre-existing mux on this UID is a hard block.
-    if (effective_mode == 2 && r.source_uid == r.dest_uid) {
+    if (r.latency_mode == 2 && r.source_uid == r.dest_uid) {
+        // Direct-monitor fast path: bypass ring + converter and copy
+        // input→output in one duplex IOProc. The HAL buffer size is
+        // whatever the device is at — Phase 7.6 dropped Jbox's hog
+        // claim and buffer-shrink negotiation; users dial the buffer
+        // in their interface software (UA Console, RME TotalMix,
+        // Audio MIDI Setup, etc.) and Jbox respects it.
+
         // Exclusivity: no other route on this device.
         if (muxes_.find(r.source_uid) != muxes_.end()) {
             r.state = JBOX_ROUTE_STATE_ERROR;
@@ -529,66 +518,33 @@ jbox_error_code_t RouteManager::attemptStart(RouteRecord& r) {
         lc.dst_hal_latency_frames   = dst->output_device_latency_frames;
         lc.src_sample_rate_hz       = r.nominal_src_rate;
         lc.dst_sample_rate_hz       = r.nominal_dst_rate;
+
+        // Express the user's per-route HAL buffer-frame-size
+        // preference, if any (Superior-Drummer-style: a single
+        // property write, no hog claim, no eviction). On a duplex
+        // self-route src == dst, so the call covers both sides.
+        // macOS resolves the actual buffer with `max-across-clients`
+        // — co-resident apps with a bigger ask will keep the device
+        // at their value until they stop asking.
+        if (r.buffer_frames_override > 0) {
+            dm_.backend().setBufferFrameSize(
+                r.source_uid, r.buffer_frames_override);
+        }
+
+        // Read the device's current buffer frame size for the latency
+        // pill. Reflects the post-write value when an override
+        // landed; otherwise reflects whatever the device is at.
+        const std::uint32_t current_buffer =
+            dm_.backend().currentBufferFrameSize(r.source_uid);
+        if (current_buffer > 0) {
+            lc.src_buffer_frames = current_buffer;
+        }
         r.latency_components   = lc;
         r.estimated_latency_us = estimateLatencyMicroseconds(lc);
-
-        // Try to claim exclusive (hog-mode) ownership of the device
-        // before touching its buffer size — with other apps using the
-        // device disconnected we're the only client and Core Audio's
-        // max-across-clients policy collapses to just our request.
-        // Failure is non-fatal: we fall through to the shared path
-        // and accept whatever buffer size the HAL ends up giving us.
-        //
-        // Phase 7.5: share-device routes skip claimExclusive entirely
-        // so other apps can keep using the device. Performance-tier
-        // is already impossible here because we demoted at the top of
-        // attemptStart, so reaching the duplex fast path with
-        // share_device == true would be a bug — leave the branch
-        // defensive anyway.
-        r.duplex_exclusive_claimed = r.share_device
-            ? false
-            : dm_.backend().claimExclusive(r.source_uid);
-
-        // Request a small HAL buffer before opening the IOProc. The
-        // target is the user's override if they supplied one
-        // (`RouteConfig.buffer_frames`), otherwise the fast-path
-        // default of 64 frames. On aggregate devices the change fans
-        // out to every member (that's where the actual HAL buffer
-        // lives); if another app is holding a member at a larger
-        // size without hog mode, that member stays there and the
-        // actual post-change value surfaces in the pill. Pre-change
-        // buffer snapshots are kept by the backend's claimExclusive
-        // state and restored in releaseExclusive — the fast path
-        // doesn't track them here.
-        constexpr std::uint32_t kDuplexBufferTargetFrames = 64;
-        const std::uint32_t target_frames =
-            r.buffer_frames_override > 0
-                ? r.buffer_frames_override
-                : kDuplexBufferTargetFrames;
-        (void)dm_.backend().requestBufferFrameSize(
-            r.source_uid, target_frames);
-
-        // Re-read the device's buffer frame size after the request:
-        // the HAL may have clamped to its allowed range, or another
-        // client may be holding it larger. Use the post-set value in
-        // the latency pill so the user sees the honest number.
-        const std::uint32_t applied_buffer =
-            dm_.backend().currentBufferFrameSize(r.source_uid);
-        if (applied_buffer > 0) {
-            lc.src_buffer_frames = applied_buffer;
-            r.latency_components   = lc;
-            r.estimated_latency_us = estimateLatencyMicroseconds(lc);
-        }
 
         const IOProcId id = dm_.backend().openDuplexCallback(
             r.source_uid, &duplexIOProcCallback, &r);
         if (id == kInvalidIOProcId) {
-            // releaseExclusive restores buffer sizes *and* hog mode
-            // on both the aggregate and its members.
-            if (r.duplex_exclusive_claimed) {
-                dm_.backend().releaseExclusive(r.source_uid);
-                r.duplex_exclusive_claimed = false;
-            }
             r.state = JBOX_ROUTE_STATE_ERROR;
             r.last_error = JBOX_ERR_DEVICE_BUSY;
             return JBOX_ERR_DEVICE_BUSY;
@@ -621,7 +577,7 @@ jbox_error_code_t RouteManager::attemptStart(RouteRecord& r) {
     // (`ring_target_fill_frames`), which we compute from the
     // post-shrink buffer sizes after the attach below.
     const RingSizing sizing = [&]() {
-        switch (effective_mode) {
+        switch (r.latency_mode) {
             case 2: return kRingPerformance;
             case 1: return kRingLowLatency;
             default: return kRingSafe;
@@ -691,22 +647,7 @@ jbox_error_code_t RouteManager::attemptStart(RouteRecord& r) {
         r.source_uid,
         src->input_channel_count,
         src->output_channel_count);
-    // Mux-path buffer target: only non-zero when the route opted into
-    // a latency tier. Honours the per-route override when supplied,
-    // otherwise falls back to the mux's 64-frame default for low /
-    // performance tiers. The mux will claim exclusive (hog) ownership
-    // of the device on the 0→1 transition so the request lands even
-    // against apps holding the device at a larger size.
-    constexpr std::uint32_t kMuxDefaultBufferTarget = 64;
-    const std::uint32_t mux_buffer_target =
-        effective_mode > 0
-            ? (r.buffer_frames_override > 0
-                   ? r.buffer_frames_override
-                   : kMuxDefaultBufferTarget)
-            : 0;
-
-    if (!src_mux.attachInput(&r, &inputIOProcCallback, &r,
-                             mux_buffer_target, r.share_device)) {
+    if (!src_mux.attachInput(&r, &inputIOProcCallback, &r)) {
         destroyMuxIfUnused(r.source_uid);
         releaseRouteResources(r);
         r.state = JBOX_ROUTE_STATE_ERROR;
@@ -722,8 +663,7 @@ jbox_error_code_t RouteManager::attemptStart(RouteRecord& r) {
         r.dest_uid,
         dst->input_channel_count,
         dst->output_channel_count);
-    if (!dst_mux.attachOutput(&r, &outputIOProcCallback, &r,
-                              mux_buffer_target, r.share_device)) {
+    if (!dst_mux.attachOutput(&r, &outputIOProcCallback, &r)) {
         // releaseRouteResources detaches the already-attached input
         // side and cleans up any mux we created.
         releaseRouteResources(r);
@@ -747,7 +687,25 @@ jbox_error_code_t RouteManager::attemptStart(RouteRecord& r) {
     // The ring *capacity* itself stays pre-shrink-sized; that just
     // means more burst-overflow headroom than strictly necessary,
     // which we happily keep. Only the setpoint changes.
-    if (mux_buffer_target > 0) {
+    // Cross-device path: express the user's HAL buffer-frame-size
+    // preference (if any) on both sides before the latency-pill
+    // re-read. Same SD-style semantics as the duplex fast path —
+    // single property write per device, no hog claim.
+    if (r.buffer_frames_override > 0) {
+        dm_.backend().setBufferFrameSize(
+            r.source_uid, r.buffer_frames_override);
+        if (r.dest_uid != r.source_uid) {
+            dm_.backend().setBufferFrameSize(
+                r.dest_uid, r.buffer_frames_override);
+        }
+    }
+
+    // Refresh the latency pill from each device's current buffer
+    // frame size — reflects the post-write value when an override
+    // landed; otherwise reflects whatever the devices are at. The
+    // ring's drift setpoint is recomputed from these values below
+    // so the steady-state residency tracks the actual buffer.
+    {
         const std::uint32_t applied_src =
             dm_.backend().currentBufferFrameSize(r.source_uid);
         if (applied_src > 0) lc.src_buffer_frames = applied_src;
@@ -788,16 +746,6 @@ void RouteManager::releaseRouteResources(RouteRecord& r) {
             r.duplex_ioproc_id = kInvalidIOProcId;
         }
         dm_.backend().stopDevice(r.source_uid);
-        // releaseExclusive restores per-device buffer sizes (aggregate
-        // + each member) from the snapshot taken at claimExclusive
-        // time, then releases hog mode on each. Order inside
-        // releaseExclusive: buffers first (while we still own hog
-        // mode, no other client is contending), then hog release so
-        // external apps reconnect and re-read the restored sizes.
-        if (r.duplex_exclusive_claimed) {
-            dm_.backend().releaseExclusive(r.source_uid);
-            r.duplex_exclusive_claimed = false;
-        }
         r.duplex_mode = false;
     }
 

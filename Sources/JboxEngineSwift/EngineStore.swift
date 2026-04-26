@@ -51,31 +51,27 @@ public struct RouteConfig: Equatable, Sendable {
     public var name: String?
     /// Tiered latency preset; see `LatencyMode`.
     public var latencyMode: LatencyMode
-    /// Optional HAL buffer-frame-size override for Performance-mode
-    /// same-device routes. `nil` means "use the tier default"
-    /// (currently 64). Non-nil is clamped by the HAL into the
-    /// device's supported range when the route starts.
+    /// Optional per-route HAL buffer-frame-size preference. `nil`
+    /// (or 0) means "no preference"; the route runs at whatever
+    /// buffer the device(s) are currently at. Non-`nil` issues a
+    /// single Superior-Drummer-style property write per device at
+    /// start time — no hog claim. macOS resolves the actual buffer
+    /// with `max-across-clients`, so other apps may keep the
+    /// device at a larger value while they run.
     public var bufferFrames: UInt32?
-    /// Phase 7.5: opt out of Jbox's default hog-mode policy so other
-    /// apps can keep using the route's device(s). The engine silently
-    /// demotes Performance-tier routes with `shareDevices = true` to
-    /// Low and surfaces the downgrade via `RouteStatus.shareDowngraded`.
-    public var shareDevices: Bool
 
     public init(source: DeviceReference,
                 destination: DeviceReference,
                 mapping: [ChannelEdge],
                 name: String? = nil,
                 latencyMode: LatencyMode = .off,
-                bufferFrames: UInt32? = nil,
-                shareDevices: Bool = false) {
+                bufferFrames: UInt32? = nil) {
         self.source = source
         self.destination = destination
         self.mapping = mapping
         self.name = name
         self.latencyMode = latencyMode
         self.bufferFrames = bufferFrames
-        self.shareDevices = shareDevices
     }
 
     public var displayName: String {
@@ -280,14 +276,6 @@ public final class EngineStore {
         }
     }
 
-    /// Supported HAL buffer-frame-size range for the given device
-    /// UID, or `nil` when the device exposes no range. Forwarded
-    /// from `Engine.supportedBufferFrameSizeRange`; never throws
-    /// past the caller — errors become `nil`.
-    public func bufferFrameRange(forDeviceUid uid: String) -> ClosedRange<UInt32>? {
-        (try? engine.supportedBufferFrameSizeRange(forDeviceUid: uid)) ?? nil
-    }
-
     // MARK: Engine-wide preferences
 
     /// Push the engine-wide resampler quality preset (ABI v8+). The
@@ -329,8 +317,7 @@ public final class EngineStore {
                 mapping: config.mapping,
                 name: config.name ?? "",
                 latencyMode: config.latencyMode,
-                bufferFrames: config.bufferFrames ?? 0,
-                shareDevice: config.shareDevices
+                bufferFrames: config.bufferFrames ?? 0
             )
             let status = try engine.pollStatus(id)
             let route = Route(id: id, config: config, status: status,
@@ -526,8 +513,7 @@ public final class EngineStore {
                 mapping: newConfig.mapping,
                 name: newConfig.name ?? "",
                 latencyMode: newConfig.latencyMode,
-                bufferFrames: newConfig.bufferFrames ?? 0,
-                shareDevice: newConfig.shareDevices)
+                bufferFrames: newConfig.bufferFrames ?? 0)
         } catch {
             // Best-effort rollback so the user isn't left without their route.
             if wasActive {

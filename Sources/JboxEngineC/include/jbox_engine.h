@@ -52,8 +52,27 @@ extern "C" {
  *              `status_flags` to jbox_route_status_t; introduced
  *              JBOX_ROUTE_STATUS_SHARE_DOWNGRADE for the Performance →
  *              Low demotion surface (spec § 2.7 "Device sharing").
+ *  10  MAJOR — Phase 7.6 simplification. Removed `share_device` from
+ *              jbox_route_config_t, `status_flags` from
+ *              jbox_route_status_t, JBOX_ROUTE_STATUS_SHARE_DOWNGRADE,
+ *              and `buffer_frames` from jbox_route_config_t along with
+ *              the entire hog-mode / buffer-shrink machinery they
+ *              fronted. The HAL buffer size was meant to be the user's
+ *              interface-software job; v11 walks that back partially.
+ *  11  MINOR — Re-appended `buffer_frames` to jbox_route_config_t
+ *              after Superior Drummer demonstrated empirically that a
+ *              vanilla `kAudioDevicePropertyBufferFrameSize` write
+ *              with no hog claim does NOT trigger the cascade that
+ *              motivated the v10 strip. The new field carries the
+ *              same semantic as v6's `buffer_frames` — a per-route
+ *              HAL buffer-size preference — but the engine now
+ *              implements it as a single property write per device
+ *              (one write, no exclusive ownership, no aggregate
+ *              fan-out via the aggregate driver). macOS resolves
+ *              the actual value via `max-across-clients` so co-
+ *              resident apps stay alive. Zero means "no preference".
  */
-#define JBOX_ENGINE_ABI_VERSION 9u
+#define JBOX_ENGINE_ABI_VERSION 11u
 
 uint32_t jbox_engine_abi_version(void);
 
@@ -182,25 +201,15 @@ typedef struct {
  * used the name `low_latency` for values 0 and 1; the field's
  * storage is unchanged.
  *
- * `buffer_frames` (ABI v6+) overrides the HAL buffer-frame-size
- * target the Performance-mode direct-monitor fast path asks the
- * backend for. 0 means "use the tier default" (currently 64 frames
- * for Performance; Off / Low do not touch the buffer regardless).
- * Non-zero values are clamped by the HAL into the device's
- * supported range (`supportedBufferFrameSizeRange`) — callers
- * typically surface that range in their UI so users only choose
- * values the device can honour.
- *
- * `share_device` (ABI v9+) opts the route out of Jbox's default
- * hog-mode policy: when non-zero, the engine will not call
- * `claimExclusive` on the route's device(s), and the route runs on
- * Core Audio's shared-client path at whatever HAL buffer size the
- * device happens to have. Performance-tier routes flagged
- * `share_device = 1` are silently demoted to Low latency (the fast
- * path needs exclusivity; the ring/4 setpoint can't be defended
- * without it) and surface the `JBOX_ROUTE_STATUS_SHARE_DOWNGRADE`
- * bit via `jbox_engine_poll_route_status`. Zero-initialised callers
- * keep today's exclusive behaviour.
+ * `buffer_frames` (ABI v11) carries an optional per-route HAL
+ * buffer-frame-size preference. 0 means "no preference"; the route
+ * runs at whatever buffer the device(s) are currently at. Non-zero
+ * triggers a single `AudioObjectSetPropertyData
+ * (kAudioDevicePropertyBufferFrameSize)` write per device at start
+ * time — no hog claim, no exclusive ownership, no aggregate-driver
+ * fan-out. macOS resolves the actual buffer with `max-across-
+ * clients` so co-resident apps with a bigger buffer requirement
+ * keep the device at their value while they run.
  */
 typedef struct {
     const char*                source_uid;
@@ -210,7 +219,6 @@ typedef struct {
     const char*                name;
     uint32_t                   latency_mode;
     uint32_t                   buffer_frames;
-    uint8_t                    share_device;
 } jbox_route_config_t;
 
 typedef enum {
@@ -222,9 +230,6 @@ typedef enum {
 } jbox_route_state_t;
 
 const char* jbox_route_state_name(jbox_route_state_t state);
-
-/* Bitfield constants for `jbox_route_status_t::status_flags` (ABI v9+). */
-#define JBOX_ROUTE_STATUS_SHARE_DOWNGRADE 0x00000001u
 
 /* Snapshot of a route's runtime state. Filled in by poll_route_status.
  *
@@ -242,11 +247,6 @@ typedef struct {
      * sample rate is unknown. Not updated after the route starts; stop +
      * start refreshes the value. */
     uint64_t           estimated_latency_us;
-    /* Added in ABI v9: bitmap of per-route status flags. Currently only
-     * JBOX_ROUTE_STATUS_SHARE_DOWNGRADE is defined — set when a
-     * Performance-tier route was silently demoted because its
-     * `share_device` flag is set. Zero for non-running routes. */
-    uint32_t           status_flags;
 } jbox_route_status_t;
 
 /* -------------------------------------------------------------------- */
@@ -413,20 +413,6 @@ jbox_error_code_t jbox_engine_set_resampler_quality(
  * JBOX_RESAMPLER_QUALITY_MASTERING on NULL engine (the default). */
 jbox_resampler_quality_t jbox_engine_resampler_quality(
     jbox_engine_t* engine);
-
-/*
- * Supported HAL buffer-frame-size range for the device identified by
- * `uid` (ABI v6+). Both `out_min` and `out_max` are filled with 0
- * when the device is unknown or the HAL does not expose the property.
- * For an aggregate device the reported range is the intersection of
- * every active sub-device's range, so every value the UI surfaces is
- * accepted by every member simultaneously.
- */
-jbox_error_code_t jbox_engine_supported_buffer_frame_size_range(
-    jbox_engine_t* engine,
-    const char*    uid,
-    uint32_t*      out_min,
-    uint32_t*      out_max);
 
 /* -------------------------------------------------------------------- */
 /*  Metering                                                            */

@@ -60,12 +60,8 @@ public:
     bool startDevice(const std::string& uid) override;
     void stopDevice(const std::string& uid) override;
     std::uint32_t currentBufferFrameSize(const std::string& uid) override;
-    std::uint32_t requestBufferFrameSize(const std::string& uid,
-                                         std::uint32_t frames) override;
-    bool claimExclusive(const std::string& uid) override;
-    void releaseExclusive(const std::string& uid) override;
-    BufferFrameSizeRange supportedBufferFrameSizeRange(
-        const std::string& uid) override;
+    void setBufferFrameSize(const std::string& uid,
+                            std::uint32_t frames) override;
 
     // Forward declaration kept public so the .cpp-local trampoline
     // and helper functions can reference it without becoming friends.
@@ -81,20 +77,6 @@ private:
 
     // Registered IOProcs, keyed by our public IOProcId.
     std::unordered_map<IOProcId, std::unique_ptr<IOProcRecord>> ioprocs_;
-
-    // Per-aggregate hog + buffer-size state held under Performance
-    // mode's direct-monitor fast path. Captured by `claimExclusive`,
-    // restored + cleared by `releaseExclusive`.
-    struct ExclusiveEntry {
-        AudioDeviceID id                     = kAudioObjectUnknown;
-        std::uint32_t original_buffer_frames = 0;
-        bool          hogged                 = false;
-    };
-    struct ExclusiveState {
-        ExclusiveEntry              self;
-        std::vector<ExclusiveEntry> sub_devices;  // empty for non-aggregate
-    };
-    std::unordered_map<std::string, ExclusiveState> exclusive_state_;
 
     // Per-device "started" state, paired with AudioDeviceStart/Stop
     // calls on the underlying IOProcs.

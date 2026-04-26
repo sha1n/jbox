@@ -166,52 +166,30 @@ public:
     // failed. Non-RT; call from the control thread only.
     virtual std::uint32_t currentBufferFrameSize(const std::string& uid) = 0;
 
-    // Ask the HAL to change the device's buffer frame size. Returns
-    // the post-change value (may differ from `frames` if the HAL
-    // clamped the request into its supported range), or 0 on an
-    // unknown device / failure. Mutates a HAL property visible to
-    // other processes — only called when a route opts in via
-    // `RouteConfig.low_latency`. Non-RT; control thread only.
-    virtual std::uint32_t requestBufferFrameSize(
-        const std::string& uid, std::uint32_t frames) = 0;
-
-    // The device's supported buffer-frame-size range from
-    // `kAudioDevicePropertyBufferFrameSizeRange`. `{0, 0}` when the
-    // device is unknown or the property is not exposed. For an
-    // aggregate device this returns the narrowest range compatible
-    // with every active sub-device — i.e. max of the members' minima
-    // and min of the members' maxima — so the UI's picker values
-    // are uniformly accepted by every member.
-    struct BufferFrameSizeRange {
-        std::uint32_t minimum = 0;
-        std::uint32_t maximum = 0;
-    };
-    virtual BufferFrameSizeRange supportedBufferFrameSizeRange(
-        const std::string& uid) = 0;
-
-    // Claim exclusive ownership of the device via Core Audio's
-    // `kAudioDevicePropertyHogMode` (this process becomes the
-    // device's only client — other apps sharing it are disconnected
-    // until we release). Returns true on success. Used by the
-    // Performance-mode direct-monitor fast path so the buffer-size
-    // request reliably lands on devices held open by another app
-    // (e.g. Apollo + UAD Console).
+    // Express a per-device preference for the HAL buffer-frame-size,
+    // exactly as Superior Drummer / Reaper / any other Core Audio
+    // client would: a single `AudioObjectSetPropertyData
+    // (kAudioDevicePropertyBufferFrameSize)` write. This does NOT
+    // claim hog mode and does NOT evict other clients. macOS
+    // resolves the actual buffer with `max-across-clients` — if
+    // another app (Music, a video call, a DAW) is asking for a
+    // larger buffer, the actual value will be the larger one
+    // until that app stops asking.
     //
-    // For an aggregate device this also hogs each active sub-device
-    // (the actual HAL-buffer-size bottleneck lives on the members,
-    // not the aggregate) and snapshots each sub-device's current
-    // buffer frame size so `releaseExclusive` can restore each
-    // member to its own original value.
+    // For an aggregate device the call enumerates the active
+    // sub-devices via `kAudioAggregateDevicePropertyActive
+    // SubDeviceList` and writes to each member directly. The
+    // aggregate's own property is also written; macOS coordinates
+    // the rest. No fan-out via the aggregate driver — each member
+    // write goes through that member's own HAL plugin, the same
+    // way SD-style clients do it.
+    //
+    // `frames == 0` is a no-op (used by callers that route the
+    // "no override" case through the same code path).
     //
     // Non-RT; control thread only.
-    virtual bool claimExclusive(const std::string& uid) = 0;
-
-    // Release exclusive ownership previously acquired via
-    // `claimExclusive`. Restores every device's buffer frame size
-    // to the snapshot taken at claim time (including aggregate sub-
-    // devices), then releases hog mode on each. Safe to call even
-    // when not claimed.
-    virtual void releaseExclusive(const std::string& uid) = 0;
+    virtual void setBufferFrameSize(const std::string& uid,
+                                    std::uint32_t frames) = 0;
 };
 
 }  // namespace jbox::control

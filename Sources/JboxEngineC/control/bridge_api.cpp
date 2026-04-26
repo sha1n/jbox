@@ -95,8 +95,6 @@ jbox::control::RouteManager::RouteConfig convertRouteConfig(
     const std::uint32_t raw_mode = cfg.latency_mode;
     out.latency_mode  = raw_mode <= 2 ? static_cast<std::uint8_t>(raw_mode) : 0;
     out.buffer_frames = cfg.buffer_frames;
-    // ABI v9: any non-zero treated as true (the C type is uint8_t).
-    out.share_device  = cfg.share_device != 0;
     out.mapping.reserve(cfg.mapping_count);
     for (std::size_t i = 0; i < cfg.mapping_count; ++i) {
         out.mapping.push_back({
@@ -410,26 +408,6 @@ jbox_error_code_t jbox_engine_poll_route_latency_components(
     }
 }
 
-jbox_error_code_t jbox_engine_supported_buffer_frame_size_range(
-    jbox_engine_t* engine,
-    const char*    uid,
-    uint32_t*      out_min,
-    uint32_t*      out_max) {
-    if (engine == nullptr || uid == nullptr ||
-        out_min == nullptr || out_max == nullptr) {
-        return JBOX_ERR_INVALID_ARGUMENT;
-    }
-    try {
-        const auto range = engine->impl->supportedBufferFrameSizeRange(uid);
-        *out_min = range.minimum;
-        *out_max = range.maximum;
-        return JBOX_OK;
-    } catch (...) {
-        *out_min = 0;
-        *out_max = 0;
-        return JBOX_ERR_INTERNAL;
-    }
-}
 
 jbox_error_code_t jbox_engine_set_resampler_quality(
     jbox_engine_t*           engine,

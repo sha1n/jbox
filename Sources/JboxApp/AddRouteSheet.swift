@@ -17,29 +17,17 @@ struct AddRouteSheet: View {
     @State private var pairs: [MappingPair] = [MappingPair(src: 0, dst: 0)]
     @State private var customName: String = ""
     @State private var latencyMode: LatencyMode = .off
-    /// 0 == "use the tier default" (currently 64 for Performance).
+    /// 0 == "no preference" (the route runs at whatever buffer the
+    /// device is currently at); non-zero issues a single SD-style
+    /// `kAudioDevicePropertyBufferFrameSize` write per device at
+    /// route start.
     @State private var bufferFrames: UInt32 = 0
-    /// Phase 7.5 per-route opt-out. Defaults to the global preference;
-    /// the user can flip per-route before saving.
-    @State private var shareDevices: Bool = false
     @State private var errorMessage: String?
 
-    /// Buffer-size policy preference (Preferences → Audio). Seeds the
-    /// Performance-mode picker the first time the user switches into
-    /// that tier; they can still override it per-route before saving.
-    /// 0 == "use each device's current setting"; non-zero is an
-    /// explicit override in frames. Matches
-    /// `BufferSizePolicy.storedRaw` in `JboxEngineSwift`.
-    @AppStorage(JboxPreferences.bufferSizePolicyKey) private var bufferPolicyRaw: Int = 0
-    /// Phase 7.5 global default for the share-device toggle. Seeds
-    /// `shareDevices` when the sheet opens; per-route edits don't
-    /// write back to this key.
-    @AppStorage(JboxPreferences.shareDevicesByDefaultKey) private var shareDevicesByDefault: Bool = false
-
-    /// Standard buffer-size options offered to the user. The menu
-    /// filters down to the subset the selected device supports.
+    /// Standard buffer-size choices the picker offers when the user
+    /// selects Performance.
     private static let kBufferSizeChoices: [UInt32] = [
-        32, 64, 128, 256, 512, 1024, 2048]
+        16, 32, 64, 128, 256, 512, 1024, 2048]
 
     // `MappingPair` and the mapping-row view live in
     // ChannelMappingEditor.swift so the Add and Edit sheets can share
@@ -74,33 +62,6 @@ struct AddRouteSheet: View {
 
     private var canSave: Bool { validationIssue == nil }
 
-    /// Buffer-size choices the Performance-mode picker offers —
-    /// intersection of our standard choices with the source
-    /// device's HAL-reported range (and the destination's, if they
-    /// differ). Returns the full list when the device does not
-    /// expose a range.
-    private var bufferSizeOptions: [UInt32] {
-        var range: ClosedRange<UInt32>? = nil
-        if !sourceUID.isEmpty,
-           let r = store.bufferFrameRange(forDeviceUid: sourceUID) {
-            range = r
-        }
-        if sourceUID != destUID, !destUID.isEmpty,
-           let r = store.bufferFrameRange(forDeviceUid: destUID) {
-            if let existing = range {
-                let lo = max(existing.lowerBound, r.lowerBound)
-                let hi = min(existing.upperBound, r.upperBound)
-                range = lo <= hi ? lo...hi : nil
-            } else {
-                range = r
-            }
-        }
-        if let range {
-            return Self.kBufferSizeChoices.filter { range.contains($0) }
-        }
-        return Self.kBufferSizeChoices
-    }
-
     private var latencyModeFooter: String {
         switch latencyMode {
         case .off:
@@ -112,12 +73,14 @@ struct AddRouteSheet: View {
                  + "if you hear clicks."
         case .performance:
             return "Lowest latency tier. Smallest ring + aggressive "
-                 + "drift setpoint. When source and destination are "
-                 + "the same device (e.g. an aggregate), takes "
-                 + "exclusive control of the device to force a small "
-                 + "HAL buffer — other apps using the device are "
-                 + "disconnected while the route is running. Underruns "
-                 + "are expected on bursty sources."
+                 + "drift setpoint; for same-device routes (e.g. an "
+                 + "aggregate) the engine takes a duplex fast path "
+                 + "that bypasses the ring entirely. The Buffer size "
+                 + "below is a *preference*: macOS resolves the actual "
+                 + "value as the max across all active clients, so "
+                 + "another app asking for a bigger buffer (Music, a "
+                 + "video call, a DAW with a larger session) will "
+                 + "pull the buffer up while it's running."
         }
     }
 
@@ -156,23 +119,14 @@ struct AddRouteSheet: View {
                     Picker("Latency mode", selection: $latencyMode) {
                         Text("Off — safe default").tag(LatencyMode.off)
                         Text("Low").tag(LatencyMode.low)
-                        Text(shareDevices ? "Performance — unavailable when sharing" : "Performance")
-                            .tag(LatencyMode.performance)
+                        Text("Performance").tag(LatencyMode.performance)
                     }
                     .pickerStyle(.menu)
-                    .disabled(false)  // keep the picker enabled; just snap below.
 
-                    Toggle("Share device with other apps", isOn: $shareDevices)
-                    if shareDevices {
-                        Text("Performance requires exclusive device access and is unavailable while sharing.")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
-
-                    if latencyMode == .performance && !shareDevices {
+                    if latencyMode == .performance {
                         Picker("Buffer size", selection: $bufferFrames) {
-                            Text("Default (64)").tag(UInt32(0))
-                            ForEach(bufferSizeOptions, id: \.self) { frames in
+                            Text("No preference (use device's current)").tag(UInt32(0))
+                            ForEach(Self.kBufferSizeChoices, id: \.self) { frames in
                                 Text("\(frames) frames").tag(frames)
                             }
                         }
@@ -204,17 +158,6 @@ struct AddRouteSheet: View {
         }
         .frame(minWidth: 520, minHeight: 460)
         .onAppear(perform: preselectDefaults)
-        .onChange(of: latencyMode) { _, newMode in
-            seedBufferFromPolicyIfNeeded(latencyMode: newMode)
-        }
-        .onChange(of: shareDevices) { _, sharing in
-            // Snap back when the user toggles sharing on with
-            // Performance selected. Unchecking sharing doesn't
-            // auto-restore Performance — that was a deliberate choice.
-            if sharing && latencyMode == .performance {
-                latencyMode = .low
-            }
-        }
     }
 
     // MARK: Actions
@@ -226,23 +169,6 @@ struct AddRouteSheet: View {
         if destUID.isEmpty, let first = outputDevices.first {
             destUID = first.uid
         }
-        // Seed the share toggle from the global default on first paint.
-        shareDevices = shareDevicesByDefault
-        seedBufferFromPolicyIfNeeded(latencyMode: latencyMode)
-    }
-
-    /// If the user switches into Performance mode (or opens the sheet
-    /// already on Performance) and hasn't picked a buffer size, seed
-    /// `bufferFrames` from the global policy. We only touch an
-    /// untouched `0` so the user's explicit override is never
-    /// overwritten. Policy values that the currently-selected devices
-    /// can't honour fall back to 0 (tier default) instead of forcing
-    /// the HAL to clamp.
-    private func seedBufferFromPolicyIfNeeded(latencyMode: LatencyMode) {
-        guard latencyMode == .performance, bufferFrames == 0 else { return }
-        let raw = UInt32(max(0, bufferPolicyRaw))
-        guard raw != 0, bufferSizeOptions.contains(raw) else { return }
-        bufferFrames = raw
     }
 
     private func save() {
@@ -254,8 +180,7 @@ struct AddRouteSheet: View {
             mapping: mapping,
             name: customName.trimmingCharacters(in: .whitespaces).isEmpty ? nil : customName,
             latencyMode: latencyMode,
-            bufferFrames: bufferFrames == 0 ? nil : bufferFrames,
-            shareDevices: shareDevices
+            bufferFrames: bufferFrames == 0 ? nil : bufferFrames
         )
         do {
             _ = try store.addRoute(cfg)
