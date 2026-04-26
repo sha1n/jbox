@@ -221,17 +221,14 @@ struct MenuBarContent: View {
     }
 
     /// Front-raises an existing main window instead of opening a new
-    /// one. `openWindow(id:)` on a default `WindowGroup` always creates
-    /// a fresh instance, which means every menu-bar click spawns
-    /// another copy. The AppKit side of the scene machinery is the only
-    /// place we can cheaply ask "is a window already up?" — we filter
-    /// `NSApp.windows` down to our titled main window (the menu bar
-    /// popover is an `NSPanel` and is skipped; Settings carries a
-    /// different title). If we find one, we deminiaturize it if needed
-    /// and bring it key-and-front; only when nothing matches do we
-    /// fall through to `openWindow(id:)`. Stopping SwiftUI from
-    /// creating more than one instance *at all* (⌘N, repeated
-    /// `openWindow(id:)` calls, etc.) is a separate follow-up.
+    /// one. The scene type itself is now SwiftUI's single-instance
+    /// `Window` (`JboxApp.swift`), which already guarantees `openWindow`
+    /// raises the live instance and suppresses the default ⌘N menu
+    /// item — but we still walk `NSApp.windows` here to deminiaturize
+    /// a hidden-but-existing window cleanly without round-tripping
+    /// through `openWindow(id:)`. Filters out `NSPanel` (the menu bar
+    /// popover) and matches the "Jbox" title so the Settings window
+    /// is skipped.
     private func openOrRaiseMainWindow() {
         NSApp.activate(ignoringOtherApps: true)
         if let existing = NSApp.windows.first(where: isMainWindow) {
@@ -248,7 +245,7 @@ struct MenuBarContent: View {
         // Skip panels — the menu bar extra's popover is one, as are
         // various AppKit utility windows we don't want to target.
         guard !(window is NSPanel) else { return false }
-        // `WindowGroup("Jbox", id: "main")` titles its instance "Jbox".
+        // `Window("Jbox", id: "main")` titles its instance "Jbox".
         // Settings window carries its own title; status popovers have
         // empty titles.
         return window.title == "Jbox"

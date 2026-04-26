@@ -27,7 +27,14 @@ struct JboxApp: App {
     @Environment(\.scenePhase) private var scenePhase
 
     var body: some Scene {
-        WindowGroup("Jbox", id: Self.mainWindowId) {
+        // `Window` (macOS 13+) is a single-instance scene: the framework
+        // enforces that exactly one instance exists at a time, drops the
+        // default `File ▸ New Window` (Cmd-N) command, and makes
+        // `openWindow(id:)` raise the existing instance instead of
+        // spawning a duplicate. `WindowGroup` would allow multiple
+        // copies, which the spec § 4.2 ("a single main window") and the
+        // Phase 6 follow-up (docs/plan.md:358) explicitly rule out.
+        Window("Jbox", id: Self.mainWindowId) {
             AppRootView(appState: appState)
                 .preferredColorScheme(colorScheme)
                 .onChange(of: scenePhase) { _, phase in
