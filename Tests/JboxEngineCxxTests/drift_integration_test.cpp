@@ -44,6 +44,12 @@ struct ConvergenceResult {
     double min_fill;
     double max_fill;
     std::size_t total_ticks;
+    // Number of times the RT path actually pushed a new rate into the
+    // AudioConverter (i.e., shouldApplyRate returned true). Counted by
+    // observing changes in RouteRecord::last_applied_rate across ticks.
+    // The deadband (rate_deadband.hpp) gates sub-ppm proposals, so this
+    // should stay near zero when the actual drift is below threshold.
+    std::size_t rate_applies;
 };
 
 // Run one convergence scenario. Both devices at 48 kHz nominal;
@@ -92,6 +98,11 @@ ConvergenceResult runScenario(double src_drift_ppm, double dst_drift_ppm,
     out.min_fill = 1e18;
     out.max_fill = -1e18;
     out.max_error_after_convergence = 0.0;
+    out.rate_applies = 0;
+    // The route's pre-loop last_applied_rate is the nominal set in
+    // attemptStart (route_manager.cpp:621) -- 48 kHz here. Track changes
+    // from that baseline.
+    double prev_applied = 48000.0;
 
     const std::size_t ticks = static_cast<std::size_t>(sim_seconds / dt);
     for (std::size_t i = 0; i < ticks; ++i) {
@@ -123,6 +134,17 @@ ConvergenceResult runScenario(double src_drift_ppm, double dst_drift_ppm,
             running[0]->ring->framesAvailableForRead());
         out.min_fill = std::min(out.min_fill, fill);
         out.max_fill = std::max(out.max_fill, fill);
+
+        // Track deadband-gated rate applications. last_applied_rate is
+        // updated in outputIOProcCallback (route_manager.cpp:233-236)
+        // only when shouldApplyRate returned true; counting changes
+        // across ticks therefore counts the actual setInputRate calls
+        // the RT path made on the converter.
+        const double now_applied = running[0]->last_applied_rate;
+        if (now_applied != prev_applied) {
+            ++out.rate_applies;
+            prev_applied = now_applied;
+        }
 
         if (i == 0) {
             // First-tick fill as the reference. NOTE: this only bounds
@@ -195,4 +217,32 @@ TEST_CASE("Drift converges within 10s at +50 ppm (short horizon)",
     // rate change once the tuning work lands.
     const auto r = runScenario(+50.0, 0.0, 60.0, 512.0, 10.0);
     REQUIRE(r.total_ticks > 0u);
+}
+
+TEST_CASE("Drift integration: sub-ppm drift stays inside the deadband and "
+          "AudioConverter::setInputRate is not called per tick",
+          "[drift_integration][deadband]") {
+    // Pins the load-bearing claim in CLAUDE.md and rate_deadband.hpp:
+    // when the actual drift is below the 1 ppm deadband, the RT path
+    // must NOT push a new rate into the AudioConverter on every tick.
+    // Each setInputRate call flushes Apple's polyphase filter and
+    // costs ~16 input frames -- on real hardware that manifested as
+    // click artifacts and a slow-growing underrun counter.
+    //
+    // Scenario: +0.3 ppm source-side drift, zero dst drift, 30 s
+    // simulated. The PI controller's steady-state proposal is on the
+    // order of -0.3 ppm relative to nominal -- well inside the 1 ppm
+    // deadband. Without the deadband this loop would fire every tick
+    // (3000 applies); with the deadband the count must stay tiny.
+    //
+    // The bound (<= 5) gives ~600x margin against "deadband disabled
+    // / loosened past noise floor" while leaving room for any real
+    // boundary crossing if the PI gains are later tuned higher.
+    const auto r = runScenario(/*src_drift_ppm=*/+0.3,
+                               /*dst_drift_ppm=*/0.0,
+                               /*sim_seconds=*/30.0,
+                               /*band_frames=*/1024.0,
+                               /*assert_after_seconds=*/5.0);
+    REQUIRE(r.total_ticks > 0u);
+    REQUIRE(r.rate_applies <= 5u);
 }
