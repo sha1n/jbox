@@ -53,10 +53,19 @@ let package = Package(
             path: "Sources/JboxEngineSwift"
         ),
 
+        // CLI argument-parsing logic split into its own library so the
+        // pure logic (parseCLI, parseRouteSpec, parseChannelList) is
+        // unit-testable without spinning up the executable.
+        .target(
+            name: "JboxEngineCLICore",
+            dependencies: ["JboxEngineSwift"],
+            path: "Sources/JboxEngineCLICore"
+        ),
+
         // Standalone headless CLI — exercises the engine without the GUI.
         .executableTarget(
             name: "JboxEngineCLI",
-            dependencies: ["JboxEngineSwift"],
+            dependencies: ["JboxEngineCLICore", "JboxEngineSwift"],
             path: "Sources/JboxEngineCLI"
         ),
 
@@ -112,6 +121,11 @@ let package = Package(
             name: "JboxAppTests",
             dependencies: ["JboxEngineSwift"],
             path: "Tests/JboxAppTests"
+        ),
+        .testTarget(
+            name: "JboxEngineCLITests",
+            dependencies: ["JboxEngineCLICore", "JboxEngineSwift"],
+            path: "Tests/JboxEngineCLITests"
         ),
     ],
     cxxLanguageStandard: .cxx20
