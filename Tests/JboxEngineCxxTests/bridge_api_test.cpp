@@ -329,6 +329,99 @@ TEST_CASE("bridge: add_route rejects NULL mapping with mapping_count>0",
 }
 
 // -----------------------------------------------------------------------------
+// Route buffer_frames override (ABI v11)
+//
+// jbox_route_config_t::buffer_frames was re-appended in v11 after the
+// Phase 7.6 v10 strip (see jbox_engine.h ABI history). The route_manager
+// suite covers the C++-side semantics (single write per device, no hog,
+// aggregate sub-device fan-out) end-to-end; these cases lock down the
+// C-bridge forwarding path -- bridge_api.cpp:97 -- so a future edit
+// that drops `out.buffer_frames = cfg.buffer_frames` is caught at the
+// public-ABI boundary.
+// -----------------------------------------------------------------------------
+
+TEST_CASE("bridge: add_route with non-zero buffer_frames issues a "
+          "setBufferFrameSize per device through the C ABI",
+          "[bridge_api][buffer_frames][integration]") {
+    auto backend_holder = std::make_unique<SimulatedBackend>();
+    auto* backend = backend_holder.get();
+    backend->addDevice(makeDev("src", kBackendDirectionInput,  2, 0));
+    backend->addDevice(makeDev("dst", kBackendDirectionOutput, 0, 2));
+
+    jbox_engine_t* e = jbox::internal::createEngineWithBackend(
+        std::move(backend_holder), /*spawn_sampler_thread=*/false);
+    REQUIRE(e != nullptr);
+
+    jbox_error_t err{};
+    if (auto* l = jbox_engine_enumerate_devices(e, &err)) {
+        jbox_device_list_free(l);
+    }
+
+    const jbox_channel_edge_t mapping[] = {{0, 0}, {1, 1}};
+    jbox_route_config_t rcfg{};
+    rcfg.source_uid    = "src";
+    rcfg.dest_uid      = "dst";
+    rcfg.mapping       = mapping;
+    rcfg.mapping_count = 2;
+    rcfg.name          = "v11-buffer-frames";
+    rcfg.buffer_frames = 128;
+
+    const jbox_route_id_t id = jbox_engine_add_route(e, &rcfg, &err);
+    REQUIRE(id != JBOX_INVALID_ROUTE_ID);
+    REQUIRE(jbox_engine_start_route(e, id) == JBOX_OK);
+
+    // Cross-device route: one write to src, one to dst, both at the
+    // override. Order is implementation-defined; assert by membership.
+    const auto& writes = backend->bufferSizeWrites();
+    REQUIRE(writes.size() == 2);
+    bool saw_src = false, saw_dst = false;
+    for (const auto& w : writes) {
+        REQUIRE(w.frames == 128);
+        if (w.uid == "src") saw_src = true;
+        if (w.uid == "dst") saw_dst = true;
+    }
+    REQUIRE(saw_src);
+    REQUIRE(saw_dst);
+
+    jbox_engine_destroy(e);
+}
+
+TEST_CASE("bridge: add_route with buffer_frames == 0 issues no "
+          "setBufferFrameSize through the C ABI",
+          "[bridge_api][buffer_frames][integration]") {
+    auto backend_holder = std::make_unique<SimulatedBackend>();
+    auto* backend = backend_holder.get();
+    backend->addDevice(makeDev("src", kBackendDirectionInput,  2, 0));
+    backend->addDevice(makeDev("dst", kBackendDirectionOutput, 0, 2));
+
+    jbox_engine_t* e = jbox::internal::createEngineWithBackend(
+        std::move(backend_holder), /*spawn_sampler_thread=*/false);
+    REQUIRE(e != nullptr);
+
+    jbox_error_t err{};
+    if (auto* l = jbox_engine_enumerate_devices(e, &err)) {
+        jbox_device_list_free(l);
+    }
+
+    const jbox_channel_edge_t mapping[] = {{0, 0}, {1, 1}};
+    jbox_route_config_t rcfg{};
+    rcfg.source_uid    = "src";
+    rcfg.dest_uid      = "dst";
+    rcfg.mapping       = mapping;
+    rcfg.mapping_count = 2;
+    rcfg.name          = "v11-no-pref";
+    // buffer_frames left at default (0) -- the "no preference" case.
+
+    const jbox_route_id_t id = jbox_engine_add_route(e, &rcfg, &err);
+    REQUIRE(id != JBOX_INVALID_ROUTE_ID);
+    REQUIRE(jbox_engine_start_route(e, id) == JBOX_OK);
+
+    REQUIRE(backend->bufferSizeWrites().empty());
+
+    jbox_engine_destroy(e);
+}
+
+// -----------------------------------------------------------------------------
 // Live-system smoke check (runs on CI with default built-in devices)
 // -----------------------------------------------------------------------------
 
