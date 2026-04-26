@@ -218,3 +218,24 @@ struct EditRouteSheet: View {
         }
     }
 }
+
+// MARK: - Previews
+
+#if DEBUG
+#Preview("EditRouteSheet — running route") {
+    editRouteSheetPreview(route: PreviewFixtures.runningRoute())
+}
+
+#Preview("EditRouteSheet — stopped route") {
+    editRouteSheetPreview(route: PreviewFixtures.stoppedRoute())
+}
+
+@MainActor
+private func editRouteSheetPreview(route: Route) -> some View {
+    let store = EngineStore.preview(
+        routes: [route],
+        devices: PreviewFixtures.devices)
+    return EditRouteSheet(route: route, store: store, onClose: {})
+        .frame(width: 640, height: 720)
+}
+#endif

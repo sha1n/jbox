@@ -440,3 +440,104 @@ struct StatusGlyph: View {
         }
     }
 }
+
+// MARK: - Previews
+
+#if DEBUG
+#Preview("RouteListView — populated") {
+    RouteListView(store: PreviewFixtures.sampleStore())
+        .frame(width: 900, height: 520)
+}
+
+#Preview("RouteListView — empty") {
+    RouteListView(store: PreviewFixtures.emptyStore())
+        .frame(width: 900, height: 360)
+}
+
+#Preview("RouteListView — engine error") {
+    routeListErrorPreview()
+}
+
+@MainActor
+private func routeListErrorPreview() -> some View {
+    let running = PreviewFixtures.runningRoute()
+    let store = EngineStore.preview(
+        routes: [running, PreviewFixtures.stoppedRoute()],
+        devices: PreviewFixtures.devices,
+        meters: [running.id: PreviewFixtures.meters(channels: running.config.mapping.count)],
+        latencyComponents: [running.id: PreviewFixtures.latency(for: running)],
+        lastError: "Couldn't open destination device.")
+    return RouteListView(store: store)
+        .frame(width: 900, height: 520)
+}
+
+#Preview("RouteRow — running, collapsed") {
+    routeRowPreview(route: PreviewFixtures.runningRoute(),
+                    expanded: false,
+                    withMeters: true)
+}
+
+#Preview("RouteRow — running, expanded") {
+    routeRowPreview(route: PreviewFixtures.runningRoute(),
+                    expanded: true,
+                    withMeters: true)
+}
+
+#Preview("RouteRow — stopped") {
+    routeRowPreview(route: PreviewFixtures.stoppedRoute(),
+                    expanded: false,
+                    withMeters: false)
+}
+
+#Preview("RouteRow — waiting") {
+    routeRowPreview(route: PreviewFixtures.waitingRoute(),
+                    expanded: false,
+                    withMeters: false)
+}
+
+#Preview("RouteRow — starting") {
+    routeRowPreview(route: PreviewFixtures.startingRoute(),
+                    expanded: false,
+                    withMeters: false)
+}
+
+#Preview("RouteRow — error") {
+    routeRowPreview(route: PreviewFixtures.errorRoute(),
+                    expanded: false,
+                    withMeters: false)
+}
+
+#Preview("SignalDotRow — mixed signal") {
+    SignalDotRow(peaks: PreviewFixtures.meters(channels: 4))
+        .padding()
+}
+
+#Preview("SignalDotRow — no signal yet") {
+    SignalDotRow(peaks: nil)
+        .padding()
+}
+
+@MainActor
+private func routeRowPreview(route: Route,
+                             expanded: Bool,
+                             withMeters: Bool) -> some View {
+    let meters: [UInt32: MeterPeaks] = withMeters
+        ? [route.id: PreviewFixtures.meters(channels: route.config.mapping.count)]
+        : [:]
+    let store = EngineStore.preview(
+        routes: [route],
+        devices: PreviewFixtures.devices,
+        meters: meters,
+        latencyComponents: withMeters
+            ? [route.id: PreviewFixtures.latency(for: route)]
+            : [:])
+    return RouteRow(
+        route: route,
+        store: store,
+        expanded: expanded,
+        onToggleExpanded: {},
+        onEditRequested: {})
+        .padding()
+        .frame(width: 800)
+}
+#endif

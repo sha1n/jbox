@@ -192,3 +192,12 @@ struct AddRouteSheet: View {
         }
     }
 }
+
+// MARK: - Previews
+
+#if DEBUG
+#Preview("AddRouteSheet") {
+    AddRouteSheet(store: PreviewFixtures.emptyStore(), onClose: {})
+        .frame(width: 640, height: 720)
+}
+#endif

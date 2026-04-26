@@ -356,3 +356,39 @@ private struct LatencyBreakdown: View {
         }
     }
 }
+
+// MARK: - Previews
+
+#if DEBUG
+@MainActor
+private func meterPanelPreview(channels: Int) -> some View {
+    let store = PreviewFixtures.runningStore(channels: channels)
+    let route = store.routes[0]
+    return MeterPanel(route: route, store: store, peaks: store.meters[route.id]!)
+        .padding()
+        .frame(width: 720)
+}
+
+#Preview("MeterPanel — 2 channels") {
+    meterPanelPreview(channels: 2)
+}
+
+#Preview("MeterPanel — 8 channels") {
+    meterPanelPreview(channels: 8)
+}
+
+#Preview("ChannelBar — colour zones") {
+    HStack(alignment: .bottom, spacing: 12) {
+        ForEach([0.0, 0.05, 0.3, 0.7, 0.95, 1.5], id: \.self) { (peak: Double) in
+            VStack {
+                ChannelBar(peak: Float(peak), hold: Float(peak))
+                    .frame(width: 28, height: 200)
+                Text(String(format: "%.2f", peak))
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+        }
+    }
+    .padding()
+}
+#endif

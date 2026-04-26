@@ -634,4 +634,37 @@ public final class EngineStore {
             routes[idx].status = status
         }
     }
+
+#if DEBUG
+    /// Build an `EngineStore` preloaded with stub state for SwiftUI
+    /// `#Preview` blocks and lightweight tests. Compiled into debug
+    /// builds only — `#Preview` itself is a debug-only construct, so
+    /// the lifetimes match.
+    ///
+    /// A real `Engine` is still constructed because `EngineStore`
+    /// holds one as a non-optional `let`. That spawns the engine's
+    /// background sampler + log-drainer threads, but they sit idle
+    /// until something calls `startRoute`. Preview canvases never do,
+    /// so the cost is one allocation + two parked threads — well
+    /// inside what Xcode previews tolerate.
+    @MainActor
+    public static func preview(routes: [Route] = [],
+                               devices: [Device] = [],
+                               meters: [UInt32: MeterPeaks] = [:],
+                               latencyComponents: [UInt32: LatencyComponents] = [:],
+                               lastError: String? = nil) -> EngineStore {
+        guard let engine = try? Engine() else {
+            preconditionFailure(
+                "EngineStore.preview: Engine construction failed. " +
+                "Previews require a usable Core Audio backend on the host.")
+        }
+        let store = EngineStore(engine: engine)
+        store.routes            = routes
+        store.devices           = devices
+        store.meters            = meters
+        store.latencyComponents = latencyComponents
+        store.lastError         = lastError
+        return store
+    }
+#endif
 }
