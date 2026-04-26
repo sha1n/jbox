@@ -60,6 +60,10 @@ struct MeterPanel: View {
             }
             .padding(.top, 20)
         }
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(MeterAccessibilityLabel.summary(
+            source: peaks.source,
+            destination: peaks.destination))
     }
 
     /// Short labels for the source bars — one per mapped channel.
