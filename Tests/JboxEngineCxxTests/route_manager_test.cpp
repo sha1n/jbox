@@ -910,6 +910,62 @@ TEST_CASE("RouteManager: buffer_frames == 0 issues no setBufferFrameSize call",
     REQUIRE(rm.stopRoute(id) == JBOX_OK);
 }
 
+TEST_CASE("RouteManager: when the device clamps the request upward "
+          "(max-across-clients), the route still runs and the latency "
+          "pill reflects the device's actual buffer, not the request",
+          "[route_manager][cross_device][buffer_frames][max_across_clients]") {
+    // macOS resolves kAudioDevicePropertyBufferFrameSize across all
+    // clients of a device: if another app has asked for 256, our
+    // request for 64 is silently kept at 256 until that app stops
+    // asking. The engine handles this by reading the post-write
+    // buffer back via currentBufferFrameSize and reporting *that*
+    // value in the latency pill -- it never trusts the request.
+    //
+    // This test pins both halves of that contract:
+    //   1. Route reaches RUNNING regardless of the clamp (no error).
+    //   2. pollLatencyComponents reflects the resolved value, not
+    //      the override the caller asked for.
+    auto backend_holder = std::make_unique<SimulatedBackend>();
+    auto* backend = backend_holder.get();
+    backend->addDevice(makeInputDevice("src",  2, /*buf*/ 128));
+    backend->addDevice(makeOutputDevice("dst", 2, /*buf*/ 128));
+    // Simulate a co-resident client holding the destination at 256.
+    // No floor on src -> request wins for the source side.
+    backend->setMaxAcrossClientsFloor("dst", 256);
+
+    auto dm = std::make_unique<DeviceManager>(std::move(backend_holder));
+    dm->refresh();
+    RouteManager rm(*dm);
+
+    std::vector<ChannelEdge> mapping{{0, 0}, {1, 1}};
+    RouteManager::RouteConfig cfg{
+        "src", "dst", mapping, "clamped",
+        /*latency_mode*/ 0,
+        /*buffer_frames*/ 64};
+    jbox_error_t err{};
+    const auto id = rm.addRoute(cfg, &err);
+    REQUIRE(id != JBOX_INVALID_ROUTE_ID);
+    REQUIRE(rm.startRoute(id) == JBOX_OK);
+
+    jbox_route_status_t status{};
+    rm.pollStatus(id, &status);
+    REQUIRE(status.state == JBOX_ROUTE_STATE_RUNNING);
+
+    // Both writes were issued at the request value -- the engine
+    // doesn't know (or care) that one of them got clamped.
+    const auto& writes = backend->bufferSizeWrites();
+    REQUIRE(writes.size() == 2);
+    for (const auto& w : writes) REQUIRE(w.frames == 64);
+
+    jbox_route_latency_components_t lc{};
+    REQUIRE(rm.pollLatencyComponents(id, &lc) == JBOX_OK);
+    // src had no floor -> resolved = max(64, 0) = 64.
+    REQUIRE(lc.src_buffer_frames == 64);
+    // dst floor was 256 -> resolved = max(64, 256) = 256. The pill
+    // reports the *actual* value, not the override the user asked for.
+    REQUIRE(lc.dst_buffer_frames == 256);
+}
+
 TEST_CASE("RouteManager: cross-device buffer_frames override writes to both source and destination",
           "[route_manager][cross_device][buffer_frames]") {
     // V31 → Apollo–style cross-device route with buffer override.

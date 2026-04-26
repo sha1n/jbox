@@ -102,6 +102,11 @@ public:
     // Test introspection: every `setBufferFrameSize` call (after
     // aggregate fan-out, one entry per uid) is recorded so tests
     // can assert which UIDs were touched and with what frame count.
+    // The recorded `frames` is the request value passed to the API
+    // -- not the post-resolution effective value (see
+    // `setMaxAcrossClientsFloor` below) -- mirroring real macOS,
+    // where the SetPropertyData call carries the request and the
+    // post-call readback may report a different number.
     struct BufferSizeWrite {
         std::string   uid;
         std::uint32_t frames = 0;
@@ -109,6 +114,19 @@ public:
     const std::vector<BufferSizeWrite>& bufferSizeWrites() const {
         return buffer_size_writes_;
     }
+
+    // Simulate macOS's `max-across-clients` resolution for the HAL
+    // buffer-frame-size property. After this is set on `uid`,
+    // subsequent `setBufferFrameSize(uid, request)` calls update
+    // the device's effective buffer to `max(request, floor)` --
+    // mimicking a co-resident client holding the device at `floor`
+    // while it runs. The recorded `bufferSizeWrites()` entry still
+    // carries the request value (matching what the API caller saw),
+    // but `currentBufferFrameSize(uid)` returns the resolved value.
+    // Default floor is 0 (request always wins). Persistent across
+    // multiple writes; pass 0 to clear.
+    void setMaxAcrossClientsFloor(const std::string& uid,
+                                  std::uint32_t frames);
 
 private:
     struct DeviceSlot {
@@ -151,6 +169,11 @@ private:
     // `setBufferFrameSize` call (one entry per uid touched, including
     // each aggregate sub-device fan-out target).
     std::vector<BufferSizeWrite> buffer_size_writes_;
+
+    // Per-UID `max-across-clients` floor. Empty by default; populated
+    // by `setMaxAcrossClientsFloor`. Each `setBufferFrameSize` lookup
+    // resolves the effective buffer to `max(request, floor)`.
+    std::unordered_map<std::string, std::uint32_t> mac_floor_;
 };
 
 }  // namespace jbox::control

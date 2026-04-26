@@ -221,23 +221,44 @@ std::uint32_t SimulatedBackend::currentBufferFrameSize(const std::string& uid) {
     return it->second.info.buffer_frame_size;
 }
 
+void SimulatedBackend::setMaxAcrossClientsFloor(const std::string& uid,
+                                                std::uint32_t frames) {
+    mac_floor_[uid] = frames;
+}
+
 void SimulatedBackend::setBufferFrameSize(const std::string& uid,
                                           std::uint32_t frames) {
     if (frames == 0) return;
     auto it = devices_.find(uid);
     if (it == devices_.end()) return;
 
+    // Effective buffer after macOS's `max-across-clients` resolution.
+    // Tests express co-resident pressure via setMaxAcrossClientsFloor;
+    // unset UIDs default to floor=0 so the request always wins, which
+    // is the original behaviour of this backend.
+    auto effective = [this, frames](const std::string& target) {
+        auto f = mac_floor_.find(target);
+        const std::uint32_t floor =
+            (f == mac_floor_.end()) ? 0u : f->second;
+        return std::max(frames, floor);
+    };
+
     // Aggregate semantics, mirroring `CoreAudioBackend`: enumerate
     // member UIDs and write to each member's own buffer_frame_size
     // before writing the aggregate's. Tests assert the per-uid
     // record list captures every target. No hog mode anywhere.
+    //
+    // The recorded `frames` value is the *request* (what the API
+    // caller saw), not the resolved effective value -- mirroring real
+    // macOS, where the SetPropertyData call carries the request and a
+    // separate readback returns the post-resolution number.
     for (const auto& sub_uid : it->second.sub_device_uids) {
         auto sub = devices_.find(sub_uid);
         if (sub == devices_.end()) continue;
-        sub->second.info.buffer_frame_size = frames;
+        sub->second.info.buffer_frame_size = effective(sub_uid);
         buffer_size_writes_.push_back({sub_uid, frames});
     }
-    it->second.info.buffer_frame_size = frames;
+    it->second.info.buffer_frame_size = effective(uid);
     buffer_size_writes_.push_back({uid, frames});
 }
 
