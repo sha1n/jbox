@@ -134,6 +134,146 @@ TEST_CASE("RouteManager: startRoute with missing device transitions to WAITING",
     REQUIRE(status.state == JBOX_ROUTE_STATE_WAITING);
 }
 
+// -----------------------------------------------------------------------------
+// User-driven WAITING recovery (route_manager.hpp § 1)
+//
+// The engine has no hot-plug listener — sub-phases 7.6.4 / 7.6.5 are
+// deferred per `route_manager.hpp:10-14` and `CLAUDE.md`. The currently-
+// shipped contract is user-driven: a route that can't resolve its
+// devices at start time stays in WAITING; the user (or a polling client)
+// refreshes the DeviceManager and calls `startRoute` again. The cases
+// below lock down that flow and the WAITING-state lifecycle hygiene.
+//
+// Intentionally NOT covered here: a RUNNING route whose device
+// disappears underneath. That reaction is the contract sub-phase 7.6.4
+// will introduce; testing it now would either fail or pin undefined
+// current behavior.
+// -----------------------------------------------------------------------------
+
+TEST_CASE("RouteManager: WAITING route resumes to RUNNING when the missing "
+          "device appears and start is called again",
+          "[route_manager][waiting]") {
+    // Begin with only a destination; source is missing → WAITING.
+    auto backend_holder = std::make_unique<SimulatedBackend>();
+    auto* backend = backend_holder.get();
+    backend->addDevice(makeOutputDevice("dst", 2));
+    auto dm = std::make_unique<DeviceManager>(std::move(backend_holder));
+    dm->refresh();
+    RouteManager rm(*dm);
+
+    std::vector<ChannelEdge> m{{0, 0}, {1, 1}};
+    RouteManager::RouteConfig cfg{"src", "dst", m, "recovers"};
+    jbox_error_t err{};
+    const auto id = rm.addRoute(cfg, &err);
+    REQUIRE(id != JBOX_INVALID_ROUTE_ID);
+
+    REQUIRE(rm.startRoute(id) == JBOX_OK);
+    jbox_route_status_t status{};
+    rm.pollStatus(id, &status);
+    REQUIRE(status.state == JBOX_ROUTE_STATE_WAITING);
+
+    // The "missing" device now appears. The user / app refreshes
+    // DeviceManager and re-issues startRoute.
+    backend->addDevice(makeInputDevice("src", 2));
+    dm->refresh();
+    REQUIRE(rm.startRoute(id) == JBOX_OK);
+
+    rm.pollStatus(id, &status);
+    REQUIRE(status.state == JBOX_ROUTE_STATE_RUNNING);
+
+    // Drive samples to confirm audio actually flows after recovery.
+    constexpr std::uint32_t kFrames = 32;
+    std::vector<float> input(kFrames * 2, 0.5f);
+    std::vector<float> output(kFrames * 2, 0.0f);
+    backend->deliverBuffer("src", kFrames, input.data(), nullptr);
+    backend->deliverBuffer("dst", kFrames, nullptr, output.data());
+
+    rm.pollStatus(id, &status);
+    REQUIRE(status.frames_produced == kFrames);
+    REQUIRE(status.frames_consumed == kFrames);
+}
+
+TEST_CASE("RouteManager: WAITING route stays WAITING on retry while the "
+          "missing device is still absent",
+          "[route_manager][waiting]") {
+    auto backend_holder = std::make_unique<SimulatedBackend>();
+    backend_holder->addDevice(makeOutputDevice("dst", 2));
+    auto dm = std::make_unique<DeviceManager>(std::move(backend_holder));
+    dm->refresh();
+    RouteManager rm(*dm);
+
+    std::vector<ChannelEdge> m{{0, 0}, {1, 1}};
+    RouteManager::RouteConfig cfg{"still-missing", "dst", m, "still-waiting"};
+    jbox_error_t err{};
+    const auto id = rm.addRoute(cfg, &err);
+    REQUIRE(id != JBOX_INVALID_ROUTE_ID);
+
+    REQUIRE(rm.startRoute(id) == JBOX_OK);
+
+    jbox_route_status_t status{};
+    rm.pollStatus(id, &status);
+    REQUIRE(status.state == JBOX_ROUTE_STATE_WAITING);
+
+    // Idempotent retry: device hasn't appeared → still WAITING, still no error.
+    REQUIRE(rm.startRoute(id) == JBOX_OK);
+    rm.pollStatus(id, &status);
+    REQUIRE(status.state == JBOX_ROUTE_STATE_WAITING);
+    REQUIRE(status.last_error == JBOX_OK);
+}
+
+TEST_CASE("RouteManager: stopRoute on a WAITING route transitions to STOPPED",
+          "[route_manager][waiting]") {
+    auto backend_holder = std::make_unique<SimulatedBackend>();
+    backend_holder->addDevice(makeOutputDevice("dst", 2));
+    auto dm = std::make_unique<DeviceManager>(std::move(backend_holder));
+    dm->refresh();
+    RouteManager rm(*dm);
+
+    std::vector<ChannelEdge> m{{0, 0}, {1, 1}};
+    RouteManager::RouteConfig cfg{"missing-src", "dst", m, "stoppable"};
+    jbox_error_t err{};
+    const auto id = rm.addRoute(cfg, &err);
+    REQUIRE(id != JBOX_INVALID_ROUTE_ID);
+
+    REQUIRE(rm.startRoute(id) == JBOX_OK);
+    jbox_route_status_t status{};
+    rm.pollStatus(id, &status);
+    REQUIRE(status.state == JBOX_ROUTE_STATE_WAITING);
+
+    REQUIRE(rm.stopRoute(id) == JBOX_OK);
+    rm.pollStatus(id, &status);
+    REQUIRE(status.state == JBOX_ROUTE_STATE_STOPPED);
+
+    // After stopping, the route can be restarted normally if the
+    // device subsequently appears.
+    rm.pollStatus(id, &status);
+    REQUIRE(status.state == JBOX_ROUTE_STATE_STOPPED);
+}
+
+TEST_CASE("RouteManager: removeRoute on a WAITING route succeeds and frees the id",
+          "[route_manager][waiting]") {
+    auto backend_holder = std::make_unique<SimulatedBackend>();
+    backend_holder->addDevice(makeOutputDevice("dst", 2));
+    auto dm = std::make_unique<DeviceManager>(std::move(backend_holder));
+    dm->refresh();
+    RouteManager rm(*dm);
+
+    std::vector<ChannelEdge> m{{0, 0}, {1, 1}};
+    RouteManager::RouteConfig cfg{"missing-src", "dst", m, "removable"};
+    jbox_error_t err{};
+    const auto id = rm.addRoute(cfg, &err);
+    REQUIRE(id != JBOX_INVALID_ROUTE_ID);
+
+    REQUIRE(rm.startRoute(id) == JBOX_OK);
+    jbox_route_status_t status{};
+    rm.pollStatus(id, &status);
+    REQUIRE(status.state == JBOX_ROUTE_STATE_WAITING);
+
+    REQUIRE(rm.removeRoute(id) == JBOX_OK);
+    REQUIRE(rm.pollStatus(id, &status) == JBOX_ERR_INVALID_ARGUMENT);
+    REQUIRE(rm.removeRoute(id) == JBOX_ERR_INVALID_ARGUMENT);
+}
+
 TEST_CASE("RouteManager: startRoute with invalid channel index goes to ERROR",
           "[route_manager]") {
     Fixture f(2, 2);
