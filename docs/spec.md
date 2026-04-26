@@ -790,8 +790,8 @@ Standard macOS settings window (`SwiftUI.Settings` scene) with three tabs, imple
 - **Runtime checks in debug builds:** ThreadSanitizer enabled for engine tests; data races on RT threads fail the test run.
 
 **UI tests (Swift).** Minimal.
-- SwiftUI preview-based smoke tests for key views (route row, route editor, sidebar).
-- A few XCUITest flows exercising add-route, start-route, switch-scene. Dependent on Xcode to run locally; on CI, they can be skipped without blocking a release.
+- SwiftUI preview-based smoke tests for key views (route row, route editor, sidebar) — landed; `#Preview` blocks live alongside the views and use the `PreviewFixtures` enum in `JboxEngineSwift` for stub state.
+- XCUITest event-injection flows (add-route, start-route, switch-scene) **deferred under the SPM-only constraint.** The Apple-blessed XCUITest path requires `xcodebuild test` against an `.xcodeproj` + `.xctestplan`, which violates the SPM-only / no Xcode IDE rule. The lower-level `xctest`-runner-against-a-built-`.app`-bundle path is undocumented under SPM and brittle. The gap, the blocked path, and the recommended approach when revisited (allow a generated, gitignored `.xcodeproj` *only* for the UI test target and drive it via `xcodebuild test`) are documented under [docs/plan.md "UI tests (minimal):"](./plan.md#phase-6--swiftui-ui) and the Phase 6 deviations there. Until revisited, the surface XCUITest would cover is held by `EngineStoreTests` (action semantics), persistence round-trip tests, `MeterAccessibilityLabelTests` (labels), `#Preview` blocks (rendering), and human smoke testing of `make run`.
 - Deliberately kept light because the UI is expected to evolve.
 
 ### 5.2 Build system
