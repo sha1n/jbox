@@ -329,6 +329,19 @@ jbox_error_code_t RouteManager::removeRoute(jbox_route_id_t id) {
         it->second->state == JBOX_ROUTE_STATE_WAITING) {
         teardown(*it->second);
     }
+    // 7.6.3 dispose retry: if the duplex teardown left a residual
+    // IOProc handle, take one more best-effort attempt before erasing.
+    // The route record is going away; this is the route's last chance
+    // to clean up its kernel-side resource. A persistent refusal here
+    // is a logged leak — 7.6.4's HAL listeners will surface it the
+    // next time the device topology changes.
+    if (it->second->duplex_ioproc_id != kInvalidIOProcId) {
+        const IOProcId stuck = it->second->duplex_ioproc_id;
+        if (!dm_.backend().closeCallback(stuck)) {
+            tryPushLog(log_queue_, jbox::rt::kLogTeardownFailure, id,
+                       0, static_cast<std::uint64_t>(stuck));
+        }
+    }
     routes_.erase(it);
     return JBOX_OK;
 }
@@ -497,6 +510,26 @@ jbox_error_code_t RouteManager::attemptStart(RouteRecord& r) {
             r.state = JBOX_ROUTE_STATE_ERROR;
             r.last_error = JBOX_ERR_DEVICE_BUSY;
             return JBOX_ERR_DEVICE_BUSY;
+        }
+
+        // 7.6.3 retry hook: a previous teardown's destroy may have
+        // refused, leaving r.duplex_ioproc_id populated. Retry the
+        // close before opening fresh — otherwise openDuplexCallback
+        // would refuse on the device's still-registered slot and the
+        // route would be stuck in ERROR until the user removes and
+        // recreates it. Persistent refusal (the retry itself refuses)
+        // returns DEVICE_BUSY with a fresh failure log; the next start
+        // tries again.
+        if (r.duplex_ioproc_id != kInvalidIOProcId) {
+            if (dm_.backend().closeCallback(r.duplex_ioproc_id)) {
+                r.duplex_ioproc_id = kInvalidIOProcId;
+            } else {
+                tryPushLog(log_queue_, jbox::rt::kLogTeardownFailure, r.id,
+                           0, static_cast<std::uint64_t>(r.duplex_ioproc_id));
+                r.state = JBOX_ROUTE_STATE_ERROR;
+                r.last_error = JBOX_ERR_DEVICE_BUSY;
+                return JBOX_ERR_DEVICE_BUSY;
+            }
         }
 
         r.nominal_src_rate = src->nominal_sample_rate > 0.0
@@ -740,10 +773,27 @@ void RouteManager::releaseRouteResources(RouteRecord& r) {
     // mux). closeCallback is synchronous on Core Audio — it stops the
     // IOProc and blocks until the last in-flight callback returns,
     // so any RT reference to `r` is gone before we release resources.
+    //
+    // 7.6.3 contract: when the destroy refuses (HAL returned non-noErr
+    // / SimulatedBackend's failure-injection seam fired) we DO NOT
+    // null `r.duplex_ioproc_id`. The next attemptStart's duplex path
+    // sees the residual handle and retries the close before opening
+    // fresh; removeRoute makes one final best-effort attempt. The
+    // failure itself is logged immediately so an operator can see
+    // exactly which route + IOProcId refused to tear down.
+    //
+    // The rest of releaseRouteResources still runs unconditionally —
+    // ring / converter / scratch / mux attachments are released on
+    // every call, success or failure. "State fully drained except
+    // for the IOProc handle" is the explicit 7.6.3 contract.
     if (r.duplex_mode) {
         if (r.duplex_ioproc_id != kInvalidIOProcId) {
-            (void)dm_.backend().closeCallback(r.duplex_ioproc_id);
-            r.duplex_ioproc_id = kInvalidIOProcId;
+            if (dm_.backend().closeCallback(r.duplex_ioproc_id)) {
+                r.duplex_ioproc_id = kInvalidIOProcId;
+            } else {
+                tryPushLog(log_queue_, jbox::rt::kLogTeardownFailure, r.id,
+                           0, static_cast<std::uint64_t>(r.duplex_ioproc_id));
+            }
         }
         dm_.backend().stopDevice(r.source_uid);
         r.duplex_mode = false;

@@ -5,6 +5,8 @@
 
 #include "device_manager.hpp"
 #include "route_manager.hpp"
+#include "rt_log_codes.hpp"
+#include "rt_log_queue.hpp"
 #include "simulated_backend.hpp"
 
 #include <memory>
@@ -1261,5 +1263,173 @@ TEST_CASE("RouteManager: latency_mode tiers strictly shrink the pill",
         static_cast<double>(perf_components.ring_target_fill_frames)
       / 256.0;
     REQUIRE(ring_frac < 0.40);
+}
+
+// -----------------------------------------------------------------------------
+// Phase 7.6.3 — robust teardown.
+//
+// Two paths land an IOProc destroy at the backend: the duplex fast-path
+// (RouteManager::releaseRouteResources directly) and the mux path
+// (DeviceIOMux::detachInput/detachOutput, last detach). Either may fail
+// under degraded conditions (hot-unplug, sleep, kernel resource
+// pressure). 7.6.3's contract: surface the failure via
+// kLogTeardownFailure, preserve the in-memory IOProc handle so a
+// later teardown opportunity (e.g. another start/stop cycle) can
+// retry, and never silently nuke the route's bookkeeping while the
+// kernel-side resource is leaked.
+// -----------------------------------------------------------------------------
+
+namespace {
+
+BackendDeviceInfo makeDuplexDevice(const std::string& uid,
+                                   std::uint32_t in_channels,
+                                   std::uint32_t out_channels,
+                                   std::uint32_t buf = 64) {
+    BackendDeviceInfo info;
+    info.uid = uid;
+    info.name = uid;
+    info.direction = kBackendDirectionInput | kBackendDirectionOutput;
+    info.input_channel_count  = in_channels;
+    info.output_channel_count = out_channels;
+    info.nominal_sample_rate  = 48000.0;
+    info.buffer_frame_size    = buf;
+    return info;
+}
+
+const jbox::rt::RtLogEvent* findCode(const std::vector<jbox::rt::RtLogEvent>& v,
+                                     jbox::rt::RtLogCode code) {
+    for (const auto& e : v) if (e.code == code) return &e;
+    return nullptr;
+}
+
+std::vector<jbox::rt::RtLogEvent> drainAll(jbox::rt::DefaultRtLogQueue& q) {
+    std::vector<jbox::rt::RtLogEvent> out;
+    jbox::rt::RtLogEvent ev{};
+    while (q.tryPop(ev)) out.push_back(ev);
+    return out;
+}
+
+}  // namespace
+
+TEST_CASE("RouteManager: duplex teardown logs kLogTeardownFailure when close fails",
+          "[route_manager][teardown_failure]") {
+    // The duplex fast path closes the IOProc directly via
+    // dm.backend().closeCallback. When the destroy fails, the engine
+    // must push a kLogTeardownFailure event tagged with the route id
+    // (so operators can correlate it with the route they're stopping)
+    // and the IOProcId that failed to close (so they can match it
+    // against any backend-side trace).
+    auto backend_ptr = std::make_unique<SimulatedBackend>();
+    SimulatedBackend* backend = backend_ptr.get();
+    backend->addDevice(makeDuplexDevice("aggregate", 2, 2));
+    auto dm = std::make_unique<DeviceManager>(std::move(backend_ptr));
+    dm->refresh();
+    jbox::rt::DefaultRtLogQueue queue;
+    RouteManager rm(*dm, &queue);
+
+    std::vector<ChannelEdge> m{{0, 0}};
+    RouteManager::RouteConfig cfg{
+        "aggregate", "aggregate", m, "duplex-teardown-failure",
+        /*latency_mode*/ 2};
+    jbox_error_t err{};
+    const auto id = rm.addRoute(cfg, &err);
+    REQUIRE(rm.startRoute(id) == JBOX_OK);
+
+    // Capture the IOProcId that the route opened so we can assert the
+    // log event references it.
+    REQUIRE(backend->hasDuplexCallback("aggregate"));
+    // Drain the start log so we only see teardown events afterwards.
+    (void)drainAll(queue);
+
+    // Inject one close failure on the duplex IOProc and stop the route.
+    backend->setNextCloseCallbacksFailing(1);
+    REQUIRE(rm.stopRoute(id) == JBOX_OK);
+
+    const auto events = drainAll(queue);
+    const auto* failure = findCode(events, jbox::rt::kLogTeardownFailure);
+    REQUIRE(failure != nullptr);
+    REQUIRE(failure->route_id == id);
+    REQUIRE(failure->value_b != 0);  // IOProcId payload non-zero
+    // Backend slot survived the failed close — proof the destroy
+    // attempt was made (and refused) rather than skipped.
+    REQUIRE(backend->hasDuplexCallback("aggregate") == true);
+}
+
+TEST_CASE("RouteManager: duplex teardown retries close on next startRoute",
+          "[route_manager][teardown_failure]") {
+    // After a failed duplex close the engine must preserve enough
+    // state that the *next* lifecycle event reattempts the destroy
+    // before opening a fresh IOProc — otherwise the next start would
+    // try to register a duplex callback while the old one is still
+    // bound to the device, openDuplexCallback would refuse, and the
+    // user would be stuck with an unstartable route.
+    auto backend_ptr = std::make_unique<SimulatedBackend>();
+    SimulatedBackend* backend = backend_ptr.get();
+    backend->addDevice(makeDuplexDevice("aggregate", 2, 2));
+    auto dm = std::make_unique<DeviceManager>(std::move(backend_ptr));
+    dm->refresh();
+    RouteManager rm(*dm);
+
+    std::vector<ChannelEdge> m{{0, 0}};
+    RouteManager::RouteConfig cfg{
+        "aggregate", "aggregate", m, "duplex-retry",
+        /*latency_mode*/ 2};
+    jbox_error_t err{};
+    const auto id = rm.addRoute(cfg, &err);
+    REQUIRE(rm.startRoute(id) == JBOX_OK);
+
+    // Inject a single close failure, stop, then restart. The retry
+    // budget is exhausted on the second attempt, so the second close
+    // (during startRoute's retry path or the second stop, depending
+    // on the implementation choice) must succeed and the route must
+    // reach RUNNING again.
+    backend->setNextCloseCallbacksFailing(1);
+    REQUIRE(rm.stopRoute(id) == JBOX_OK);
+
+    REQUIRE(rm.startRoute(id) == JBOX_OK);
+    jbox_route_status_t status{};
+    REQUIRE(rm.pollStatus(id, &status) == JBOX_OK);
+    REQUIRE(status.state == JBOX_ROUTE_STATE_RUNNING);
+}
+
+TEST_CASE("RouteManager: removeRoute completes even when duplex close fails",
+          "[route_manager][teardown_failure]") {
+    // removeRoute is the route's terminal disposal — there is no
+    // future "next opportunity" for *this* route to retry the close
+    // (the record is about to be erased). Contract: removeRoute must
+    // still attempt the close, log the failure, and complete the
+    // erase. Leaving the route alive in `routes_` would prevent the
+    // user from ever retiring the route on a permanently degraded
+    // device; leaking the close attempt without a log would be the
+    // exact silent failure 7.6.3 set out to eliminate.
+    auto backend_ptr = std::make_unique<SimulatedBackend>();
+    SimulatedBackend* backend = backend_ptr.get();
+    backend->addDevice(makeDuplexDevice("aggregate", 2, 2));
+    auto dm = std::make_unique<DeviceManager>(std::move(backend_ptr));
+    dm->refresh();
+    jbox::rt::DefaultRtLogQueue queue;
+    RouteManager rm(*dm, &queue);
+
+    std::vector<ChannelEdge> m{{0, 0}};
+    RouteManager::RouteConfig cfg{
+        "aggregate", "aggregate", m, "duplex-remove-while-failing",
+        /*latency_mode*/ 2};
+    jbox_error_t err{};
+    const auto id = rm.addRoute(cfg, &err);
+    REQUIRE(rm.startRoute(id) == JBOX_OK);
+    (void)drainAll(queue);
+
+    backend->setNextCloseCallbacksFailing(1);
+    REQUIRE(rm.removeRoute(id) == JBOX_OK);
+
+    // The route record is gone — pollStatus on the freed id is an
+    // invalid-argument, not a stale STOPPED snapshot.
+    jbox_route_status_t status{};
+    REQUIRE(rm.pollStatus(id, &status) == JBOX_ERR_INVALID_ARGUMENT);
+    REQUIRE(rm.routeCount() == 0);
+
+    // The failure was surfaced via kLogTeardownFailure.
+    const auto events = drainAll(queue);
+    REQUIRE(findCode(events, jbox::rt::kLogTeardownFailure) != nullptr);
 }
 
