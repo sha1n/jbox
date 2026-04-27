@@ -99,6 +99,38 @@ public:
     void setBufferFrameSize(const std::string& uid,
                             std::uint32_t frames) override;
 
+    // ----- Phase 7.6.3 teardown-failure injection (test-only seams) -----
+    //
+    // The next `count` `closeCallback` invocations on this backend
+    // will refuse to destroy the matching IOProc: closeCallback returns
+    // false and the backend retains the slot's callback bookkeeping
+    // (input_cb / input_id / etc. stay populated) so a subsequent
+    // closeCallback(id) call retries the destroy. Once `count` is
+    // exhausted, closeCallback resumes its normal success path.
+    //
+    // Injection state is global across IOProcs unless scoped via
+    // `setCloseCallbackFailing(id, count)` — that variant only fails
+    // when closing the named IOProcId, leaving siblings on the same
+    // device unaffected. Per-id budgets are checked before the
+    // global budget; an unknown / kInvalidIOProcId is never failed.
+    void setNextCloseCallbacksFailing(std::uint32_t count);
+    void setCloseCallbackFailing(IOProcId id, std::uint32_t count);
+
+    // True when the named IOProcId is still registered to some slot
+    // (input / output / duplex). After a normal closeCallback the
+    // callback is gone and this returns false; after a failure-injected
+    // close the bookkeeping survives and this returns true. False for
+    // kInvalidIOProcId.
+    bool isCallbackOpen(IOProcId id) const;
+
+    // Slot-level introspection: any input / output / duplex callback
+    // currently registered on `uid`. Lets tests assert mux teardown
+    // residuals (failed close on the mux's IOProc keeps the slot
+    // populated) without exposing the mux's private IOProc id.
+    bool hasInputCallback(const std::string& uid) const;
+    bool hasOutputCallback(const std::string& uid) const;
+    bool hasDuplexCallback(const std::string& uid) const;
+
     // Test introspection: every `setBufferFrameSize` call (after
     // aggregate fan-out, one entry per uid) is recorded so tests
     // can assert which UIDs were touched and with what frame count.
@@ -174,6 +206,14 @@ private:
     // by `setMaxAcrossClientsFloor`. Each `setBufferFrameSize` lookup
     // resolves the effective buffer to `max(request, floor)`.
     std::unordered_map<std::string, std::uint32_t> mac_floor_;
+
+    // Phase 7.6.3 teardown-failure injection state. `next_close_failures_
+    // remaining_` is a global budget consumed by any closeCallback;
+    // `per_id_close_failures_` scopes a budget to a specific IOProcId
+    // (checked first). Both default to zero / empty so production
+    // tests remain unaffected.
+    std::uint32_t                                  next_close_failures_remaining_ = 0;
+    std::unordered_map<IOProcId, std::uint32_t>    per_id_close_failures_;
 };
 
 }  // namespace jbox::control

@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <cstring>
+#include <utility>
 
 namespace jbox::control {
 
@@ -177,28 +178,94 @@ IOProcId SimulatedBackend::openDuplexCallback(const std::string& uid,
 
 bool SimulatedBackend::closeCallback(IOProcId id) {
     if (id == kInvalidIOProcId) return true;
-    for (auto& [uid, slot] : devices_) {
-        if (slot.input_id == id) {
-            slot.input_cb = nullptr;
-            slot.input_ud = nullptr;
-            slot.input_id = kInvalidIOProcId;
-            return true;
-        }
-        if (slot.output_id == id) {
-            slot.output_cb = nullptr;
-            slot.output_ud = nullptr;
-            slot.output_id = kInvalidIOProcId;
-            return true;
-        }
-        if (slot.duplex_id == id) {
-            slot.duplex_cb = nullptr;
-            slot.duplex_ud = nullptr;
-            slot.duplex_id = kInvalidIOProcId;
-            return true;
-        }
+
+    // Locate the owning slot.
+    DeviceSlot* slot = nullptr;
+    enum { kNone, kInput, kOutput, kDuplex } direction = kNone;
+    for (auto& [uid, s] : devices_) {
+        if (s.input_id == id)       { slot = &s; direction = kInput;  break; }
+        if (s.output_id == id)      { slot = &s; direction = kOutput; break; }
+        if (s.duplex_id == id)      { slot = &s; direction = kDuplex; break; }
     }
-    // Unknown id — silent no-op.
+    if (slot == nullptr) return true;  // unknown id is a benign no-op
+
+    // Failure injection: per-id budget takes precedence over the
+    // global budget. On a failed close we leave the slot populated
+    // (callback + id intact) so a retry call lands on the same slot
+    // with the same id, exactly mirroring the contract the production
+    // CoreAudioBackend honors when AudioDeviceDestroyIOProcID returns
+    // non-noErr.
+    auto pid = per_id_close_failures_.find(id);
+    if (pid != per_id_close_failures_.end() && pid->second > 0) {
+        --pid->second;
+        return false;
+    }
+    if (next_close_failures_remaining_ > 0) {
+        --next_close_failures_remaining_;
+        return false;
+    }
+
+    switch (direction) {
+        case kInput:
+            slot->input_cb = nullptr;
+            slot->input_ud = nullptr;
+            slot->input_id = kInvalidIOProcId;
+            break;
+        case kOutput:
+            slot->output_cb = nullptr;
+            slot->output_ud = nullptr;
+            slot->output_id = kInvalidIOProcId;
+            break;
+        case kDuplex:
+            slot->duplex_cb = nullptr;
+            slot->duplex_ud = nullptr;
+            slot->duplex_id = kInvalidIOProcId;
+            break;
+        case kNone: break;
+    }
     return true;
+}
+
+void SimulatedBackend::setNextCloseCallbacksFailing(std::uint32_t count) {
+    next_close_failures_remaining_ = count;
+}
+
+void SimulatedBackend::setCloseCallbackFailing(IOProcId id,
+                                               std::uint32_t count) {
+    if (id == kInvalidIOProcId) return;
+    if (count == 0) {
+        per_id_close_failures_.erase(id);
+    } else {
+        per_id_close_failures_[id] = count;
+    }
+}
+
+bool SimulatedBackend::isCallbackOpen(IOProcId id) const {
+    if (id == kInvalidIOProcId) return false;
+    for (const auto& [uid, slot] : devices_) {
+        if (slot.input_id  == id) return true;
+        if (slot.output_id == id) return true;
+        if (slot.duplex_id == id) return true;
+    }
+    return false;
+}
+
+bool SimulatedBackend::hasInputCallback(const std::string& uid) const {
+    auto it = devices_.find(uid);
+    if (it == devices_.end()) return false;
+    return it->second.input_id != kInvalidIOProcId;
+}
+
+bool SimulatedBackend::hasOutputCallback(const std::string& uid) const {
+    auto it = devices_.find(uid);
+    if (it == devices_.end()) return false;
+    return it->second.output_id != kInvalidIOProcId;
+}
+
+bool SimulatedBackend::hasDuplexCallback(const std::string& uid) const {
+    auto it = devices_.find(uid);
+    if (it == devices_.end()) return false;
+    return it->second.duplex_id != kInvalidIOProcId;
 }
 
 bool SimulatedBackend::startDevice(const std::string& uid) {

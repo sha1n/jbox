@@ -254,3 +254,99 @@ TEST_CASE("SimulatedBackend: removeDevice during started state stops delivery",
     b.deliverBuffer("io", 1, input, nullptr);
     REQUIRE(cap.input_invocations == 1);  // unchanged — device is gone
 }
+
+// -----------------------------------------------------------------------------
+// Phase 7.6.3: closeCallback returns bool + teardown-failure injection seam.
+//
+// The bool return distinguishes "closed (or already gone)" from "destroy
+// failed; retain the bookkeeping so a retry can succeed". The injection
+// seams let us drive that retry path deterministically without real
+// Core Audio failures.
+// -----------------------------------------------------------------------------
+
+TEST_CASE("SimulatedBackend: closeCallback returns true on a normal close",
+          "[sim_backend][teardown_failure]") {
+    SimulatedBackend b;
+    b.addDevice(makeDevice("io", "IO", kBackendDirectionInput, 2, 0));
+    CallbackCapture cap;
+    const IOProcId id = b.openInputCallback("io", inputCallbackTrampoline, &cap);
+    REQUIRE(id != kInvalidIOProcId);
+
+    REQUIRE(b.closeCallback(id) == true);
+    REQUIRE(b.isCallbackOpen(id) == false);
+    REQUIRE(b.hasInputCallback("io") == false);
+}
+
+TEST_CASE("SimulatedBackend: closeCallback returns false when failure injected, slot retained",
+          "[sim_backend][teardown_failure]") {
+    SimulatedBackend b;
+    b.addDevice(makeDevice("io", "IO", kBackendDirectionInput, 2, 0));
+    CallbackCapture cap;
+    const IOProcId id = b.openInputCallback("io", inputCallbackTrampoline, &cap);
+    REQUIRE(id != kInvalidIOProcId);
+
+    b.setNextCloseCallbacksFailing(1);
+
+    // The destroy attempt fails — the caller is told to retry.
+    REQUIRE(b.closeCallback(id) == false);
+
+    // Bookkeeping survives: the same IOProcId is still registered, the
+    // input slot still claims the callback, and re-opening on the same
+    // device fails (the slot is still occupied — exactly the symptom
+    // production code would observe on a real hot-unplug-induced
+    // destroy failure).
+    REQUIRE(b.isCallbackOpen(id) == true);
+    REQUIRE(b.hasInputCallback("io") == true);
+    REQUIRE(b.openInputCallback("io", inputCallbackTrampoline, &cap)
+            == kInvalidIOProcId);
+}
+
+TEST_CASE("SimulatedBackend: closeCallback retry succeeds once failure budget is exhausted",
+          "[sim_backend][teardown_failure]") {
+    SimulatedBackend b;
+    b.addDevice(makeDevice("io", "IO", kBackendDirectionInput, 2, 0));
+    CallbackCapture cap;
+    const IOProcId id = b.openInputCallback("io", inputCallbackTrampoline, &cap);
+    REQUIRE(id != kInvalidIOProcId);
+
+    b.setNextCloseCallbacksFailing(2);
+    REQUIRE(b.closeCallback(id) == false);
+    REQUIRE(b.closeCallback(id) == false);
+    // Budget exhausted — the third attempt actually destroys the slot.
+    REQUIRE(b.closeCallback(id) == true);
+    REQUIRE(b.isCallbackOpen(id) == false);
+    REQUIRE(b.hasInputCallback("io") == false);
+}
+
+TEST_CASE("SimulatedBackend: per-id failure injection scopes to that callback only",
+          "[sim_backend][teardown_failure]") {
+    SimulatedBackend b;
+    BackendDeviceInfo info = makeDevice(
+        "io", "IO", kBackendDirectionInput | kBackendDirectionOutput, 2, 2);
+    b.addDevice(info);
+    CallbackCapture cap_in, cap_out;
+    const IOProcId id_in =
+        b.openInputCallback("io", inputCallbackTrampoline, &cap_in);
+    const IOProcId id_out =
+        b.openOutputCallback("io", outputCallbackTrampoline, &cap_out);
+    REQUIRE(id_in != kInvalidIOProcId);
+    REQUIRE(id_out != kInvalidIOProcId);
+
+    // Schedule failure on the input IOProc only.
+    b.setCloseCallbackFailing(id_in, 1);
+
+    // The output IOProc closes cleanly even though the input is
+    // failure-armed — per-id scoping must not leak.
+    REQUIRE(b.closeCallback(id_out) == true);
+    REQUIRE(b.isCallbackOpen(id_out) == false);
+    REQUIRE(b.hasOutputCallback("io") == false);
+
+    // The input close fails; bookkeeping persists.
+    REQUIRE(b.closeCallback(id_in) == false);
+    REQUIRE(b.isCallbackOpen(id_in) == true);
+    REQUIRE(b.hasInputCallback("io") == true);
+
+    // Retry — budget exhausted, slot now releases.
+    REQUIRE(b.closeCallback(id_in) == true);
+    REQUIRE(b.isCallbackOpen(id_in) == false);
+}
