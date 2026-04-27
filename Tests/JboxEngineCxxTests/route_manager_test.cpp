@@ -1433,3 +1433,89 @@ TEST_CASE("RouteManager: removeRoute completes even when duplex close fails",
     REQUIRE(findCode(events, jbox::rt::kLogTeardownFailure) != nullptr);
 }
 
+TEST_CASE("RouteManager: mux teardown logs kLogTeardownFailure when close fails",
+          "[route_manager][teardown_failure][mux]") {
+    // The mux's last-detach path closes its registered IOProc via
+    // backend.closeCallback. When that fails, the engine must surface
+    // it the same way the duplex path does — kLogTeardownFailure with
+    // the IOProcId in value_b. The route_id is 0 because the mux is
+    // a per-device resource shared across routes; there's no single
+    // owning route to attribute the failure to.
+    auto backend_ptr = std::make_unique<SimulatedBackend>();
+    SimulatedBackend* backend = backend_ptr.get();
+    backend->addDevice(makeInputDevice("src", 2));
+    backend->addDevice(makeOutputDevice("dst", 2));
+    auto dm = std::make_unique<DeviceManager>(std::move(backend_ptr));
+    dm->refresh();
+    jbox::rt::DefaultRtLogQueue queue;
+    RouteManager rm(*dm, &queue);
+
+    std::vector<ChannelEdge> m{{0, 0}, {1, 1}};
+    RouteManager::RouteConfig cfg{"src", "dst", m, "mux-teardown-failure"};
+    jbox_error_t err{};
+    const auto id = rm.addRoute(cfg, &err);
+    REQUIRE(rm.startRoute(id) == JBOX_OK);
+    REQUIRE(backend->hasInputCallback("src"));
+    REQUIRE(backend->hasOutputCallback("dst"));
+    (void)drainAll(queue);
+
+    // Two closes happen on stopRoute: the mux's input close on the
+    // src device, the mux's output close on the dst device. Inject
+    // one failure (the input close consumes it; the destructor's
+    // best-effort retry then succeeds with the budget exhausted; the
+    // output close succeeds normally on its first try).
+    backend->setNextCloseCallbacksFailing(1);
+    REQUIRE(rm.stopRoute(id) == JBOX_OK);
+
+    const auto events = drainAll(queue);
+    const auto* failure = findCode(events, jbox::rt::kLogTeardownFailure);
+    REQUIRE(failure != nullptr);
+    REQUIRE(failure->value_b != 0);  // IOProcId payload
+    // Post-state: the destructor's retry recovered the input slot,
+    // and the output close succeeded normally — but the kLog event
+    // above is the durable evidence that the first-attempt failure
+    // was surfaced rather than silently swallowed.
+    REQUIRE(backend->hasInputCallback("src") == false);
+    REQUIRE(backend->hasOutputCallback("dst") == false);
+}
+
+TEST_CASE("RouteManager: mux teardown leaves slot populated when retries exhaust the budget",
+          "[route_manager][teardown_failure][mux]") {
+    // Budget=2 defeats both the first-attempt close in detachInput and
+    // the mux destructor's best-effort retry. The IOProc bookkeeping
+    // stays populated on the backend (a kernel-side resource leak,
+    // logged loudly) so 7.6.4's HAL property listeners can pick it up
+    // when the device topology next changes. Two failures means two
+    // kLogTeardownFailure events.
+    auto backend_ptr = std::make_unique<SimulatedBackend>();
+    SimulatedBackend* backend = backend_ptr.get();
+    backend->addDevice(makeInputDevice("src", 2));
+    backend->addDevice(makeOutputDevice("dst", 2));
+    auto dm = std::make_unique<DeviceManager>(std::move(backend_ptr));
+    dm->refresh();
+    jbox::rt::DefaultRtLogQueue queue;
+    RouteManager rm(*dm, &queue);
+
+    std::vector<ChannelEdge> m{{0, 0}, {1, 1}};
+    RouteManager::RouteConfig cfg{"src", "dst", m, "mux-persistent-failure"};
+    jbox_error_t err{};
+    const auto id = rm.addRoute(cfg, &err);
+    REQUIRE(rm.startRoute(id) == JBOX_OK);
+    (void)drainAll(queue);
+
+    backend->setNextCloseCallbacksFailing(2);
+    REQUIRE(rm.stopRoute(id) == JBOX_OK);
+
+    const auto events = drainAll(queue);
+    std::size_t teardown_logs = 0;
+    for (const auto& e : events) {
+        if (e.code == jbox::rt::kLogTeardownFailure) ++teardown_logs;
+    }
+    REQUIRE(teardown_logs >= 2);
+    // Slot survives — exactly the leak 7.6.4 will need to recover.
+    REQUIRE(backend->hasInputCallback("src") == true);
+    // Output close consumed budget #2; the destructor's retry on the
+    // output side has nothing to retry (it cleared on first attempt).
+    REQUIRE(backend->hasOutputCallback("dst") == false);
+}
+

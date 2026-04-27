@@ -838,7 +838,8 @@ DeviceIOMux& RouteManager::getOrCreateMux(const std::string& uid,
     auto it = muxes_.find(uid);
     if (it != muxes_.end()) return *it->second;
     auto mux = std::make_unique<DeviceIOMux>(
-        dm_.backend(), uid, input_channel_count, output_channel_count);
+        dm_.backend(), uid, input_channel_count, output_channel_count,
+        log_queue_);
     DeviceIOMux& ref = *mux;
     muxes_.emplace(uid, std::move(mux));
     return ref;

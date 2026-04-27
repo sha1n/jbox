@@ -37,6 +37,7 @@
 #define JBOX_CONTROL_DEVICE_IO_MUX_HPP
 
 #include "device_backend.hpp"
+#include "rt_log_queue.hpp"
 
 #include <atomic>
 #include <cstdint>
@@ -52,10 +53,15 @@ public:
     // the backend's enumeration for this device. Pass 0 for a
     // direction the device does not support — the corresponding
     // attach*() call will then refuse with `false`.
+    //
+    // `log_queue` is borrowed; pass nullptr to disable mux-side logging
+    // (kLogTeardownFailure on a refused IOProc destroy is the only
+    // event today). Lifetime must outlive the mux.
     DeviceIOMux(IDeviceBackend& backend,
                 std::string uid,
                 std::uint32_t input_channel_count,
-                std::uint32_t output_channel_count);
+                std::uint32_t output_channel_count,
+                jbox::rt::DefaultRtLogQueue* log_queue = nullptr);
 
     ~DeviceIOMux();
 
@@ -113,10 +119,11 @@ private:
     void waitForOutputQuiescence();
     void maybeStopDevice();
 
-    IDeviceBackend&  backend_;
-    std::string      uid_;
-    std::uint32_t    input_channel_count_  = 0;
-    std::uint32_t    output_channel_count_ = 0;
+    IDeviceBackend&             backend_;
+    jbox::rt::DefaultRtLogQueue* log_queue_ = nullptr;
+    std::string                 uid_;
+    std::uint32_t               input_channel_count_  = 0;
+    std::uint32_t               output_channel_count_ = 0;
 
     IOProcId         input_ioproc_id_  = kInvalidIOProcId;
     IOProcId         output_ioproc_id_ = kInvalidIOProcId;

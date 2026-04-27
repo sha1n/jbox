@@ -2,17 +2,45 @@
 
 #include "device_io_mux.hpp"
 
+#include "rt_log_codes.hpp"
+
+#include <atomic>
 #include <thread>
 #include <utility>
 
 namespace jbox::control {
 
+namespace {
+
+// Push a kLogTeardownFailure event into the borrowed log queue. The
+// route_id is 0 because the mux is a per-device resource shared across
+// routes — there is no single owning route to attribute the failure to.
+// `value_b` carries the IOProcId so an operator can correlate this log
+// with whichever route's start emitted the matching IOProcId in its
+// own kLogRouteStarted record. Best-effort: drops on a full queue.
+inline void pushTeardownFailure(jbox::rt::DefaultRtLogQueue* q,
+                                IOProcId failing_id) {
+    if (q == nullptr) return;
+    static std::atomic<std::uint64_t> seq{0};
+    jbox::rt::RtLogEvent ev{};
+    ev.timestamp = seq.fetch_add(1, std::memory_order_relaxed) + 1;
+    ev.code      = jbox::rt::kLogTeardownFailure;
+    ev.route_id  = 0;
+    ev.value_a   = 0;  // backend status code (placeholder; engine-side push)
+    ev.value_b   = static_cast<std::uint64_t>(failing_id);
+    (void)q->tryPush(ev);
+}
+
+}  // namespace
+
 
 DeviceIOMux::DeviceIOMux(IDeviceBackend& backend,
                          std::string uid,
                          std::uint32_t input_channel_count,
-                         std::uint32_t output_channel_count)
+                         std::uint32_t output_channel_count,
+                         jbox::rt::DefaultRtLogQueue* log_queue)
     : backend_(backend),
+      log_queue_(log_queue),
       uid_(std::move(uid)),
       input_channel_count_(input_channel_count),
       output_channel_count_(output_channel_count) {}
@@ -31,12 +59,23 @@ DeviceIOMux::~DeviceIOMux() {
     // for the last IOProc execution before returning) and a plain
     // pointer clear on SimulatedBackend; both are safe once the
     // atomic pointers are null and the exit seqs have caught up.
+    //
+    // 7.6.3 contract: on the destructor path we make a best-effort
+    // attempt and log loudly on refusal. There is no further retry
+    // surface here — the mux is being destroyed — so a stuck IOProc
+    // becomes a logged kernel-side leak that 7.6.4's HAL listeners
+    // will surface and recover the next time the device topology
+    // changes.
     if (input_ioproc_id_ != kInvalidIOProcId) {
-        (void)backend_.closeCallback(input_ioproc_id_);
+        if (!backend_.closeCallback(input_ioproc_id_)) {
+            pushTeardownFailure(log_queue_, input_ioproc_id_);
+        }
         input_ioproc_id_ = kInvalidIOProcId;
     }
     if (output_ioproc_id_ != kInvalidIOProcId) {
-        (void)backend_.closeCallback(output_ioproc_id_);
+        if (!backend_.closeCallback(output_ioproc_id_)) {
+            pushTeardownFailure(log_queue_, output_ioproc_id_);
+        }
         output_ioproc_id_ = kInvalidIOProcId;
     }
     backend_.stopDevice(uid_);
@@ -103,8 +142,17 @@ void DeviceIOMux::detachInput(void* key) {
     // `old` (and `next` if we didn't take it) deleted here.
 
     if (now_empty && input_ioproc_id_ != kInvalidIOProcId) {
-        (void)backend_.closeCallback(input_ioproc_id_);
-        input_ioproc_id_ = kInvalidIOProcId;
+        // 7.6.3: the destroy may refuse on a degraded / hot-unplugged
+        // device. On refusal we keep input_ioproc_id_ populated so the
+        // mux destructor's best-effort retry — or, transiently, a
+        // sibling output detach raising maybeStopDevice — has the
+        // handle to retry against. Either way the failure is logged
+        // immediately (kLogTeardownFailure with the failing IOProcId).
+        if (backend_.closeCallback(input_ioproc_id_)) {
+            input_ioproc_id_ = kInvalidIOProcId;
+        } else {
+            pushTeardownFailure(log_queue_, input_ioproc_id_);
+        }
     }
     maybeStopDevice();
 }
@@ -164,8 +212,11 @@ void DeviceIOMux::detachOutput(void* key) {
     waitForOutputQuiescence();
 
     if (now_empty && output_ioproc_id_ != kInvalidIOProcId) {
-        (void)backend_.closeCallback(output_ioproc_id_);
-        output_ioproc_id_ = kInvalidIOProcId;
+        if (backend_.closeCallback(output_ioproc_id_)) {
+            output_ioproc_id_ = kInvalidIOProcId;
+        } else {
+            pushTeardownFailure(log_queue_, output_ioproc_id_);
+        }
     }
     maybeStopDevice();
 }
