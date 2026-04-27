@@ -92,7 +92,7 @@ public:
     IOProcId openDuplexCallback(const std::string& uid,
                                 DuplexIOProcCallback callback,
                                 void* user_data) override;
-    void closeCallback(IOProcId id) override;
+    bool closeCallback(IOProcId id) override;
     bool startDevice(const std::string& uid) override;
     void stopDevice(const std::string& uid) override;
     std::uint32_t currentBufferFrameSize(const std::string& uid) override;

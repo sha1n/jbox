@@ -146,9 +146,22 @@ public:
                                         DuplexIOProcCallback callback,
                                         void* user_data) = 0;
 
-    // Unregister a previously-registered callback. Safe with
-    // kInvalidIOProcId or a stale id — the call is a no-op in that case.
-    virtual void closeCallback(IOProcId id) = 0;
+    // Unregister a previously-registered callback.
+    //
+    // Returns true on success: the callback was destroyed, or it was
+    // already gone / unknown / kInvalidIOProcId (all benign no-ops).
+    // Callers may clear their stored IOProcId on a true return.
+    //
+    // Returns false when the destroy attempt failed (e.g. macOS
+    // returned non-noErr from AudioDeviceDestroyIOProcID on a
+    // hot-unplugged or otherwise degraded device). On false, the
+    // backend retains the IOProc bookkeeping so a subsequent
+    // closeCallback(id) retries the destroy. Callers MUST keep their
+    // stored IOProcId (do NOT reset to kInvalidIOProcId) so that the
+    // next teardown opportunity — another stop, removeRoute, or
+    // hot-plug-driven recovery — can re-invoke this method with the
+    // same id.
+    virtual bool closeCallback(IOProcId id) = 0;
 
     // Start device audio flow. After this call, registered callbacks
     // begin firing on the backend's audio thread (or, for the

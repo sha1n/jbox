@@ -742,7 +742,7 @@ void RouteManager::releaseRouteResources(RouteRecord& r) {
     // so any RT reference to `r` is gone before we release resources.
     if (r.duplex_mode) {
         if (r.duplex_ioproc_id != kInvalidIOProcId) {
-            dm_.backend().closeCallback(r.duplex_ioproc_id);
+            (void)dm_.backend().closeCallback(r.duplex_ioproc_id);
             r.duplex_ioproc_id = kInvalidIOProcId;
         }
         dm_.backend().stopDevice(r.source_uid);

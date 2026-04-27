@@ -564,10 +564,10 @@ IOProcId CoreAudioBackend::openDuplexCallback(const std::string& uid,
     return id_out;
 }
 
-void CoreAudioBackend::closeCallback(IOProcId id) {
-    if (id == kInvalidIOProcId) return;
+bool CoreAudioBackend::closeCallback(IOProcId id) {
+    if (id == kInvalidIOProcId) return true;
     auto it = ioprocs_.find(id);
-    if (it == ioprocs_.end()) return;
+    if (it == ioprocs_.end()) return true;
 
     auto& rec = *it->second;
     if (rec.ca_proc_id != nullptr) {
@@ -579,6 +579,7 @@ void CoreAudioBackend::closeCallback(IOProcId id) {
         rec.ca_proc_id = nullptr;
     }
     ioprocs_.erase(it);
+    return true;
 }
 
 // -----------------------------------------------------------------------------

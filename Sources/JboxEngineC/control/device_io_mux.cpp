@@ -32,11 +32,11 @@ DeviceIOMux::~DeviceIOMux() {
     // pointer clear on SimulatedBackend; both are safe once the
     // atomic pointers are null and the exit seqs have caught up.
     if (input_ioproc_id_ != kInvalidIOProcId) {
-        backend_.closeCallback(input_ioproc_id_);
+        (void)backend_.closeCallback(input_ioproc_id_);
         input_ioproc_id_ = kInvalidIOProcId;
     }
     if (output_ioproc_id_ != kInvalidIOProcId) {
-        backend_.closeCallback(output_ioproc_id_);
+        (void)backend_.closeCallback(output_ioproc_id_);
         output_ioproc_id_ = kInvalidIOProcId;
     }
     backend_.stopDevice(uid_);
@@ -103,7 +103,7 @@ void DeviceIOMux::detachInput(void* key) {
     // `old` (and `next` if we didn't take it) deleted here.
 
     if (now_empty && input_ioproc_id_ != kInvalidIOProcId) {
-        backend_.closeCallback(input_ioproc_id_);
+        (void)backend_.closeCallback(input_ioproc_id_);
         input_ioproc_id_ = kInvalidIOProcId;
     }
     maybeStopDevice();
@@ -164,7 +164,7 @@ void DeviceIOMux::detachOutput(void* key) {
     waitForOutputQuiescence();
 
     if (now_empty && output_ioproc_id_ != kInvalidIOProcId) {
-        backend_.closeCallback(output_ioproc_id_);
+        (void)backend_.closeCallback(output_ioproc_id_);
         output_ioproc_id_ = kInvalidIOProcId;
     }
     maybeStopDevice();

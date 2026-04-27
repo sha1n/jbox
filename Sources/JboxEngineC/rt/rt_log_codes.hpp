@@ -31,6 +31,16 @@ enum : RtLogCode {
     kLogRouteStopped         = 101,
     kLogRouteWaiting         = 102, // value_a = 1 if source missing, value_b = 1 if dest missing
     kLogRouteError           = 103, // value_a = jbox_error_code_t
+    // Phase 7.6.3: control-thread-originated. Emitted when the backend
+    // refuses to destroy an IOProc (AudioDeviceDestroyIOProcID returned
+    // non-noErr, the simulated equivalent, or any analogous failure).
+    // The route's in-memory IOProc handle is preserved so the next
+    // teardown opportunity retries; this log line is the operator-
+    // visible breadcrumb for that retry path.
+    //   value_a = backend status code (OSStatus on macOS; 0 from
+    //             SimulatedBackend's failure injector)
+    //   value_b = IOProcId of the callback that failed to close
+    kLogTeardownFailure      = 104,
 };
 
 }  // namespace jbox::rt

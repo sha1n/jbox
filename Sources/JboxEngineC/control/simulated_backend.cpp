@@ -175,29 +175,30 @@ IOProcId SimulatedBackend::openDuplexCallback(const std::string& uid,
     return slot.duplex_id;
 }
 
-void SimulatedBackend::closeCallback(IOProcId id) {
-    if (id == kInvalidIOProcId) return;
+bool SimulatedBackend::closeCallback(IOProcId id) {
+    if (id == kInvalidIOProcId) return true;
     for (auto& [uid, slot] : devices_) {
         if (slot.input_id == id) {
             slot.input_cb = nullptr;
             slot.input_ud = nullptr;
             slot.input_id = kInvalidIOProcId;
-            return;
+            return true;
         }
         if (slot.output_id == id) {
             slot.output_cb = nullptr;
             slot.output_ud = nullptr;
             slot.output_id = kInvalidIOProcId;
-            return;
+            return true;
         }
         if (slot.duplex_id == id) {
             slot.duplex_cb = nullptr;
             slot.duplex_ud = nullptr;
             slot.duplex_id = kInvalidIOProcId;
-            return;
+            return true;
         }
     }
     // Unknown id — silent no-op.
+    return true;
 }
 
 bool SimulatedBackend::startDevice(const std::string& uid) {
