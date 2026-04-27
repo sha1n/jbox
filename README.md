@@ -13,7 +13,6 @@ Jbox is a **generic Core Audio routing tool**. It bridges any input-capable devi
 - **Automatic drift correction** between devices with independent hardware clocks.
 - **Automatic sample-rate conversion** when source and destination rates differ.
 - **Graceful handling** of device disconnect / reconnect and missing-on-launch cases.
-- **Named scenes** to activate groups of routes together.
 
 Unlike macOS Aggregate Devices — the built-in mechanism for combining multiple audio interfaces — Jbox does not create a system-wide composite device. Routes are per-app, isolated, and dynamic. Other apps sharing the same hardware are unaffected.
 
@@ -325,7 +324,7 @@ If that friction ever matters enough to solve, the next step is joining the paid
 
 ## Status
 
-**Phase 6 — SwiftUI UI, first slice and refinement pass #1 shipped.** Phases 0–5 are code-complete; the C++ engine, Core Audio backend, drift correction + resampling, and the multi-route RCU dispatcher are all in place. The GUI supports add → start → stop → remove routes end-to-end against real Core Audio, with human-readable channel-label pickers in the add-route sheet, live 4 Hz route-status polling, 30 Hz meters, and an Advanced-only diagnostics panel. An `os_log`-based logging pipeline (with edge-triggered RT producers) is wired up under subsystem `com.jbox.app`.
+**Phase 6 — SwiftUI UI, all in-scope items shipped.** Phases 0–5 are code-complete; the C++ engine, Core Audio backend, drift correction + resampling, and the multi-route RCU dispatcher are all in place. The GUI supports add → start → stop → remove routes end-to-end against real Core Audio, with human-readable channel-label pickers in the add-route sheet, live 4 Hz route-status polling, 30 Hz meters, and an Advanced-only diagnostics panel. An `os_log`-based logging pipeline (with edge-triggered RT producers) is wired up under subsystem `com.jbox.app`.
 
 Phase 6 refinements landed:
 - **Fan-out mapping** (1:N) — one source channel can feed multiple destinations.
@@ -334,12 +333,12 @@ Phase 6 refinements landed:
 - **Direct-monitor fast path** for same-device Performance routes — bypasses the ring and SRC entirely, copies input → output in one duplex IOProc, aggregate-device aware.
 - **HAL buffer size** — Jbox respects whatever buffer the user has configured in their interface software; the route's latency pill reflects the honest end-to-end estimate. Tier presets pick ring sizing, not HAL buffer.
 - **Edit existing routes** — non-disruptive inline rename on double-click (engine-side `jbox_engine_rename_route`, ABI v7), plus a pencil button that opens an edit sheet for full reconfigs (device / mapping / tier / buffer). Running routes are stopped, reconfigured, and restarted as a single action; the apply button reads "Apply and restart" when that will happen.
-- **Menu bar extra** — a menu bar icon (a monochrome route glyph derived from the app icon, auto-tinted for light/dark mode) with a small colored status dot in the corner: absent when idle, green when running, red when any route needs attention. Clicking opens a window-style popover with a status summary, per-route Start/Stop toggles, bulk Start All / Stop All, and Open Jbox / Preferences / Quit actions. A scene picker placeholder sits in the layout ready for Phase 7 scene activation.
+- **Menu bar extra** — a menu bar icon (a monochrome route glyph derived from the app icon, auto-tinted for light/dark mode) with a small colored status dot in the corner: absent when idle, green when running, red when any route needs attention. Clicking opens a window-style popover with a status summary, per-route Start/Stop toggles, bulk Start All / Stop All, and Open Jbox / Preferences / Quit actions.
 - **Preferences window (three tabs)** — General / Audio / Advanced. General carries an appearance picker (System / Light / Dark) wired to every scene via `.preferredColorScheme()`. Audio carries a resampler quality preset (Mastering / High Quality) pushed through the engine via the ABI v8 setter, plus an informational footer reminding the user that the HAL buffer size is set in their interface software (UA Console / RME TotalMix / MOTU CueMix / Audio MIDI Setup). Advanced keeps the engine-diagnostics toggle and picks up an Open Logs Folder button. Launch-at-login, menu-bar meters, and Export / Import / Reset Configuration are disabled placeholders that wait on Phase 7 persistence.
 
-Still pending in Phase 6: VoiceOver label on the expanded meter panel, single-window enforcement, `XCUITest` flows, and SwiftUI preview providers. Real-hardware acceptance tests (soak, latency, sample-rate mismatch, multi-route sanity) from Phases 3–5 are deferred to the owner's rig — the simulated backend covers their logic.
+XCUITest event-injection flows are **deferred under the SPM-only constraint** — see [docs/plan.md Phase 6 deviations](./docs/plan.md#phase-6--swiftui-ui) for the gap write-up and the recommended path when revisited. Real-hardware acceptance tests (soak, latency, sample-rate mismatch, multi-route sanity) from Phases 3–5 are deferred to the owner's rig — the simulated backend covers their logic.
 
-Phase 7 persistence slice landed: routes and preferences round-trip through `~/Library/Application Support/Jbox/state.json`. `StateStore` writes atomically with a one-generation `.bak` backup and a 500 ms debounce; `AppState.load()` restores routes on launch with their durable UUIDs, pushes persisted preferences back into `@AppStorage`, and refuses to load state files with a forward schema version. Scene editor + activation logic and launch-at-login are still pending.
+Phase 7 persistence slice landed: routes and preferences round-trip through `~/Library/Application Support/Jbox/state.json`. `StateStore` writes atomically with a one-generation `.bak` backup and a 500 ms debounce; `AppState.load()` restores routes on launch with their durable UUIDs, pushes persisted preferences back into `@AppStorage`, and refuses to load state files with a forward schema version. Launch-at-login is still pending. Scenes (and the sidebar shell that hosted them) have been **deferred to a future release** — full design preserved at [docs/spec.md § 4.10](./docs/spec.md#410-future-feature--scenes-with-sidebar); v1 carries no scene scaffolding, the feature returns as a `v1 → v2` schema migration when it lands.
 
 Phase 7.5 (device-sharing opt-out) landed and was then **superseded and reverted by Phase 7.6** — the entire hog-mode + buffer-shrink machinery the Phase 7.5 toggle opted out of has been removed from the engine. Share is now the only mode and the toggle is gone.
 
@@ -353,7 +352,6 @@ Scope for **v1.0.0** (what the first release will do):
 
 - Route selected channels of any input-capable device to selected channels of any output-capable device (arbitrary 1:N mapping; fan-out allowed, fan-in deferred).
 - Multiple simultaneous routes, each independently started / stopped.
-- Named scenes to activate groups of routes together.
 - Auto-resampling when source and destination sample rates differ.
 - Drift correction between independent device clocks.
 - Auto-waiting for missing devices; auto-recovery on device return.
@@ -366,6 +364,7 @@ Explicitly **deferred** beyond v1 (see [docs/spec.md § Appendix A](./docs/spec.
 
 - Fan-in / summing / any mixer features (fan-out shipped in Phase 6).
 - Per-route gain, mute, or pan.
+- Scenes (named presets that activate groups of routes together) — design preserved at [docs/spec.md § 4.10](./docs/spec.md#410-future-feature--scenes-with-sidebar).
 - Global hotkeys.
 - Developer ID signing + notarization.
 - Mac App Store (architecturally ruled out).

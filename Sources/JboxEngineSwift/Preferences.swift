@@ -16,7 +16,7 @@ public enum AppearanceMode: String, Sendable, Equatable, Hashable, CaseIterable 
     case dark   = "dark"
 
     /// Default — follow the OS appearance. Matches `Preferences`
-    /// defaults in spec § 3.1.5.
+    /// defaults in spec § 3.1.4.
     public static let `default`: AppearanceMode = .system
 
     /// Recover a stored raw value defensively — unknown strings (a

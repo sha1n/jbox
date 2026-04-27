@@ -4,9 +4,9 @@ import JboxEngineSwift
 
 /// Popover content for the menu bar extra (spec.md § 4.2). Displays
 /// a one-line summary, a row per route with a start/stop toggle and
-/// status glyph, a placeholder for the Phase 7 scene picker, and
-/// bulk Start All / Stop All / Open Jbox / Preferences / Quit
-/// actions. "No deep editing from the menu bar" — see spec.md § 4.2.
+/// status glyph, and bulk Start All / Stop All / Open Jbox /
+/// Preferences / Quit actions. "No deep editing from the menu bar"
+/// — see spec.md § 4.2.
 ///
 /// A lightweight status-poll task drives icon updates while the main
 /// window is closed: the window-style MenuBarExtra keeps this view
@@ -38,12 +38,6 @@ struct MenuBarContent: View {
 
             routeListOrEmpty
                 .padding(.horizontal, 8)
-                .padding(.vertical, 6)
-
-            Divider()
-
-            scenePickerPlaceholder
-                .padding(.horizontal, 12)
                 .padding(.vertical, 6)
 
             Divider()
@@ -135,24 +129,6 @@ struct MenuBarContent: View {
                 }
             }
         }
-    }
-
-    // MARK: Scene picker placeholder
-
-    /// Scenes land in Phase 7 (persistence + activation logic). The
-    /// menu bar keeps a disabled placeholder so the layout and user
-    /// model are stable when scenes arrive — the picker will drop
-    /// into this slot and inherit its styling.
-    private var scenePickerPlaceholder: some View {
-        HStack {
-            Text("Scene")
-                .foregroundStyle(.secondary)
-            Spacer()
-            Text("None yet")
-                .foregroundStyle(.tertiary)
-        }
-        .font(.callout)
-        .help("Scenes land with persistence in Phase 7.")
     }
 
     // MARK: Bulk actions

@@ -36,7 +36,7 @@ private enum JSON {
 
 @Suite("StoredPreferences Codable")
 struct StoredPreferencesCodableTests {
-    @Test("defaults match spec § 3.1.5 (+ showDiagnostics extension)")
+    @Test("defaults match spec § 3.1.4 (+ showDiagnostics extension)")
     func defaultsMatchSpec() {
         let p = StoredPreferences()
         #expect(p.launchAtLogin == false)
@@ -260,36 +260,6 @@ struct StoredRouteCodableTests {
     }
 }
 
-// MARK: - StoredScene
-
-@Suite("StoredScene Codable")
-struct StoredSceneCodableTests {
-    @Test(".exclusive round-trips")
-    func exclusiveRoundTrip() throws {
-        let s = StoredScene(id: UUID(), name: "Tracking",
-                            routeIds: [UUID(), UUID()],
-                            activationMode: .exclusive)
-        #expect(try JSON.roundTrip(s) == s)
-    }
-
-    @Test(".additive round-trips")
-    func additiveRoundTrip() throws {
-        let s = StoredScene(id: UUID(), name: "Monitoring",
-                            routeIds: [UUID()],
-                            activationMode: .additive)
-        #expect(try JSON.roundTrip(s) == s)
-    }
-
-    @Test("activationMode encodes as exact spec string")
-    func activationModeEncoding() throws {
-        let s = StoredScene(id: UUID(), name: "S", routeIds: [],
-                            activationMode: .exclusive)
-        let data = try JSON.encoder.encode(s)
-        let text = String(decoding: data, as: UTF8.self)
-        #expect(text.contains("\"exclusive\""))
-    }
-}
-
 // MARK: - StoredAppState root
 
 @Suite("StoredAppState Codable")
@@ -299,7 +269,6 @@ struct StoredAppStateCodableTests {
         let s = StoredAppState()
         #expect(s.schemaVersion == StoredAppState.currentSchemaVersion)
         #expect(s.routes.isEmpty)
-        #expect(s.scenes.isEmpty)
         #expect(s.preferences == StoredPreferences())
         #expect(s.lastQuittedAt == nil)
     }
@@ -310,7 +279,7 @@ struct StoredAppStateCodableTests {
         #expect(try JSON.roundTrip(s) == s)
     }
 
-    @Test("state with a route + scene + non-default prefs round-trips")
+    @Test("state with a route + non-default prefs round-trips")
     func populatedRoundTrip() throws {
         let rid = UUID()
         let route = StoredRoute(
@@ -321,9 +290,6 @@ struct StoredAppStateCodableTests {
             mapping: [ChannelEdge(src: 0, dst: 0)],
             createdAt:  Date(timeIntervalSince1970: 1_700_000_000),
             modifiedAt: Date(timeIntervalSince1970: 1_700_000_100))
-        let scene = StoredScene(id: UUID(), name: "Tracking",
-                                routeIds: [rid],
-                                activationMode: .exclusive)
         let prefs = StoredPreferences(
             launchAtLogin: true,
             resamplerQuality: .highQuality,
@@ -332,7 +298,6 @@ struct StoredAppStateCodableTests {
         let s = StoredAppState(
             schemaVersion: 1,
             routes: [route],
-            scenes: [scene],
             preferences: prefs,
             lastQuittedAt: Date(timeIntervalSince1970: 1_700_000_500))
         #expect(try JSON.roundTrip(s) == s)
@@ -354,7 +319,6 @@ struct StoredAppStateCodableTests {
         {
           "schemaVersion": 1,
           "routes": [],
-          "scenes": [],
           "preferences": {}
         }
         """
@@ -365,14 +329,14 @@ struct StoredAppStateCodableTests {
 
     @Test("decoding succeeds when schemaVersion == current")
     func schemaVersionMatches() throws {
-        let json = #"{"schemaVersion": \#(StoredAppState.currentSchemaVersion), "routes": [], "scenes": [], "preferences": {}}"#
+        let json = #"{"schemaVersion": \#(StoredAppState.currentSchemaVersion), "routes": [], "preferences": {}}"#
         let s = try JSON.decoder.decode(StoredAppState.self, from: Data(json.utf8))
         #expect(s.schemaVersion == StoredAppState.currentSchemaVersion)
     }
 
     @Test("routes preserve their order through the round-trip")
     func multipleRoutesPreserveOrder() throws {
-        // Route ordering is user-visible in the sidebar; a round-trip
+        // Route ordering is user-visible in the route list; a round-trip
         // that silently re-sorted routes would surprise anyone who has
         // deliberately arranged their list.
         func mk(_ uid: String) -> StoredRoute {
@@ -391,7 +355,7 @@ struct StoredAppStateCodableTests {
     @Test("lastQuittedAt round-trips to the nearest second")
     func lastQuittedAtRoundTrips() throws {
         // Not asserted before — the timestamp is a future-UX hook (spec
-        // § 3.1.6) so round-trip discipline matters even while unused.
+        // § 3.1.5) so round-trip discipline matters even while unused.
         let when = Date(timeIntervalSince1970: 1_700_000_321)
         let s = StoredAppState(lastQuittedAt: when)
         #expect(try JSON.roundTrip(s).lastQuittedAt == when)

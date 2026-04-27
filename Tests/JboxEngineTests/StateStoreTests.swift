@@ -141,7 +141,6 @@ struct StateStoreTests {
         {
           "schemaVersion": \#(StoredAppState.currentSchemaVersion + 1),
           "routes": [],
-          "scenes": [],
           "preferences": {}
         }
         """#
@@ -265,7 +264,7 @@ struct StateStoreTests {
         let json = #"""
         {
           "schemaVersion": \#(StoredAppState.currentSchemaVersion + 1),
-          "routes": [], "scenes": [], "preferences": {}
+          "routes": [], "preferences": {}
         }
         """#
         try Data(json.utf8).write(to: store.backupFileURL)

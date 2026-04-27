@@ -49,8 +49,8 @@ The motivating workflow is routing two output channels of a Roland V31 USB sound
 
 The app is layered to isolate the real-time audio path from everything else. This isolation is a functional requirement: any lock, allocation, or syscall on the audio thread causes audible glitches.
 
-1. **UI layer (Swift + SwiftUI).** Main window, menu bar extra, route list, scene picker, per-channel meters, preferences. Pure presentation and user input. Reads engine state through a Swift-exposed publisher; writes user intents as commands.
-2. **Application layer (Swift).** Persistent state (routes, scenes, preferences stored as JSON on disk). Device enumeration cached with Core Audio notifications driving refresh. Route lifecycle orchestrator running the state machine `stopped → waiting → starting → running → error`. Owns the engine instance.
+1. **UI layer (Swift + SwiftUI).** Main window, menu bar extra, route list, per-channel meters, preferences. Pure presentation and user input. Reads engine state through a Swift-exposed publisher; writes user intents as commands.
+2. **Application layer (Swift).** Persistent state (routes + preferences stored as JSON on disk). Device enumeration cached with Core Audio notifications driving refresh. Route lifecycle orchestrator running the state machine `stopped → waiting → starting → running → error`. Owns the engine instance.
 3. **Bridge layer (C API).** A small, stable, C-level interface between Swift and C++. Functions such as `jbox_engine_create`, `jbox_engine_start_route`, `jbox_engine_poll_status`, `jbox_engine_poll_meters`. No Swift or Objective-C types cross this boundary. This layer is the **public contract of the product**; the UI, the engine CLI, and any future alternative UI all target this API.
 4. **Real-time audio engine (C++).** All performance-critical work. Registers HAL IOProcs per device. Owns per-route ring buffers, `AudioConverter` instances for resampling, drift trackers, and lock-free queues for control and metering. No STL containers that allocate in the callback, no `std::mutex`, no `new` / `delete` in the RT path.
 5. **macOS platform.** Core Audio HAL, LaunchServices (for opt-in launch-at-login), file system for persistence, SwiftUI framework.
@@ -501,25 +501,7 @@ struct StoredRoute: Codable, Identifiable, Equatable {
 
 Runtime state (`stopped` / `waiting` / `running` / `error`) is **not** persisted; it is re-derived at runtime.
 
-#### 3.1.4 `Scene`
-
-A named preset: a group of routes to activate together.
-
-```swift
-struct Scene: Codable, Identifiable, Equatable {
-  let id: UUID
-  var name: String
-  var routeIds: [UUID]
-  var activationMode: ActivationMode   // .exclusive (default) | .additive
-}
-
-enum ActivationMode: String, Codable {
-  case exclusive  // activating this scene stops all other routes first
-  case additive   // activating this scene starts routeIds without stopping others
-}
-```
-
-#### 3.1.5 `Preferences`
+#### 3.1.4 `Preferences`
 
 Implemented as `StoredPreferences`.
 
@@ -540,7 +522,7 @@ struct StoredPreferences: Codable, Equatable {
 
 Phase 7.6 removed the `bufferSizePolicy: BufferSizePolicy` field from this struct along with the *global* hog-mode + buffer-shrink machinery it controlled. (Phase 7.6's v11 walk-back re-introduced a *per-route* HAL buffer-frame-size preference on `RouteConfig`, persisted in `StoredRoute.bufferFrames` — see § 3.1.3 — but no global counterpart was re-added; the per-route picker is the only buffer-size knob.) `showDiagnostics` extends the original v1 field list — without persisting the Advanced-tab diagnostics toggle, the user's choice resets on every relaunch.
 
-#### 3.1.6 `AppState`
+#### 3.1.5 `AppState`
 
 The root document persisted to disk. Implemented as `StoredAppState`; the name `AppState` is taken by the runtime `@Observable` shell that owns the `EngineStore` + the `StateStore`.
 
@@ -548,7 +530,6 @@ The root document persisted to disk. Implemented as `StoredAppState`; the name `
 struct StoredAppState: Codable, Equatable {
   var schemaVersion: Int                      // current: 1
   var routes: [StoredRoute]
-  var scenes: [StoredScene]
   var preferences: StoredPreferences
   var lastQuittedAt: Date?
 }
@@ -561,7 +542,7 @@ struct StoredAppState: Codable, Equatable {
 **Format.** JSON via `Codable`. Pretty-printed (2-space indent) so diffs are readable when the user backs up or commits the file.
 
 **Write strategy.** Implemented by `StateStore` (Sources/JboxEngineSwift/Persistence/StateStore.swift).
-- Save triggered by any change that mutates persisted state (route add / edit / delete, scene change, preferences change). Routes ride `EngineStore.onRoutesChanged`; preferences ride `UserDefaults.didChangeNotification` against the `com.jbox.*` keys that back the `@AppStorage` bindings in the Preferences views.
+- Save triggered by any change that mutates persisted state (route add / edit / delete, preferences change). Routes ride `EngineStore.onRoutesChanged`; preferences ride `UserDefaults.didChangeNotification` against the `com.jbox.*` keys that back the `@AppStorage` bindings in the Preferences views.
 - **Debounced at 500 ms.** A burst of edits is coalesced into a single write.
 - **Atomic write**: write to `state.json.tmp`, move the existing `state.json` over `state.json.bak`, then move `state.json.tmp` over `state.json`. Each move is atomic on the same volume; the worst-case crash window leaves the previous generation available under `.bak`.
 - Persistence I/O runs on the `StateStore`'s private serial queue; never on main or RT threads. The SwiftUI scene phase hook invokes `AppState.flush()` on `.background` / `.inactive` transitions so mutations parked in the debounce window are flushed before the app exits.
@@ -595,7 +576,7 @@ When the app launches:
 ### 3.5 Deferred to future versions
 
 - **iCloud / network sync of `state.json`.** The JSON format is already suitable; a future sync layer can be added without changing the on-disk schema.
-- **Multiple configuration profiles** beyond scenes (e.g., separate "Home Studio" vs. "Mobile Rig" full-state documents). Scenes cover the common cases for v1.
+- **Multiple configuration profiles** (e.g., separate "Home Studio" vs. "Mobile Rig" full-state documents). The deferred Scenes feature (§ 4.10) is the in-document grouping equivalent and would land before multi-document support is considered.
 - **Schema version downgrade support.** v1 refuses to load future-schema files; a full compatibility dance is deferred.
 
 ---
@@ -606,38 +587,37 @@ When the app launches:
 
 ### 4.1 Main window
 
-Two-pane layout — the standard macOS utility pattern, using `NavigationSplitView`.
+Single-pane layout — a route list under a standard macOS toolbar.
 
 ```
 ┌────────────────────────────────────────────────────────────────┐
-│ [≡] Jbox                                              [ ⚙ ]    │
-├──────────────┬─────────────────────────────────────────────────┤
-│  SIDEBAR     │  ROUTE LIST                                      │
-│              │                                                  │
-│  All Routes  │  ● Keys to Console                               │
-│  ─────────   │    V31 ch 1,2 → Apollo Virt 1,2     [ ▶ ] [⋯]   │
-│  SCENES      │    ▬▬▬▬▬▬▬▬   ▬▬▬▬▬▬                             │
-│  · Practice  │                                                  │
-│  · Recording │  ○ Mic to Monitors                                │
-│  · Jam       │    Interface ch 5 → Interface 1,2   [ ▶ ] [⋯]   │
-│  [+ Scene]   │                                                  │
-│              │  ! Backup Send (device disconnected)             │
-│              │    V31 ch 3,4 → Scarlett 1,2        [⏸ waiting] │
-│              │                                  [+ Add Route]  │
-└──────────────┴─────────────────────────────────────────────────┘
+│ Jbox                              [ + Add Route ] [ ↻ ]  [ ⚙ ] │
+├────────────────────────────────────────────────────────────────┤
+│                                                                │
+│  ● Keys to Console                                             │
+│    V31 ch 1,2 → Apollo Virt 1,2                  [ ▶ ] [⋯]    │
+│    ▬▬▬▬▬▬▬▬   ▬▬▬▬▬▬                                          │
+│                                                                │
+│  ○ Mic to Monitors                                             │
+│    Interface ch 5 → Interface 1,2                [ ▶ ] [⋯]    │
+│                                                                │
+│  ! Backup Send (device disconnected)                           │
+│    V31 ch 3,4 → Scarlett 1,2                     [⏸ waiting]   │
+│                                                                │
+└────────────────────────────────────────────────────────────────┘
 ```
 
-- **Sidebar:** "All Routes" item + list of scenes. `[+]` button to create a scene.
 - **Route list:** rows show name, source → destination summary, per-channel meters, start/stop button, `[⋯]` menu for edit / delete / duplicate.
 - **Status glyph** per row:
   - `●` (filled circle) — running
   - `○` (open circle) — stopped
   - `⏸` — waiting for device
   - `!` — error
-- **[+ Add Route]** floating-style button in the route list's bottom-right.
+- **[+ Add Route]** toolbar button.
+- **[↻]** toolbar button re-enumerates audio devices.
 - **[⚙]** opens Preferences.
 
-**Window sizing.** Minimum 800 × 500; default 1000 × 600; resizable with a draggable splitter between sidebar and main area. Position and size persisted via `NSWindow` autosave.
+**Window sizing.** Minimum 820 × 520; default 1000 × 600; resizable. Position and size persisted via `NSWindow` autosave.
 
 ### 4.2 Menu bar extra
 
@@ -658,8 +638,6 @@ Clicking opens a window-style popover (SwiftUI `MenuBarExtra` with the `.menuBar
   ●  Mic to Monitors                 Stop
   ○  Backup Send                     Start
   ─────────────────────────────────
-  Scene                    None yet
-  ─────────────────────────────────
   [  Start All  ]  [  Stop All  ]
   ─────────────────────────────────
   Open Jbox
@@ -667,11 +645,9 @@ Clicking opens a window-style popover (SwiftUI `MenuBarExtra` with the `.menuBar
   Quit Jbox
 ```
 
-No deep editing from the menu bar — just toggles, scene switching, and opening the main window. The menu bar is for "what's running" awareness and quick actions.
+No deep editing from the menu bar — just toggles and opening the main window. The menu bar is for "what's running" awareness and quick actions.
 
 A 2 Hz `.task` on the popover root keeps route statuses live so the icon tracks state even when the main window is closed (the window-style `MenuBarExtra` keeps the content view alive for the app's lifetime). The main window's own 4 Hz `.task` continues to drive row-level updates when it is visible.
-
-The **Scene** row is a placeholder in Phase 6 — it renders "None yet" and is disabled. The real scene picker lands with Phase 7 persistence / activation; it drops into this slot with the same layout.
 
 The **Open Jbox** action looks for an existing main-window instance in `NSApp.windows` (skipping `NSPanel` subclasses like the menu bar popover, and matching the "Jbox" window title) and brings it key-and-front via `makeKeyAndOrderFront(_:)`, deminiaturizing first if needed. Only when no existing window is found does it fall through to SwiftUI's `openWindow(id: "main")`. The main scene itself is declared with SwiftUI's single-instance `Window("Jbox", id: "main")` (macOS 13+) rather than `WindowGroup`, so the framework enforces window uniqueness directly: `Cmd+N` is suppressed (the "New Window" command does not appear in the File menu) and programmatic `openWindow(id:)` raises the live instance instead of spawning a duplicate. **Preferences…** routes through `openSettings`. **Quit Jbox** calls `NSApp.terminate(nil)`.
 
@@ -698,15 +674,9 @@ Opens as a sheet over the main window when the user adds a new route or edits an
 - **Validation errors** shown inline: "Source and destination must have the same channel count", "Destination channel already in use" (fan-in is deferred per Appendix A), etc. Duplicate source channels are allowed and produce fan-out.
 - **Save** / **Cancel** buttons. No partial saves; the route is committed atomically.
 
-### 4.4 Scene editor
+### 4.4 Scene editor (deferred)
 
-Smaller sheet:
-- Name field (required).
-- A checkbox list of all routes ("which routes are in this scene").
-- Activation-mode segmented control: **Exclusive** (default) / **Additive**.
-- Save / Cancel.
-
-Clicking a scene in the sidebar activates it. Activation runs the engine through the necessary start / stop sequence to match the scene's intent: in `exclusive` mode, the app stops all routes not in the scene and starts all that are; in `additive` mode, it starts the scene's routes without touching others.
+Not part of v1 — see § 4.9 + § 4.10 (Future feature — Scenes with sidebar) for the design and the brainstorming guard that gates implementation.
 
 ### 4.5 Meters
 
@@ -731,7 +701,7 @@ Standard macOS settings window (`SwiftUI.Settings` scene) with three tabs, imple
 - **Advanced** —
     - **Show engine diagnostics** toggle (off by default; when on, the expanded meter panel surfaces the `frames_produced / frames_consumed · u<K>` counters and the per-side estimated-latency breakdown). Already landed pre-Preferences; key preserved.
     - **Open Logs Folder** button — reveals `~/Library/Logs/Jbox` in Finder, creating the directory on demand. The rotating file sink itself lands with Phase 8 packaging; until then `Console.app` / `log stream --predicate 'subsystem == "com.jbox.app"'` is the authoritative source and this button exists primarily to point users at where the files will live.
-    - **Export / Import / Reset Configuration** — disabled placeholders. The backing `state.json` store landed in the Phase 7 persistence slice; the UI is waiting on the scenes editor work before Import/Export feel defensible (scenes still round-trip through the same file but the editor is deferred).
+    - **Export / Import / Reset Configuration** — disabled placeholders. The backing `state.json` store landed in the Phase 7 persistence slice; the UI is waiting on a wider review of the import/export surface (file-format opt-ins, partial-import semantics) before going live.
 
 ### 4.7 Key flows
 
@@ -741,8 +711,6 @@ Standard macOS settings window (`SwiftUI.Settings` scene) with three tabs, imple
 - **Rename route.** Double-click the route name in the row → inline text field; Return commits, Escape reverts. Engine-side this is a label-only metadata update via `jbox_engine_rename_route` (ABI v7+); running routes keep flowing audio with no interruption. A `⌘R` shortcut is deferred — adding it per row requires a selection model the list does not yet have.
 - **Edit route mapping.** Click the row's pencil button → editor sheet prefilled with the current config. Device / mapping / latency-mode changes force a reconfig: the engine's route mapping is immutable after `addRoute`, so the Swift layer stops the old route, adds a replacement with a fresh engine id, removes the old record, and restarts the replacement when the old route was running. The sheet's apply button shows "Apply and restart" in that case so the restart is visible by design. A name-only edit in the sheet takes the rename fast path. `⌘E` is deferred for the same selection-model reason as `⌘R`; a double-click shortcut on the row body can land with the selection work.
 - **Delete route.** Select and `⌫` → confirmation dialog → removed. Stopped first if running.
-- **Create scene.** Sidebar `+` → editor sheet → Save → scene appears in sidebar.
-- **Switch scene.** Click scene in sidebar → engine applies → running-state dots update across the route list.
 
 ### 4.8 Accessibility
 
@@ -752,11 +720,86 @@ Standard macOS settings window (`SwiftUI.Settings` scene) with three tabs, imple
 
 ### 4.9 Deferred to future versions
 
+- **Scenes (with sidebar UI shell).** Named presets that activate groups of routes together — the original v1 plan that briefly shipped a Phase 6 sidebar shell + Phase 7 menu-bar placeholder. Deferred when an honest review showed the v1 monitoring topology has stable routes that are rarely toggled, so the per-route Start/Stop + bulk Start All / Stop All in the menu bar covered the actual workflow without the extra concept and chrome. When the feature returns, the on-disk schema bumps from `1` to `2` and a `migrate_v1_to_v2` initialises `scenes: []`. Full design at § 4.10.
 - **Localization.** v1 is English-only.
 - **Menu bar quick-route creation** (create a route without opening the main window). Could be a useful speed improvement; not required.
 - **Alternative UI shells** (CLI, web UI, AppKit-based UI). Architecturally supported via the bridge API; not implemented in v1.
 - **UI-level themes beyond System / Light / Dark** (e.g., high-contrast, custom accent colors).
 - **Per-route info / stats overlay** (latency numbers, drift-tracker health, dropout counters). Useful for debugging; postponed until the user wants visibility.
+
+### 4.10 Future feature — Scenes (with sidebar)
+
+> **⚠️ Do not implement this feature without first interviewing the project owner about the UX.** The design below captures the *mechanism* (data model, activation modes, sidebar shape, schema bump) but is deliberately thin on the *use case* — concrete user stories, the active-scene-vs-manual-toggle interaction model, the empty-state UX, "route appears in multiple scenes" semantics, "scene activated with offline devices" feedback, and the "existing user lands on a sidebar that just appeared" upgrade story are all unresolved. When this work is picked up, run a brainstorming session (use the `superpowers:brainstorming` skill if available) to lock the UX *before* writing types, migrations, or views. The mechanism described here is one plausible shape, not a decided plan.
+
+This section captures the deferred-feature design in one place so a future implementation can pick it up without spelunking through `git log`. **Nothing in this section is wired into v1** — no types, no schema fields, no UI, no command paths. When the feature returns it lands as a single, properly-versioned slice; the design here is the starting brief, not partially-built scaffolding.
+
+**Motivation.** A user with several routes and multiple distinct workflows (e.g. "Practice", "Recording", "Jam") needs a one-click way to swap between configurations rather than starting/stopping each route individually. Scenes group routes by purpose; activating a scene drives the engine through the start/stop sequence to match the scene's intent.
+
+**Data model (to introduce when the feature lands).**
+
+```swift
+struct Scene: Codable, Identifiable, Equatable {
+  let id: UUID
+  var name: String
+  var routeIds: [UUID]
+  var activationMode: ActivationMode   // .exclusive (default) | .additive
+}
+
+enum ActivationMode: String, Codable {
+  case exclusive  // activating this scene stops all other routes first
+  case additive   // activating this scene starts routeIds without stopping others
+}
+```
+
+`StoredAppState` gains a `scenes: [StoredScene]` field at the same time.
+
+**Activation modes.**
+- `exclusive` (default) — activating the scene stops all routes not in `routeIds` and starts all that are.
+- `additive` — activating the scene starts the routes in `routeIds` without touching others.
+
+Activation runs in the application layer, not the engine: given a scene, compute the set of routes to start / stop and issue the corresponding `Engine.startRoute` / `Engine.stopRoute` commands. The engine remains scene-unaware.
+
+**Main-window UI.** Re-introduce a `NavigationSplitView` shell:
+
+```
+┌────────────────────────────────────────────────────────────────┐
+│ [≡] Jbox                                              [ ⚙ ]    │
+├──────────────┬─────────────────────────────────────────────────┤
+│  SIDEBAR     │  ROUTE LIST                                      │
+│              │                                                  │
+│  All Routes  │  ● Keys to Console                               │
+│  ─────────   │    V31 ch 1,2 → Apollo Virt 1,2     [ ▶ ] [⋯]   │
+│  SCENES      │    ▬▬▬▬▬▬▬▬   ▬▬▬▬▬▬                             │
+│  · Practice  │                                                  │
+│  · Recording │  ○ Mic to Monitors                                │
+│  · Jam       │    Interface ch 5 → Interface 1,2   [ ▶ ] [⋯]   │
+│  [+ Scene]   │                                                  │
+│              │  ! Backup Send (device disconnected)             │
+│              │    V31 ch 3,4 → Scarlett 1,2        [⏸ waiting] │
+└──────────────┴─────────────────────────────────────────────────┘
+```
+
+- **Sidebar:** "All Routes" item + list of scenes. `[+]` button at the bottom creates a scene.
+- **Active-scene affordance.** The currently active scene (if any) is visually marked in the sidebar; "All Routes" also acts as the "no scene active" filter view in the detail pane.
+- **Window sizing.** Bump the minimum width to ~960 once the splitter returns; default ~1100. The detail pane should never feel cramped under a sidebar at the minimum size.
+
+**Scene editor sheet.**
+- Name field (required).
+- A checkbox list of all routes ("which routes are in this scene").
+- Activation-mode segmented control: **Exclusive** (default) / **Additive**.
+- Save / Cancel.
+
+**Menu bar.** Re-introduce a "Scene" row above the bulk actions in the popover (§ 4.2). When no scene is active, the row reads "Scene · None"; when one is active, it shows the scene name with a quick-switch picker.
+
+**Key flows.**
+- **Create scene.** Sidebar `[+]` → editor sheet → Save → scene appears in sidebar.
+- **Switch scene.** Click scene in sidebar → engine applies → running-state dots update across the route list.
+
+**Persistence.** Bump `StoredAppState.currentSchemaVersion` from `1` to `2` and add a `migrate_v1_to_v2` to `StateStore`'s migration ladder that initialises `scenes: []`. Add scene mutations (create / edit / delete / activation-mode change) to the save-trigger list in § 3.2.
+
+**Tests.** Scene activation logic against a mocked engine — exclusive vs. additive ordering, "all routes already match scene" no-op, "scene references a deleted route" graceful skip. Round-trip Codable cases for `StoredScene` and the new `StoredAppState.scenes` field. One migration test covering the `v1 → v2` ladder entry.
+
+**Phase shape when revisited.** See `docs/plan.md § "After v1.0.0 — deferred work"` for the bullet plan.
 
 ---
 
@@ -790,8 +833,8 @@ Standard macOS settings window (`SwiftUI.Settings` scene) with three tabs, imple
 - **Runtime checks in debug builds:** ThreadSanitizer enabled for engine tests; data races on RT threads fail the test run.
 
 **UI tests (Swift).** Minimal.
-- SwiftUI preview-based smoke tests for key views (route row, route editor, sidebar) — landed; `#Preview` blocks live alongside the views and use the `PreviewFixtures` enum in `JboxEngineSwift` for stub state.
-- XCUITest event-injection flows (add-route, start-route, switch-scene) **deferred under the SPM-only constraint.** The Apple-blessed XCUITest path requires `xcodebuild test` against an `.xcodeproj` + `.xctestplan`, which violates the SPM-only / no Xcode IDE rule. The lower-level `xctest`-runner-against-a-built-`.app`-bundle path is undocumented under SPM and brittle. The gap, the blocked path, and the recommended approach when revisited (allow a generated, gitignored `.xcodeproj` *only* for the UI test target and drive it via `xcodebuild test`) are documented under [docs/plan.md "UI tests (minimal):"](./plan.md#phase-6--swiftui-ui) and the Phase 6 deviations there. Until revisited, the surface XCUITest would cover is held by `EngineStoreTests` (action semantics), persistence round-trip tests, `MeterAccessibilityLabelTests` (labels), `#Preview` blocks (rendering), and human smoke testing of `make run`.
+- SwiftUI preview-based smoke tests for key views (route row, route editor, main route list) — landed; `#Preview` blocks live alongside the views and use the `PreviewFixtures` enum in `JboxEngineSwift` for stub state.
+- XCUITest event-injection flows (add-route, start-route, open-window-from-menu-bar) **deferred under the SPM-only constraint.** The Apple-blessed XCUITest path requires `xcodebuild test` against an `.xcodeproj` + `.xctestplan`, which violates the SPM-only / no Xcode IDE rule. The lower-level `xctest`-runner-against-a-built-`.app`-bundle path is undocumented under SPM and brittle. The gap, the blocked path, and the recommended approach when revisited (allow a generated, gitignored `.xcodeproj` *only* for the UI test target and drive it via `xcodebuild test`) are documented under [docs/plan.md "UI tests (minimal):"](./plan.md#phase-6--swiftui-ui) and the Phase 6 deviations there. Until revisited, the surface XCUITest would cover is held by `EngineStoreTests` (action semantics), persistence round-trip tests, `MeterAccessibilityLabelTests` (labels), `#Preview` blocks (rendering), and human smoke testing of `make run`.
 - Deliberately kept light because the UI is expected to evolve.
 
 ### 5.2 Build system
@@ -990,6 +1033,7 @@ Consolidated list of items explicitly deferred from v1, for easy cross-reference
 - DriverKit kernel extensions. Permanently out of scope — same signing wall as the HAL plugin approach, larger rewrite, no escape.
 
 **UI scope extensions.**
+- Scenes (named presets that activate groups of routes together) and the sidebar UI shell that hosts them. Design preserved at § 4.10; nothing wired into v1, schema bumps from 1 → 2 when the feature returns.
 - Localization.
 - Menu bar quick-route creation without opening the main window.
 - CLI / web UI / alternative UIs (architecturally supported; not implemented).

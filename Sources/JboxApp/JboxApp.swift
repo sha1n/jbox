@@ -246,8 +246,8 @@ struct AudioPreferencesView: View {
 }
 
 /// Advanced tab: diagnostics + Open Logs Folder. Export / Import /
-/// Reset Configuration are Phase 7 — they need the durable `state.json`
-/// to round-trip meaningfully.
+/// Reset Configuration buttons are placeholders pending a wider
+/// review of the import/export surface (see spec § 4.6).
 struct AdvancedPreferencesView: View {
     @AppStorage(JboxPreferences.showDiagnosticsKey) private var showDiagnostics = false
 
@@ -263,8 +263,8 @@ struct AdvancedPreferencesView: View {
         + "source."
 
     private static let configFooter =
-        "Configuration round-trip lands with Phase 7 — the state.json "
-        + "backing store is not implemented yet."
+        "Export / Import / Reset Configuration are not yet wired up — "
+        + "pending an import/export surface review."
 
     var body: some View {
         Form {

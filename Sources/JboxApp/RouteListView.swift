@@ -1,18 +1,15 @@
 import SwiftUI
 import JboxEngineSwift
 
-/// Main window: sidebar + route list. Owns the "Add Route" toolbar
-/// button and drives a ~4 Hz polling loop that refreshes route state
-/// while the view is on screen.
+/// Main window: route list. Owns the "Add Route" toolbar button and
+/// drives a ~4 Hz polling loop that refreshes route state while the
+/// view is on screen.
 struct RouteListView: View {
     let store: EngineStore
     @State private var showingAddSheet = false
     /// When non-nil, the edit sheet is presented for that route.
     @State private var editingRoute: Route? = nil
 
-    /// Per-route expansion state for the meter panel. Lives in view
-    /// state for now; a Phase 7 persistence pass can migrate this onto
-    /// the store so expansion survives relaunch.
     @State private var expandedRoutes: Set<UInt32> = []
 
     /// How often to re-poll route statuses while the view is visible.
@@ -26,76 +23,70 @@ struct RouteListView: View {
     private static let meterInterval: Duration = .milliseconds(33)
 
     var body: some View {
-        NavigationSplitView {
-            List {
-                Label("All Routes", systemImage: "arrow.triangle.turn.up.right.circle")
-            }
+        detailContent
             .navigationTitle("Jbox")
-        } detail: {
-            detailContent
-                .task {
-                    while !Task.isCancelled {
-                        if !store.routes.isEmpty {
-                            store.pollStatuses()
-                        }
-                        try? await Task.sleep(for: Self.pollInterval)
+            .task {
+                while !Task.isCancelled {
+                    if !store.routes.isEmpty {
+                        store.pollStatuses()
                     }
+                    try? await Task.sleep(for: Self.pollInterval)
                 }
-                .task {
-                    // Separate, faster loop for meters — at ~30 Hz this
-                    // is one atomic-exchange-per-channel per running
-                    // route, cheap even with many routes.
-                    while !Task.isCancelled {
-                        if store.routes.contains(where: { $0.status.state == .running }) {
-                            store.pollMeters()
-                        } else if !store.meters.isEmpty {
-                            // Clear stale peaks when nothing is running
-                            // so the UI doesn't hang on an old snapshot.
-                            store.pollMeters()
-                        }
-                        try? await Task.sleep(for: Self.meterInterval)
+            }
+            .task {
+                // Separate, faster loop for meters — at ~30 Hz this
+                // is one atomic-exchange-per-channel per running
+                // route, cheap even with many routes.
+                while !Task.isCancelled {
+                    if store.routes.contains(where: { $0.status.state == .running }) {
+                        store.pollMeters()
+                    } else if !store.meters.isEmpty {
+                        // Clear stale peaks when nothing is running
+                        // so the UI doesn't hang on an old snapshot.
+                        store.pollMeters()
                     }
+                    try? await Task.sleep(for: Self.meterInterval)
                 }
-                .toolbar {
-                    ToolbarItem(placement: .primaryAction) {
-                        Button {
-                            showingAddSheet = true
-                        } label: {
-                            Label("Add Route", systemImage: "plus")
-                        }
-                        .help("Create a new route")
+            }
+            .toolbar {
+                ToolbarItem(placement: .primaryAction) {
+                    Button {
+                        showingAddSheet = true
+                    } label: {
+                        Label("Add Route", systemImage: "plus")
                     }
-                    ToolbarItem(placement: .automatic) {
-                        Button {
-                            store.refreshDevices()
-                        } label: {
-                            Label("Refresh devices", systemImage: "arrow.clockwise")
-                        }
-                        .help("Re-enumerate audio devices")
+                    .help("Create a new route")
+                }
+                ToolbarItem(placement: .automatic) {
+                    Button {
+                        store.refreshDevices()
+                    } label: {
+                        Label("Refresh devices", systemImage: "arrow.clockwise")
                     }
+                    .help("Re-enumerate audio devices")
                 }
-                .sheet(isPresented: $showingAddSheet) {
-                    AddRouteSheet(store: store) {
-                        showingAddSheet = false
-                    }
+            }
+            .sheet(isPresented: $showingAddSheet) {
+                AddRouteSheet(store: store) {
+                    showingAddSheet = false
                 }
-                .sheet(item: $editingRoute) { route in
-                    EditRouteSheet(route: route, store: store) {
-                        editingRoute = nil
-                    }
+            }
+            .sheet(item: $editingRoute) { route in
+                EditRouteSheet(route: route, store: store) {
+                    editingRoute = nil
                 }
-                .alert(
-                    "Engine error",
-                    isPresented: .init(
-                        get: { store.lastError != nil },
-                        set: { if !$0 { store.clearLastError() } }
-                    )
-                ) {
-                    Button("OK", role: .cancel) {}
-                } message: {
-                    Text(store.lastError ?? "")
-                }
-        }
+            }
+            .alert(
+                "Engine error",
+                isPresented: .init(
+                    get: { store.lastError != nil },
+                    set: { if !$0 { store.clearLastError() } }
+                )
+            ) {
+                Button("OK", role: .cancel) {}
+            } message: {
+                Text(store.lastError ?? "")
+            }
     }
 
     @ViewBuilder

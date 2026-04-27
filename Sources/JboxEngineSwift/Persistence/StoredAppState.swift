@@ -12,19 +12,19 @@ extension AppearanceMode:          Codable {}
 
 // MARK: - StoredPreferences
 
-/// User preferences persisted to `state.json` (docs/spec.md § 3.1.5).
+/// User preferences persisted to `state.json` (docs/spec.md § 3.1.4).
 /// Distinct from the engine-facing value types above: those describe
 /// an individual setting's shape; this bundles the full preferences
 /// document that rides inside `StoredAppState`. All fields are
 /// optional on decode so additive schema changes don't break older
-/// files — the defaults match spec § 3.1.5.
+/// files — the defaults match spec § 3.1.4.
 public struct StoredPreferences: Codable, Equatable, Sendable {
     public var launchAtLogin: Bool
     public var resamplerQuality: Engine.ResamplerQuality
     public var appearance: AppearanceMode
     public var showMetersInMenuBar: Bool
     /// Advanced-tab diagnostics toggle (Phase 6 refinement #4). Added
-    /// to `StoredPreferences` as an additive extension of spec § 3.1.5
+    /// to `StoredPreferences` as an additive extension of spec § 3.1.4
     /// so the user's choice survives relaunch instead of living only
     /// in `UserDefaults` alongside the other preferences.
     public var showDiagnostics: Bool
@@ -58,8 +58,7 @@ public struct StoredPreferences: Codable, Equatable, Sendable {
 /// Durable representation of a user-configured route (spec § 3.1.3).
 /// The runtime `Route` in `EngineStore.swift` keys on engine-assigned
 /// `UInt32` ids that do not survive a process restart — this type
-/// keeps a `UUID` so persisted scenes can reference specific routes
-/// across launches.
+/// keeps a `UUID` so the route has a stable identity across launches.
 ///
 /// `latencyMode` extends the spec's v1 field list — added in Phase 6
 /// post-Slice-B so the user's tier choice survives relaunch. It is
@@ -114,39 +113,9 @@ public struct StoredRoute: Codable, Equatable, Identifiable, Sendable {
     }
 }
 
-// MARK: - StoredScene
-
-/// Named set of routes to activate together (spec § 3.1.4). Scene
-/// activation logic is out of scope for the persistence slice; the
-/// type exists so a future scene editor can round-trip through
-/// `state.json` without a schema bump.
-public enum StoredSceneActivationMode: String, Codable, Equatable, Sendable, CaseIterable {
-    case exclusive
-    case additive
-
-    public static let `default`: StoredSceneActivationMode = .exclusive
-}
-
-public struct StoredScene: Codable, Equatable, Identifiable, Sendable {
-    public let id: UUID
-    public var name: String
-    public var routeIds: [UUID]
-    public var activationMode: StoredSceneActivationMode
-
-    public init(id: UUID,
-                name: String,
-                routeIds: [UUID],
-                activationMode: StoredSceneActivationMode = .default) {
-        self.id             = id
-        self.name           = name
-        self.routeIds       = routeIds
-        self.activationMode = activationMode
-    }
-}
-
 // MARK: - StoredAppState (root document)
 
-/// The root `state.json` document (docs/spec.md § 3.1.6). Carries the
+/// The root `state.json` document (docs/spec.md § 3.1.5). Carries the
 /// schema version tag, the user's persisted entities, and a
 /// `lastQuittedAt` timestamp for future UX (e.g. "welcome back"
 /// banners after a crash). Empty state is the legitimate first-launch
@@ -160,18 +129,15 @@ public struct StoredAppState: Codable, Equatable, Sendable {
 
     public var schemaVersion: Int
     public var routes: [StoredRoute]
-    public var scenes: [StoredScene]
     public var preferences: StoredPreferences
     public var lastQuittedAt: Date?
 
     public init(schemaVersion: Int = StoredAppState.currentSchemaVersion,
                 routes: [StoredRoute] = [],
-                scenes: [StoredScene] = [],
                 preferences: StoredPreferences = StoredPreferences(),
                 lastQuittedAt: Date? = nil) {
         self.schemaVersion = schemaVersion
         self.routes        = routes
-        self.scenes        = scenes
         self.preferences   = preferences
         self.lastQuittedAt = lastQuittedAt
     }
@@ -180,7 +146,6 @@ public struct StoredAppState: Codable, Equatable, Sendable {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         self.schemaVersion = try c.decode(Int.self, forKey: .schemaVersion)
         self.routes        = try c.decodeIfPresent([StoredRoute].self, forKey: .routes) ?? []
-        self.scenes        = try c.decodeIfPresent([StoredScene].self, forKey: .scenes) ?? []
         self.preferences   = try c.decodeIfPresent(StoredPreferences.self, forKey: .preferences) ?? StoredPreferences()
         self.lastQuittedAt = try c.decodeIfPresent(Date.self, forKey: .lastQuittedAt)
     }
