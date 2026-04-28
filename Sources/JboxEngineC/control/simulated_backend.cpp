@@ -32,6 +32,41 @@ void SimulatedBackend::setDeviceChangeListener(DeviceChangeListener cb,
     device_change_user_ = user_data;
 }
 
+namespace {
+inline void fire(DeviceChangeListener cb, void* ud,
+                 DeviceChangeEvent::Kind kind,
+                 const std::string& uid) {
+    if (cb == nullptr) return;
+    DeviceChangeEvent ev{kind, uid};
+    cb(ev, ud);
+}
+}  // namespace
+
+void SimulatedBackend::simulateDeviceRemoval(const std::string& uid) {
+    // HAL emits IsAlive=0 first (the device is dead even before
+    // enumeration catches up), then the property-list change once
+    // enumeration sees the gap. Mirror that order.
+    fire(device_change_cb_, device_change_user_,
+         DeviceChangeEvent::kDeviceIsNotAlive, uid);
+    devices_.erase(uid);
+    fire(device_change_cb_, device_change_user_,
+         DeviceChangeEvent::kDeviceListChanged, uid);
+}
+
+void SimulatedBackend::simulateDeviceReappearance(
+    const BackendDeviceInfo& info) {
+    DeviceSlot slot;
+    slot.info = info;
+    devices_[info.uid] = std::move(slot);
+    fire(device_change_cb_, device_change_user_,
+         DeviceChangeEvent::kDeviceListChanged, info.uid);
+}
+
+void SimulatedBackend::simulateAggregateMembersChanged(const std::string& uid) {
+    fire(device_change_cb_, device_change_user_,
+         DeviceChangeEvent::kAggregateMembersChanged, uid);
+}
+
 void SimulatedBackend::setChannelNames(const std::string& uid,
                                        std::uint32_t direction,
                                        std::vector<std::string> names) {

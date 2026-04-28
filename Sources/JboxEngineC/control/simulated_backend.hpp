@@ -49,6 +49,30 @@ public:
     // Safe to call with an unknown UID (no-op).
     void removeDevice(const std::string& uid);
 
+    // ----- Phase 7.6.4 hot-plug simulation (test-only seams) -----
+    //
+    // Mirror the device-topology events macOS's HAL emits. Each method
+    // synchronously fires the registered DeviceChangeListener (if any)
+    // with the appropriate event kind. State changes (slot removal,
+    // slot insertion) are applied as part of the call, so a subsequent
+    // enumerate() reflects the new topology.
+    //
+    // simulateDeviceRemoval fires kDeviceIsNotAlive followed by
+    // kDeviceListChanged — matching the order a HAL plugin emits when
+    // a device is yanked. The slot is erased between the two events.
+    //
+    // simulateDeviceReappearance adds the device back (replacing any
+    // existing slot with the same UID) and fires kDeviceListChanged.
+    //
+    // simulateAggregateMembersChanged fires kAggregateMembersChanged
+    // for the named aggregate UID; the simulator does not modify the
+    // aggregate's sub-device list, so test fixtures can pre-arrange
+    // the new shape via addAggregateDevice / removeDevice before
+    // calling.
+    void simulateDeviceRemoval(const std::string& uid);
+    void simulateDeviceReappearance(const BackendDeviceInfo& info);
+    void simulateAggregateMembersChanged(const std::string& uid);
+
     // Seed the names reported by `channelNames()` for a given device
     // and direction. Must be called after `addDevice` for that UID.
     // Names are stored by value; the vector length is not required
