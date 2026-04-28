@@ -250,15 +250,31 @@ void outputIOProcCallback(float* samples,
                     (frame_count - produced) * in_channels * sizeof(float));
     }
 
+    // Advance the gain smoothers once for the whole block. Mute target
+    // overrides the master target with 0; un-mute returns to master *
+    // trim. Same dynamics for either path so transitions are click-free.
+    const bool  muted_now = r->target_muted.load(std::memory_order_relaxed);
+    const float master_target = muted_now
+        ? 0.0f
+        : r->target_master_gain.load(std::memory_order_relaxed);
+    r->master_smoother.step(master_target, frame_count);
+    for (std::uint32_t i = 0; i < in_channels; ++i) {
+        const float trim_target =
+            r->target_trim_gain[i].load(std::memory_order_relaxed);
+        r->trim_smoothers[i].step(trim_target, frame_count);
+    }
+    const float current_master = r->master_smoother.current;
+
     // Place converted samples on the destination device's selected
-    // output channels and track per-channel peak in one pass. Same
-    // channel-outer pattern as the input side to keep the atomic cost
-    // at O(channels_count) instead of O(frames × channels).
+    // output channels, multiplying by master * trim[ch] and tracking
+    // per-channel peak in one pass. Same channel-outer pattern as the
+    // input side to keep the atomic cost at O(channels_count).
     for (std::uint32_t i = 0; i < in_channels; ++i) {
         const std::uint32_t dst_ch = r->mapping[i].dst;
+        const float gain = current_master * r->trim_smoothers[i].current;
         float peak = 0.0f;
         for (std::uint32_t f = 0; f < frame_count; ++f) {
-            const float s = scratch[f * in_channels + i];
+            const float s = scratch[f * in_channels + i] * gain;
             samples[f * channel_count + dst_ch] = s;
             const float a = std::fabs(s);
             if (a > peak) peak = a;
