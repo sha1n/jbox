@@ -162,4 +162,84 @@ struct EngineStoreGainTests {
         #expect(store.routes[0].trimDbs.isEmpty)
         store.removeRoute(routeId)
     }
+
+    // MARK: - Per-channel mute (Route.channelMuted, UI-only)
+
+    @Test("setChannelMuted toggles the model and pads the array")
+    func setChannelMutedTogglesModel() async throws {
+        guard let (store, routeId) = try makeStoreWithRoute(channels: 2) else {
+            Issue.record("CI runner expected to expose at least one 2-channel input- and one 2-channel output-capable device")
+            return
+        }
+        // Initially: channelMuted == [].
+        #expect(store.routes[0].channelMuted.isEmpty)
+
+        store.setChannelMuted(routeId: routeId, channelIndex: 0, muted: true)
+        #expect(store.routes[0].channelMuted == [true, false])
+
+        store.setChannelMuted(routeId: routeId, channelIndex: 1, muted: true)
+        #expect(store.routes[0].channelMuted == [true, true])
+
+        store.setChannelMuted(routeId: routeId, channelIndex: 0, muted: false)
+        #expect(store.routes[0].channelMuted == [false, true])
+
+        store.removeRoute(routeId)
+    }
+
+    @Test("setChannelMuted leaves trimDbs alone (fader doesn't move)")
+    func setChannelMutedPreservesTrim() async throws {
+        guard let (store, routeId) = try makeStoreWithRoute(channels: 2) else {
+            Issue.record("CI runner expected to expose at least one 2-channel input- and one 2-channel output-capable device")
+            return
+        }
+        store.setChannelTrimDb(routeId: routeId, channelIndex: 0, db: -3.0)
+        store.setChannelTrimDb(routeId: routeId, channelIndex: 1, db: -1.5)
+
+        store.setChannelMuted(routeId: routeId, channelIndex: 0, muted: true)
+
+        // Trim model unchanged — the user's intended trim is preserved
+        // for restore on un-mute, the engine separately receives -∞
+        // for the muted channel.
+        #expect(store.routes[0].trimDbs == [-3.0, -1.5])
+        #expect(store.routes[0].channelMuted == [true, false])
+
+        store.setChannelMuted(routeId: routeId, channelIndex: 0, muted: false)
+        #expect(store.routes[0].trimDbs == [-3.0, -1.5])
+        #expect(store.routes[0].channelMuted == [false, false])
+
+        store.removeRoute(routeId)
+    }
+
+    @Test("setChannelTrimDb while muted updates the model but not the engine")
+    func setChannelTrimDbWhileMuted() async throws {
+        guard let (store, routeId) = try makeStoreWithRoute(channels: 2) else {
+            Issue.record("CI runner expected to expose at least one 2-channel input- and one 2-channel output-capable device")
+            return
+        }
+        store.setChannelMuted(routeId: routeId, channelIndex: 0, muted: true)
+
+        // Drag the fader while muted — the model picks up the new
+        // intended trim, the engine stays silent until un-mute.
+        store.setChannelTrimDb(routeId: routeId, channelIndex: 0, db: -6.0)
+        #expect(store.routes[0].trimDbs[0] == -6.0)
+        #expect(store.routes[0].channelMuted[0] == true)
+
+        // Un-mute — engine now sees the dragged-while-muted trim.
+        store.setChannelMuted(routeId: routeId, channelIndex: 0, muted: false)
+        #expect(store.routes[0].trimDbs[0] == -6.0)
+        #expect(store.routes[0].channelMuted[0] == false)
+
+        store.removeRoute(routeId)
+    }
+
+    @Test("setChannelMuted on out-of-range channel is a no-op")
+    func setChannelMutedOutOfRange() async throws {
+        guard let (store, routeId) = try makeStoreWithRoute(channels: 2) else {
+            Issue.record("CI runner expected to expose at least one 2-channel input- and one 2-channel output-capable device")
+            return
+        }
+        store.setChannelMuted(routeId: routeId, channelIndex: 9, muted: true)
+        #expect(store.routes[0].channelMuted.isEmpty)
+        store.removeRoute(routeId)
+    }
 }

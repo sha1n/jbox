@@ -44,24 +44,10 @@ struct VCAFaderStrip: View {
                 .font(.system(size: 10, weight: .semibold).monospacedDigit())
                 .foregroundStyle(muted ? Color.red : Color.primary)
                 .frame(height: MeterPanelLayout.readoutBandHeight)
-            Button(action: { muted.toggle() }) {
-                Text("MUTE")
-                    .font(.system(size: 9, weight: .semibold))
-                    .padding(.vertical, 2)
-                    .padding(.horizontal, 8)
-                    .background(
-                        RoundedRectangle(cornerRadius: 3)
-                            .fill(muted ? Color.red.opacity(0.85)
-                                        : Color(red: 0.23, green: 0.23, blue: 0.25))
-                    )
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 3)
-                            .stroke(Color.secondary.opacity(0.35), lineWidth: 1)
-                    )
-                    .foregroundStyle(muted ? Color.white : Color.secondary)
-            }
-            .buttonStyle(.plain)
-            .accessibilityLabel(muted ? "Unmute" : "Mute")
+            // Action band — same MuteButton helper that channel strips
+            // use, so the action-band height matches across all columns
+            // and bar zones align.
+            MuteButton(isMuted: muted, action: { muted.toggle() })
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 6)

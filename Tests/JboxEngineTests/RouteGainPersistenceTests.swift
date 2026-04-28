@@ -35,6 +35,7 @@ struct RouteGainPersistenceTests {
         stored.masterGainDb = -3.5
         stored.trimDbs = [-1.0, 0.5]
         stored.muted = true
+        stored.channelMuted = [true, false]
 
         let data = try JSONEncoder().encode(stored)
         let decoded = try JSONDecoder().decode(StoredRoute.self, from: data)
@@ -42,7 +43,36 @@ struct RouteGainPersistenceTests {
         #expect(decoded.masterGainDb == -3.5)
         #expect(decoded.trimDbs == [-1.0, 0.5])
         #expect(decoded.muted == true)
+        #expect(decoded.channelMuted == [true, false])
         #expect(decoded == stored)   // Equatable should match end-to-end
+    }
+
+    @Test("StoredRoute decodes legacy JSON without channelMuted defaults to []")
+    func channelMutedLegacyDefault() throws {
+        // Pre-channelMuted JSON — has masterGainDb/trimDbs/muted but
+        // not channelMuted. Should decode with channelMuted == [].
+        let legacyJson = """
+        {
+            "id": "11111111-2222-3333-4444-555555555555",
+            "name": "legacy",
+            "isAutoName": false,
+            "sourceDevice": { "uid": "src.uid", "lastKnownName": "Src" },
+            "destDevice":   { "uid": "dst.uid", "lastKnownName": "Dst" },
+            "mapping": [{"src":0,"dst":0}, {"src":1,"dst":1}],
+            "createdAt": 0,
+            "modifiedAt": 0,
+            "masterGainDb": -3.0,
+            "trimDbs": [-1.0, 0.5],
+            "muted": true
+        }
+        """
+
+        let decoded = try JSONDecoder().decode(
+            StoredRoute.self,
+            from: Data(legacyJson.utf8))
+
+        #expect(decoded.channelMuted == [])
+        #expect(decoded.muted == true)
     }
 
     @Test("StoredRoute decodes legacy JSON without the gain keys")

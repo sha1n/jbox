@@ -23,10 +23,23 @@ struct ChannelStripColumn: View {
     @Binding var trimDb: Float
     let isCompact: Bool               // true when ≥ 6 channels
 
+    /// Pre-mute trim cache — per-strip @State so it survives the SwiftUI
+    /// view lifetime but resets on view recreation. When the user clicks
+    /// MUTE, we stash the current trim here and push trim to −∞; un-mute
+    /// restores from this cache (falling back to 0 dB if it's nil).
+    @State private var preMuteTrimDb: Float? = nil
+
     /// Strip width — wider in non-compact than in v1 because the bar zone
     /// (fader + meter) needs visual breathing room around the cap and the
     /// label header looks cramped at less than ~70 pt.
     private var stripWidth: CGFloat { isCompact ? 56 : 84 }
+
+    /// Mute is implicit in trim ≤ minFiniteDb. EngineStore.setChannelTrimDb
+    /// clamps a `-∞` setter to `minFiniteDb` (Option A in Task 11), so the
+    /// "muted" state is exactly trim sitting at the floor — which also
+    /// means mute survives a relaunch without needing a separate persisted
+    /// boolean.
+    private var isMuted: Bool { trimDb <= FaderTaper.minFiniteDb }
 
     var body: some View {
         VStack(spacing: 4) {
@@ -64,6 +77,10 @@ struct ChannelStripColumn: View {
                 .font(.system(size: 10, weight: .semibold).monospacedDigit())
                 .foregroundStyle(.primary)
                 .frame(height: MeterPanelLayout.readoutBandHeight)
+            // Action band — MUTE button. Same height as the VCA strip's
+            // MUTE so total column heights match and bar zones across
+            // columns end up identical.
+            MuteButton(isMuted: isMuted, action: toggleMute)
         }
         .padding(.horizontal, 8)
         .padding(.vertical, 6)
@@ -80,9 +97,53 @@ struct ChannelStripColumn: View {
         .accessibilityLabel(tooltipLabel)
     }
 
+    private func toggleMute() {
+        if isMuted {
+            // Unmute — restore the pre-mute trim, falling back to 0 dB
+            // if there's no cache (typical first launch after a saved
+            // muted route).
+            trimDb = preMuteTrimDb ?? 0
+            preMuteTrimDb = nil
+        } else {
+            // Mute — cache the current trim and push to −∞. EngineStore
+            // clamps the setter to minFiniteDb on the way through.
+            preMuteTrimDb = trimDb
+            trimDb = -.infinity
+        }
+    }
+
     private func formattedDb(_ db: Float) -> String {
         if db <= -.infinity { return "−∞" }
         return String(format: "%+.1f", db)
+    }
+}
+
+/// MUTE toggle shared between channel strips and the VCA strip so the
+/// look-and-feel is consistent and the action band is the same height
+/// in every column.
+struct MuteButton: View {
+    let isMuted: Bool
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            Text("MUTE")
+                .font(.system(size: 9, weight: .semibold))
+                .padding(.vertical, 2)
+                .padding(.horizontal, 8)
+                .background(
+                    RoundedRectangle(cornerRadius: 3)
+                        .fill(isMuted ? Color.red.opacity(0.85)
+                                      : Color(red: 0.23, green: 0.23, blue: 0.25))
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 3)
+                        .stroke(Color.secondary.opacity(0.35), lineWidth: 1)
+                )
+                .foregroundStyle(isMuted ? Color.white : Color.secondary)
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(isMuted ? "Unmute" : "Mute")
     }
 }
 
