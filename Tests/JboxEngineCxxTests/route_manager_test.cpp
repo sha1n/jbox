@@ -1727,3 +1727,220 @@ TEST_CASE("RouteManager: device loss on shared device transitions all attached r
     REQUIRE(status.state == JBOX_ROUTE_STATE_WAITING);
 }
 
+// -----------------------------------------------------------------------------
+// Phase 7.6.5 — sleep / wake reaction + bounded retry recovery.
+//
+// Three RouteManager methods drive the contract:
+//   prepareForSleep      — synchronous teardown of every running
+//                           route. State → WAITING, last_error →
+//                           JBOX_ERR_SYSTEM_SUSPENDED.
+//   recoverFromWake      — primes wake_retries_remaining = 3 +
+//                           wake_next_retry_at = now on every
+//                           suspended route.
+//   tickWakeRetries(now) — fires due retries with linear backoff
+//                           (200ms × attempt index after attempt 1).
+//
+// Tests drive `tickWakeRetries` with explicit `now` arguments — same
+// idiom as DriftSampler::tickAll(dt_seconds) — so backoff cadence is
+// deterministic without sleep_for in tests.
+// -----------------------------------------------------------------------------
+
+TEST_CASE("RouteManager: prepareForSleep transitions running route to WAITING + SYSTEM_SUSPENDED",
+          "[route_manager][sleep_wake]") {
+    auto backend_ptr = std::make_unique<SimulatedBackend>();
+    backend_ptr->addDevice(makeInputDevice("src", 2));
+    backend_ptr->addDevice(makeOutputDevice("dst", 2));
+    auto dm = std::make_unique<DeviceManager>(std::move(backend_ptr));
+    dm->refresh();
+    RouteManager rm(*dm);
+
+    std::vector<ChannelEdge> m{{0, 0}};
+    RouteManager::RouteConfig cfg{"src", "dst", m, "sleep-running"};
+    jbox_error_t err{};
+    const auto id = rm.addRoute(cfg, &err);
+    REQUIRE(rm.startRoute(id) == JBOX_OK);
+
+    rm.prepareForSleep();
+
+    jbox_route_status_t status{};
+    REQUIRE(rm.pollStatus(id, &status) == JBOX_OK);
+    REQUIRE(status.state      == JBOX_ROUTE_STATE_WAITING);
+    REQUIRE(status.last_error == JBOX_ERR_SYSTEM_SUSPENDED);
+
+    // Resources released — the latency components cache reverts to
+    // zeros, mirroring the behaviour after a normal stopRoute.
+    jbox_route_latency_components_t components{};
+    REQUIRE(rm.pollLatencyComponents(id, &components) == JBOX_OK);
+    REQUIRE(components.src_buffer_frames == 0);
+    REQUIRE(components.ring_target_fill_frames == 0);
+}
+
+TEST_CASE("RouteManager: prepareForSleep leaves STOPPED and pre-existing WAITING routes alone",
+          "[route_manager][sleep_wake]") {
+    auto backend_ptr = std::make_unique<SimulatedBackend>();
+    backend_ptr->addDevice(makeInputDevice("src", 2));
+    backend_ptr->addDevice(makeOutputDevice("dst", 2));
+    auto dm = std::make_unique<DeviceManager>(std::move(backend_ptr));
+    dm->refresh();
+    RouteManager rm(*dm);
+
+    std::vector<ChannelEdge> m{{0, 0}};
+    RouteManager::RouteConfig cfg_stopped{"src", "dst", m, "stopped"};
+    RouteManager::RouteConfig cfg_waiting{"missing-src", "dst", m, "waiting"};
+    jbox_error_t err{};
+    const auto id_stopped = rm.addRoute(cfg_stopped, &err);
+    const auto id_waiting = rm.addRoute(cfg_waiting, &err);
+    REQUIRE(rm.startRoute(id_waiting) == JBOX_OK);  // → WAITING (missing-src)
+
+    jbox_route_status_t pre{};
+    REQUIRE(rm.pollStatus(id_waiting, &pre) == JBOX_OK);
+    REQUIRE(pre.state == JBOX_ROUTE_STATE_WAITING);
+    const jbox_error_code_t pre_err = pre.last_error;  // JBOX_OK on initial-WAITING
+
+    rm.prepareForSleep();
+
+    jbox_route_status_t status{};
+    REQUIRE(rm.pollStatus(id_stopped, &status) == JBOX_OK);
+    REQUIRE(status.state == JBOX_ROUTE_STATE_STOPPED);
+
+    REQUIRE(rm.pollStatus(id_waiting, &status) == JBOX_OK);
+    REQUIRE(status.state      == JBOX_ROUTE_STATE_WAITING);
+    REQUIRE(status.last_error == pre_err);  // not promoted to SYSTEM_SUSPENDED
+}
+
+TEST_CASE("RouteManager: tickWakeRetries first attempt at t0 succeeds when devices are present",
+          "[route_manager][sleep_wake]") {
+    auto backend_ptr = std::make_unique<SimulatedBackend>();
+    backend_ptr->addDevice(makeInputDevice("src", 2));
+    backend_ptr->addDevice(makeOutputDevice("dst", 2));
+    auto dm = std::make_unique<DeviceManager>(std::move(backend_ptr));
+    dm->refresh();
+    RouteManager rm(*dm);
+
+    std::vector<ChannelEdge> m{{0, 0}};
+    RouteManager::RouteConfig cfg{"src", "dst", m, "wake-recover"};
+    jbox_error_t err{};
+    const auto id = rm.addRoute(cfg, &err);
+    REQUIRE(rm.startRoute(id) == JBOX_OK);
+
+    rm.prepareForSleep();
+    rm.recoverFromWake();
+
+    const auto t0 = std::chrono::steady_clock::now();
+    rm.tickWakeRetries(t0);
+
+    jbox_route_status_t status{};
+    REQUIRE(rm.pollStatus(id, &status) == JBOX_OK);
+    REQUIRE(status.state == JBOX_ROUTE_STATE_RUNNING);
+}
+
+TEST_CASE("RouteManager: tickWakeRetries burns through 3 attempts at the right cadence when devices stay missing",
+          "[route_manager][sleep_wake]") {
+    auto backend_ptr = std::make_unique<SimulatedBackend>();
+    SimulatedBackend* backend = backend_ptr.get();
+    backend->addDevice(makeInputDevice("src", 2));
+    backend->addDevice(makeOutputDevice("dst", 2));
+    auto dm = std::make_unique<DeviceManager>(std::move(backend_ptr));
+    dm->refresh();
+    RouteManager rm(*dm);
+
+    std::vector<ChannelEdge> m{{0, 0}};
+    RouteManager::RouteConfig cfg{"src", "dst", m, "wake-stays-down"};
+    jbox_error_t err{};
+    const auto id = rm.addRoute(cfg, &err);
+    REQUIRE(rm.startRoute(id) == JBOX_OK);
+    rm.prepareForSleep();
+
+    backend->removeDevice("src");
+    rm.recoverFromWake();
+
+    using namespace std::chrono;
+    const auto t0 = steady_clock::now();
+
+    rm.tickWakeRetries(t0);
+    jbox_route_status_t status{};
+    REQUIRE(rm.pollStatus(id, &status) == JBOX_OK);
+    REQUIRE(status.state      == JBOX_ROUTE_STATE_WAITING);
+    REQUIRE(status.last_error == JBOX_ERR_SYSTEM_SUSPENDED);
+
+    rm.tickWakeRetries(t0 + milliseconds(50));
+    REQUIRE(rm.pollStatus(id, &status) == JBOX_OK);
+    REQUIRE(status.last_error == JBOX_ERR_SYSTEM_SUSPENDED);
+
+    rm.tickWakeRetries(t0 + milliseconds(200));
+    REQUIRE(rm.pollStatus(id, &status) == JBOX_OK);
+    REQUIRE(status.last_error == JBOX_ERR_SYSTEM_SUSPENDED);
+
+    rm.tickWakeRetries(t0 + milliseconds(600));
+    REQUIRE(rm.pollStatus(id, &status) == JBOX_OK);
+    REQUIRE(status.last_error == JBOX_ERR_SYSTEM_SUSPENDED);
+
+    rm.tickWakeRetries(t0 + milliseconds(2000));
+    REQUIRE(rm.pollStatus(id, &status) == JBOX_OK);
+    REQUIRE(status.state      == JBOX_ROUTE_STATE_WAITING);
+    REQUIRE(status.last_error == JBOX_ERR_SYSTEM_SUSPENDED);
+}
+
+TEST_CASE("RouteManager: tickWakeRetries — device appears between attempts → second attempt wins",
+          "[route_manager][sleep_wake]") {
+    auto backend_ptr = std::make_unique<SimulatedBackend>();
+    SimulatedBackend* backend = backend_ptr.get();
+    backend->addDevice(makeInputDevice("src", 2));
+    backend->addDevice(makeOutputDevice("dst", 2));
+    auto dm = std::make_unique<DeviceManager>(std::move(backend_ptr));
+    dm->refresh();
+    RouteManager rm(*dm);
+
+    std::vector<ChannelEdge> m{{0, 0}};
+    RouteManager::RouteConfig cfg{"src", "dst", m, "device-late"};
+    jbox_error_t err{};
+    const auto id = rm.addRoute(cfg, &err);
+    REQUIRE(rm.startRoute(id) == JBOX_OK);
+    rm.prepareForSleep();
+
+    backend->removeDevice("src");
+    rm.recoverFromWake();
+
+    using namespace std::chrono;
+    const auto t0 = steady_clock::now();
+
+    rm.tickWakeRetries(t0);
+    jbox_route_status_t status{};
+    REQUIRE(rm.pollStatus(id, &status) == JBOX_OK);
+    REQUIRE(status.state == JBOX_ROUTE_STATE_WAITING);
+
+    backend->addDevice(makeInputDevice("src", 2));
+
+    rm.tickWakeRetries(t0 + milliseconds(200));
+    REQUIRE(rm.pollStatus(id, &status) == JBOX_OK);
+    REQUIRE(status.state == JBOX_ROUTE_STATE_RUNNING);
+
+    rm.tickWakeRetries(t0 + milliseconds(600));
+    REQUIRE(rm.pollStatus(id, &status) == JBOX_OK);
+    REQUIRE(status.state == JBOX_ROUTE_STATE_RUNNING);
+}
+
+TEST_CASE("RouteManager: tickWakeRetries does not touch routes that did not participate in sleep",
+          "[route_manager][sleep_wake]") {
+    auto backend_ptr = std::make_unique<SimulatedBackend>();
+    backend_ptr->addDevice(makeInputDevice("src", 2));
+    backend_ptr->addDevice(makeOutputDevice("dst", 2));
+    auto dm = std::make_unique<DeviceManager>(std::move(backend_ptr));
+    dm->refresh();
+    RouteManager rm(*dm);
+
+    std::vector<ChannelEdge> m{{0, 0}};
+    RouteManager::RouteConfig cfg_stopped{"src", "dst", m, "stopped"};
+    jbox_error_t err{};
+    const auto id_stopped = rm.addRoute(cfg_stopped, &err);
+    REQUIRE(rm.pollStatus(id_stopped, nullptr) == JBOX_ERR_INVALID_ARGUMENT);
+
+    rm.recoverFromWake();
+
+    using namespace std::chrono;
+    rm.tickWakeRetries(steady_clock::now());
+
+    jbox_route_status_t status{};
+    REQUIRE(rm.pollStatus(id_stopped, &status) == JBOX_OK);
+    REQUIRE(status.state == JBOX_ROUTE_STATE_STOPPED);
+}

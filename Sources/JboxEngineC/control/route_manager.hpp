@@ -37,6 +37,7 @@
 #include "rt_log_queue.hpp"
 
 #include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <memory>
 #include <string>
@@ -98,6 +99,16 @@ struct RouteRecord {
 
     std::vector<float> input_scratch;
     std::vector<float> output_scratch;
+
+    // Phase 7.6.5 sleep/wake recovery state. Both fields are 0 /
+    // default-constructed except while a wake-recovery sequence is
+    // in flight on this route. recoverFromWake primes them; the
+    // engine's hot-plug tick fires due retries via tickWakeRetries.
+    // Once `wake_retries_remaining` returns to 0 the route is no
+    // longer participating in retries (either it reached RUNNING or
+    // the bounded budget was exhausted).
+    std::uint8_t                                  wake_retries_remaining = 0;
+    std::chrono::steady_clock::time_point         wake_next_retry_at{};
 
     // Latency tier captured at addRoute time; honoured at every
     // subsequent attemptStart. 0 = safe, 1 = low, 2 = performance.
@@ -245,6 +256,33 @@ public:
     // Control-thread only. Returns raw pointers into the owning map;
     // the pointers are valid until the next add/remove/stop call.
     std::vector<RouteRecord*> runningRoutes();
+
+    // Phase 7.6.5 sleep/wake reactions.
+    //
+    // prepareForSleep: synchronous teardown of every RUNNING route.
+    // Called from the PowerStateWatcher's sleep handler before it
+    // acknowledges sleep to macOS. State transitions from RUNNING →
+    // WAITING with last_error = JBOX_ERR_SYSTEM_SUSPENDED. Routes
+    // that are already STOPPED / WAITING / ERROR are left untouched.
+    //
+    // recoverFromWake: prime the bounded-retry state on every
+    // SYSTEM_SUSPENDED route — sets wake_retries_remaining = 3 and
+    // wake_next_retry_at = now (immediate first attempt). Does NOT
+    // attempt to start anything itself; that work happens in
+    // tickWakeRetries which the engine's tick drives.
+    //
+    // tickWakeRetries(now): fire any retries whose
+    // wake_next_retry_at has elapsed. Linear backoff: attempt N
+    // retries at +0, +200ms, +600ms cumulative from priming. After
+    // 3 failed attempts the route stays WAITING + SYSTEM_SUSPENDED
+    // — the 7.6.4 device-change listener remains the long-tail
+    // recovery mechanism. `now` is parameterised so tests can drive
+    // the cadence deterministically.
+    //
+    // All three are control-thread only.
+    void prepareForSleep();
+    void recoverFromWake();
+    void tickWakeRetries(std::chrono::steady_clock::time_point now);
 
     // Phase 7.6.4 device-loss / hot-plug reaction. Apply each event:
     //   - kDeviceIsNotAlive: any running route whose source_uid or

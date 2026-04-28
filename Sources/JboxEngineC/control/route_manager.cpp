@@ -445,6 +445,101 @@ std::vector<RouteRecord*> RouteManager::runningRoutes() {
     return out;
 }
 
+namespace {
+// 7.6.5 wake-recovery schedule. Linear backoff: attempt N waits
+// (N-1) * kWakeBackoffBaseMs after the prior attempt fired. With
+// base=200ms and budget=3, attempts fire at +0ms, +200ms, +600ms
+// cumulative from the wake event. After the last attempt the
+// budget is exhausted and the route stays WAITING+SYSTEM_SUSPENDED;
+// 7.6.4's device-change watcher remains the long-tail recovery
+// mechanism for devices that come back later still.
+constexpr std::uint32_t kWakeBackoffBaseMs = 200;
+constexpr std::uint8_t  kWakeRetryBudget   = 3;
+}  // namespace
+
+void RouteManager::prepareForSleep() {
+    // Synchronous teardown of every running route. Called from the
+    // PowerStateWatcher's sleep handler before it acks macOS, so
+    // resources are released and IOProcs unregistered before the
+    // system actually powers down. teardown() sets state=STOPPED +
+    // last_error=JBOX_OK; we override both immediately afterward
+    // to mark the route as suspended-pending-recovery.
+    for (auto& [id, rec] : routes_) {
+        auto& r = *rec;
+        if (r.state != JBOX_ROUTE_STATE_RUNNING) continue;
+        teardown(r);
+        r.state      = JBOX_ROUTE_STATE_WAITING;
+        r.last_error = JBOX_ERR_SYSTEM_SUSPENDED;
+        // wake_retries_remaining stays 0 here — recoverFromWake will
+        // prime it once the system reports kPoweredOn.
+        tryPushLog(log_queue_, jbox::rt::kLogRouteWaiting, id, 0u, 0u);
+    }
+}
+
+void RouteManager::recoverFromWake() {
+    const auto now = std::chrono::steady_clock::now();
+    for (auto& [id, rec] : routes_) {
+        (void)id;
+        auto& r = *rec;
+        if (r.state != JBOX_ROUTE_STATE_WAITING) continue;
+        if (r.last_error != JBOX_ERR_SYSTEM_SUSPENDED) continue;
+        // Prime the retry budget for an immediate first attempt;
+        // subsequent attempts get linear-backoff schedules computed
+        // by tickWakeRetries.
+        r.wake_retries_remaining = kWakeRetryBudget;
+        r.wake_next_retry_at     = now;
+    }
+}
+
+void RouteManager::tickWakeRetries(
+    std::chrono::steady_clock::time_point now) {
+    bool refreshed = false;
+    for (auto& [id, rec] : routes_) {
+        (void)id;
+        auto& r = *rec;
+        if (r.wake_retries_remaining == 0) continue;
+        if (now < r.wake_next_retry_at) continue;
+
+        if (!refreshed) {
+            // Refresh once per pass — many routes may share devices,
+            // so a single refresh covers them all. Also picks up any
+            // device that finished re-enumerating since the last tick.
+            dm_.refresh();
+            refreshed = true;
+        }
+
+        // attemptStart sets state to RUNNING on success; to WAITING
+        // (with last_error untouched) when devices are still missing;
+        // or to ERROR on attach-side failures. We preserve SYSTEM_
+        // SUSPENDED for the missing-device case because attemptStart
+        // doesn't set last_error on its WAITING path; the ERROR path
+        // overrides last_error with the relevant code, which is
+        // appropriate (the route's truly stuck for non-device
+        // reasons).
+        (void)attemptStart(r);
+
+        if (r.state == JBOX_ROUTE_STATE_RUNNING) {
+            r.wake_retries_remaining = 0;
+            continue;
+        }
+
+        --r.wake_retries_remaining;
+        if (r.wake_retries_remaining > 0) {
+            // Number of attempts already fired (1, 2). The wait until
+            // the next attempt is `fired_attempt * kWakeBackoffBaseMs`,
+            // so total cumulative time from priming is
+            //   t0 + sum_{i=1..N-1}(i * baseMs)
+            // For budget=3 + base=200 that lands on +0ms, +200ms,
+            // +600ms — the backoff schedule the test cases pin.
+            const std::uint32_t fired_attempt =
+                static_cast<std::uint32_t>(kWakeRetryBudget) -
+                static_cast<std::uint32_t>(r.wake_retries_remaining);
+            r.wake_next_retry_at = now + std::chrono::milliseconds(
+                fired_attempt * kWakeBackoffBaseMs);
+        }
+    }
+}
+
 void RouteManager::handleDeviceChanges(
     const std::vector<DeviceChangeEvent>& events) {
     // 7.6.4: react to backend-emitted topology changes.

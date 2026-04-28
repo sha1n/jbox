@@ -17,6 +17,8 @@
 #include "device_manager.hpp"
 #include "drift_sampler.hpp"
 #include "log_drainer.hpp"
+#include "power_event_source.hpp"
+#include "power_state_watcher.hpp"
 #include "route_manager.hpp"
 #include "jbox_engine.h"
 
@@ -31,7 +33,8 @@ class Engine {
 public:
     Engine(std::unique_ptr<IDeviceBackend> backend,
            bool spawn_sampler_thread,
-           bool spawn_log_drainer = true);
+           bool spawn_log_drainer = true,
+           std::unique_ptr<IPowerEventSource> power_source = nullptr);
     ~Engine();
 
     Engine(const Engine&) = delete;
@@ -55,6 +58,14 @@ public:
     // thread call `tickHotPlug()` synchronously to drive the same
     // path. Idempotent — safe to call when no events are pending.
     void tickHotPlug();
+
+    // Phase 7.6.5: drain the power-state watcher's wake queue and
+    // run the bounded retry pass. On each kPoweredOn event drained,
+    // primes wake retries via RouteManager::recoverFromWake. Every
+    // call also fires `tickWakeRetries(steady_clock::now())` so
+    // retries advance even between wake events. No-op when no
+    // power source was provided to the constructor.
+    void tickPower();
 
     // Forwards to RouteManager.
     jbox_route_id_t  addRoute(const RouteManager::RouteConfig& cfg,
@@ -91,6 +102,8 @@ public:
     DriftSampler&          driftSampler()        { return sampler_; }
     LogDrainer*            logDrainer()          { return drainer_.get(); }
     DeviceChangeWatcher&   deviceChangeWatcher() { return watcher_; }
+    PowerStateWatcher*     powerStateWatcher()   { return power_watcher_.get(); }
+    IPowerEventSource*     powerEventSource()    { return power_source_.get(); }
 
 private:
     // 10 Hz consumer loop: drains `watcher_` and feeds the events to
@@ -100,13 +113,16 @@ private:
 
     // The drainer is owned here so both the queue pointer (handed to
     // RouteManager) and the consumer thread share one lifetime.
-    std::unique_ptr<LogDrainer> drainer_;
-    DeviceManager       dm_;
-    DeviceChangeWatcher watcher_;
-    RouteManager        rm_;
-    DriftSampler        sampler_;
-    std::atomic<bool>   hotplug_running_{false};
-    std::thread         hotplug_thread_;
+    std::unique_ptr<LogDrainer>        drainer_;
+    DeviceManager                      dm_;
+    DeviceChangeWatcher                watcher_;
+    // 7.6.5: optional. nullptr disables sleep/wake handling end to end.
+    std::unique_ptr<IPowerEventSource> power_source_;
+    std::unique_ptr<PowerStateWatcher> power_watcher_;
+    RouteManager                       rm_;
+    DriftSampler                       sampler_;
+    std::atomic<bool>                  hotplug_running_{false};
+    std::thread                        hotplug_thread_;
 };
 
 }  // namespace jbox::control
