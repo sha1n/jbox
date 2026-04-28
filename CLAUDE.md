@@ -6,6 +6,13 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Jbox is a macOS-only Core Audio routing utility. C++ engine + C ABI + Swift wrapper + SwiftUI app. See `README.md` for scope and principles, `docs/spec.md` for design, `docs/plan.md` for phased implementation state and deviations.
 
+Two companion docs sit alongside `plan.md` and an agent should know they exist:
+
+- `docs/followups.md` — pending implementation work that's been deferred from the main path. Hardware-gated production wiring (real `CoreAudioBackend` HAL listeners, real `MacosPowerEventSource`) and non-critical perf refinements live here. Each entry carries Problem / What-to-do / Research-needed / Pitfalls / Acceptance / References. Read this *before* picking up any "deferred follow-up" item referenced from `plan.md`.
+- `docs/refactoring-backlog.md` — refactoring of existing working code that we want to do but have deliberately not folded into feature work. Currently carries the `jbox_error_code_t` / `last_error` naming smell (R1). Read this *before* renaming anything in those families or adding a new variant to `jbox_error_code_t`.
+
+When you defer something during feature work, file it in the right doc instead of leaving a TODO comment in code or a one-line mention in `plan.md`. The depth — open questions, pitfalls, acceptance plan — is the point.
+
 ## Tooling constraints (hard)
 
 - **Swift Package Manager only** — there is no `.xcodeproj`. Do not propose Xcode IDE workflows. `Package.swift` is the single manifest.
@@ -98,6 +105,8 @@ Before asking the user to review, the assistant must confirm each of the followi
 4. **Documentation review.**
    - `docs/plan.md` — the current phase's checklist is up to date for any task that crossed `[ ]` → `[x]`. New "deviations" are recorded in the phase's deviations section with rationale + commit hash.
    - `docs/spec.md` — any contract that changed (ABI signatures, RT invariants, spec § references cited by tests or code) reflects the new behavior.
+   - `docs/followups.md` — when you defer concrete implementation work (hardware-gated, off-main-path, or research-needed), add an `F<n>` entry rather than leaving a TODO. Update an existing entry when its status shifts (e.g., research surfaces an answer, blocker clears).
+   - `docs/refactoring-backlog.md` — when you spot a smell that's bigger than the current slice can absorb, add an `R<n>` entry instead of folding a hasty rename into the feature work.
    - `README.md` — only if user-facing commands / prerequisites / status changed.
    - `CLAUDE.md` (this file) — only if a non-obvious constraint changed that a future Claude instance needs to know.
 5. **Commit message mentions the "why", not just the "what".** Match the style of recent commits (`git log --oneline -10`). Include a line about test coverage added, and flag any deferred follow-up.
