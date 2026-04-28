@@ -30,3 +30,6 @@ xcuserdata/
 
 # Logs
 *.log
+
+# Brainstorming companion (mockups + state)
+.superpowers/
