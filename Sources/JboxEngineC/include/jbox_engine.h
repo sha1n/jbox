@@ -72,7 +72,7 @@ extern "C" {
  *              the actual value via `max-across-clients` so co-
  *              resident apps stay alive. Zero means "no preference".
  */
-#define JBOX_ENGINE_ABI_VERSION 12u
+#define JBOX_ENGINE_ABI_VERSION 13u
 
 uint32_t jbox_engine_abi_version(void);
 
@@ -96,7 +96,15 @@ typedef enum {
      * appeared), which keeps last_error == JBOX_OK. UI layers can
      * differentiate "waiting on user / first plug-in" from "device
      * was yanked" using this code. */
-    JBOX_ERR_DEVICE_GONE         = 8
+    JBOX_ERR_DEVICE_GONE         = 8,
+    /* ABI v13 (Phase 7.6.5): a route in WAITING because the system is
+     * suspending or has just woken from sleep and recovery is still
+     * in flight. Set by RouteManager::prepareForSleep on every
+     * running route + cleared either by a successful auto-restart
+     * (becomes RUNNING) or, if all bounded retries fail, left in
+     * place so the UI can render "auto-recovery exhausted" rather
+     * than "device unplugged". */
+    JBOX_ERR_SYSTEM_SUSPENDED    = 9
 } jbox_error_code_t;
 
 /*

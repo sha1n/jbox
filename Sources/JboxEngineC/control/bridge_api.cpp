@@ -137,6 +137,7 @@ const char* jbox_error_code_name(jbox_error_code_t code) {
         case JBOX_ERR_NOT_IMPLEMENTED:    return "not implemented";
         case JBOX_ERR_INTERNAL:           return "internal";
         case JBOX_ERR_DEVICE_GONE:        return "device gone";
+        case JBOX_ERR_SYSTEM_SUSPENDED:   return "system suspended";
     }
     return "unknown";
 }
