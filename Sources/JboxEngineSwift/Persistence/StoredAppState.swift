@@ -75,6 +75,13 @@ public struct StoredRoute: Codable, Equatable, Identifiable, Sendable {
     public var modifiedAt: Date
     public var latencyMode: LatencyMode
     public var bufferFrames: UInt32?
+    /// ABI v14 — master VCA-style fader, in dB. Default 0 (unity).
+    /// Optional on decode so pre-v14 state.json files load unchanged.
+    public var masterGainDb: Float
+    /// ABI v14 — per-channel trim, in dB. Empty means "no trim" ≡ all 0 dB.
+    public var trimDbs: [Float]
+    /// ABI v14 — mute toggle, independent of fader state.
+    public var muted: Bool
 
     public init(id: UUID,
                 name: String,
@@ -85,7 +92,10 @@ public struct StoredRoute: Codable, Equatable, Identifiable, Sendable {
                 createdAt: Date,
                 modifiedAt: Date,
                 latencyMode: LatencyMode = .off,
-                bufferFrames: UInt32? = nil) {
+                bufferFrames: UInt32? = nil,
+                masterGainDb: Float = 0.0,
+                trimDbs: [Float] = [],
+                muted: Bool = false) {
         self.id           = id
         self.name         = name
         self.isAutoName   = isAutoName
@@ -96,6 +106,9 @@ public struct StoredRoute: Codable, Equatable, Identifiable, Sendable {
         self.modifiedAt   = modifiedAt
         self.latencyMode  = latencyMode
         self.bufferFrames = bufferFrames
+        self.masterGainDb = masterGainDb
+        self.trimDbs      = trimDbs
+        self.muted        = muted
     }
 
     public init(from decoder: Decoder) throws {
@@ -110,6 +123,9 @@ public struct StoredRoute: Codable, Equatable, Identifiable, Sendable {
         self.modifiedAt   = try c.decode(Date.self, forKey: .modifiedAt)
         self.latencyMode  = try c.decodeIfPresent(LatencyMode.self, forKey: .latencyMode) ?? .off
         self.bufferFrames = try c.decodeIfPresent(UInt32.self, forKey: .bufferFrames)
+        self.masterGainDb = try c.decodeIfPresent(Float.self, forKey: .masterGainDb) ?? 0.0
+        self.trimDbs      = try c.decodeIfPresent([Float].self, forKey: .trimDbs) ?? []
+        self.muted        = try c.decodeIfPresent(Bool.self, forKey: .muted) ?? false
     }
 }
 
