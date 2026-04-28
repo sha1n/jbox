@@ -72,7 +72,7 @@ extern "C" {
  *              the actual value via `max-across-clients` so co-
  *              resident apps stay alive. Zero means "no preference".
  */
-#define JBOX_ENGINE_ABI_VERSION 11u
+#define JBOX_ENGINE_ABI_VERSION 12u
 
 uint32_t jbox_engine_abi_version(void);
 
@@ -88,7 +88,15 @@ typedef enum {
     JBOX_ERR_RESOURCE_EXHAUSTED  = 4,   /* engine-internal limit hit            */
     JBOX_ERR_DEVICE_BUSY         = 5,   /* device unavailable for the requested direction */
     JBOX_ERR_NOT_IMPLEMENTED     = 6,   /* feature stubbed; lands in a later commit      */
-    JBOX_ERR_INTERNAL            = 7    /* uncategorised engine failure         */
+    JBOX_ERR_INTERNAL            = 7,   /* uncategorised engine failure         */
+    /* ABI v12 (Phase 7.6.4): a route in WAITING because its source or
+     * destination device disappeared underneath it (hot-unplug,
+     * aggregate sub-device removal, sleep-induced reset). Distinct
+     * from initial-WAITING (the route was started before the devices
+     * appeared), which keeps last_error == JBOX_OK. UI layers can
+     * differentiate "waiting on user / first plug-in" from "device
+     * was yanked" using this code. */
+    JBOX_ERR_DEVICE_GONE         = 8
 } jbox_error_code_t;
 
 /*

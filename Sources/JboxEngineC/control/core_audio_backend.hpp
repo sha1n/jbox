@@ -62,6 +62,8 @@ public:
     std::uint32_t currentBufferFrameSize(const std::string& uid) override;
     void setBufferFrameSize(const std::string& uid,
                             std::uint32_t frames) override;
+    void setDeviceChangeListener(DeviceChangeListener cb,
+                                 void* user_data) override;
 
     // Forward declaration kept public so the .cpp-local trampoline
     // and helper functions can reference it without becoming friends.
@@ -83,6 +85,13 @@ private:
     std::unordered_map<std::string, bool> started_;
 
     IOProcId next_id_ = 1;
+
+    // Phase 7.6.4: stored device-change listener. Real HAL property
+    // listener wiring lands in a follow-up commit after manual hardware
+    // testing — for now this just stores the callback so the contract
+    // compiles, and CoreAudioBackend never fires a topology event.
+    DeviceChangeListener device_change_cb_      = nullptr;
+    void*                device_change_user_    = nullptr;
 };
 
 }  // namespace jbox::control

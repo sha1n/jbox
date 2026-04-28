@@ -26,6 +26,12 @@ void SimulatedBackend::removeDevice(const std::string& uid) {
     devices_.erase(uid);
 }
 
+void SimulatedBackend::setDeviceChangeListener(DeviceChangeListener cb,
+                                               void* user_data) {
+    device_change_cb_   = cb;
+    device_change_user_ = user_data;
+}
+
 void SimulatedBackend::setChannelNames(const std::string& uid,
                                        std::uint32_t direction,
                                        std::vector<std::string> names) {

@@ -70,6 +70,39 @@ struct BackendDeviceInfo {
 using IOProcId = std::uint64_t;
 inline constexpr IOProcId kInvalidIOProcId = 0;
 
+// Phase 7.6.4: device topology change events.
+//
+// Backends emit these via the `setDeviceChangeListener` callback when
+// the HAL (or, in tests, the simulator's simulate-* seams) signals a
+// topology shift. The watcher / control-thread tick is responsible
+// for any debouncing or coalescing — backends just report.
+//
+// The listener fires from whatever thread the backend uses to observe
+// the change. CoreAudioBackend invokes from a HAL property-listener
+// thread; SimulatedBackend invokes synchronously from the test thread.
+// Listeners must therefore be thread-safe internally (the
+// DeviceChangeWatcher uses a mutex-protected queue).
+struct DeviceChangeEvent {
+    enum Kind {
+        // The top-level enumerable device list changed (a device was
+        // added, removed, or its identity flipped). `uid` is the
+        // affected device when known; empty when the kind is a
+        // bare "list changed" notification with no specific subject.
+        kDeviceListChanged       = 0,
+        // A specific device's IsAlive property went to 0 — the device
+        // is no longer usable even if it still appears in enumeration.
+        kDeviceIsNotAlive        = 1,
+        // An aggregate's active sub-device list changed (a member was
+        // added or removed). The aggregate's UID is in `uid`.
+        kAggregateMembersChanged = 2,
+    };
+    Kind        kind;
+    std::string uid;
+};
+
+using DeviceChangeListener = void(*)(const DeviceChangeEvent& event,
+                                     void* user_data);
+
 // Callback invoked by the backend with a buffer of input samples.
 // Samples are interleaved: samples[frame * channels + ch].
 // Callback MUST be RT-safe: no allocation, no locks, no syscalls.
@@ -178,6 +211,24 @@ public:
     // reports it. Returns 0 if the device is unknown or the query
     // failed. Non-RT; call from the control thread only.
     virtual std::uint32_t currentBufferFrameSize(const std::string& uid) = 0;
+
+    // Phase 7.6.4: install a single `DeviceChangeListener` that fires
+    // whenever the backend observes a device-topology change. Pass a
+    // null callback to clear. At most one listener at a time —
+    // re-registration replaces the previous callback.
+    //
+    // Production backends (CoreAudioBackend) wire HAL property
+    // listeners under the hood: kAudioHardwarePropertyDevices,
+    // kAudioDevicePropertyDeviceIsAlive on each enumerated device,
+    // and kAudioAggregateDevicePropertyActiveSubDeviceList on each
+    // aggregate. Simulated backends fire the callback synchronously
+    // from their `simulateDevice*` test seams.
+    //
+    // The callback runs on whatever thread observed the change (HAL
+    // thread in production, test thread in simulation). Listener
+    // implementations must be thread-safe.
+    virtual void setDeviceChangeListener(DeviceChangeListener cb,
+                                         void* user_data) = 0;
 
     // Express a per-device preference for the HAL buffer-frame-size,
     // exactly as Superior Drummer / Reaper / any other Core Audio

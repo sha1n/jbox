@@ -564,6 +564,18 @@ IOProcId CoreAudioBackend::openDuplexCallback(const std::string& uid,
     return id_out;
 }
 
+void CoreAudioBackend::setDeviceChangeListener(DeviceChangeListener cb,
+                                               void* user_data) {
+    // 7.6.4 prep: store the callback so the contract is wired end to
+    // end. Real HAL property-listener registration (kAudioHardware
+    // PropertyDevices, kAudioDevicePropertyDeviceIsAlive, kAudio
+    // AggregateDevicePropertyActiveSubDeviceList) lands in a separate
+    // commit after manual hardware testing — for now this backend
+    // never fires a topology event.
+    device_change_cb_   = cb;
+    device_change_user_ = user_data;
+}
+
 bool CoreAudioBackend::closeCallback(IOProcId id) {
     if (id == kInvalidIOProcId) return true;
     auto it = ioprocs_.find(id);

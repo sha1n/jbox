@@ -98,6 +98,8 @@ public:
     std::uint32_t currentBufferFrameSize(const std::string& uid) override;
     void setBufferFrameSize(const std::string& uid,
                             std::uint32_t frames) override;
+    void setDeviceChangeListener(DeviceChangeListener cb,
+                                 void* user_data) override;
 
     // ----- Phase 7.6.3 teardown-failure injection (test-only seams) -----
     //
@@ -214,6 +216,12 @@ private:
     // tests remain unaffected.
     std::uint32_t                                  next_close_failures_remaining_ = 0;
     std::unordered_map<IOProcId, std::uint32_t>    per_id_close_failures_;
+
+    // Phase 7.6.4: stored device-change listener. simulateDevice*
+    // helpers fire it synchronously; production tests can register
+    // a watcher's static thunk here.
+    DeviceChangeListener device_change_cb_      = nullptr;
+    void*                device_change_user_    = nullptr;
 };
 
 }  // namespace jbox::control
