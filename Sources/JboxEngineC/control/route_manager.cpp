@@ -172,17 +172,34 @@ void duplexIOProcCallback(const float* input_samples,
         input_frame_count < output_frame_count ? input_frame_count
                                                : output_frame_count;
 
+    // Advance gain smoothers once per block — same logic as the split
+    // path in outputIOProcCallback. Mute target overrides master with 0.
+    const bool  muted_now = r->target_muted.load(std::memory_order_relaxed);
+    const float master_target = muted_now
+        ? 0.0f
+        : r->target_master_gain.load(std::memory_order_relaxed);
+    r->master_smoother.step(master_target, frames);
+    for (std::uint32_t i = 0; i < r->channels_count; ++i) {
+        const float trim_target =
+            r->target_trim_gain[i].load(std::memory_order_relaxed);
+        r->trim_smoothers[i].step(trim_target, frames);
+    }
+    const float current_master = r->master_smoother.current;
+
     for (std::uint32_t i = 0; i < r->channels_count; ++i) {
         const std::uint32_t src_ch = r->mapping[i].src;
         const std::uint32_t dst_ch = r->mapping[i].dst;
+        const float gain = current_master * r->trim_smoothers[i].current;
         float peak_in  = 0.0f;
         float peak_out = 0.0f;
         for (std::uint32_t f = 0; f < frames; ++f) {
             const float s = input_samples[f * input_channel_count + src_ch];
-            output_samples[f * out_ch_count + dst_ch] = s;
-            const float a = std::fabs(s);
-            if (a > peak_in)  peak_in  = a;
-            if (a > peak_out) peak_out = a;
+            const float o = s * gain;
+            output_samples[f * out_ch_count + dst_ch] = o;
+            const float a_in  = std::fabs(s);
+            const float a_out = std::fabs(o);
+            if (a_in  > peak_in)  peak_in  = a_in;
+            if (a_out > peak_out) peak_out = a_out;
         }
         r->source_meter.updateMax(i, peak_in);
         r->dest_meter.updateMax(i, peak_out);
