@@ -85,7 +85,7 @@ Peak-hold tick (`PeakHoldTracker`) unchanged.
 ### 4.4 Fader behavior
 
 - **Range** — −∞ … +12 dB. Below position 4% (1/25 of the throw), the fader snaps to −∞ dB (fully muted via the gain path, separate from the explicit `MUTE` button).
-- **Taper** — log curve, 0 dB at 75% throw, +12 dB at 100%. Pure module `FaderTaper` exposes `dbForPosition(_ pos: Float) -> Float` and `positionForFader(_ db: Float) -> Float`. Implementation: piecewise — linear in dB from +12 dB (top) down through 0 dB (75%) and on to −60 dB (5%), then a sharp kink to −∞ in the bottom 5%. (The kink prevents the bottom of the throw from feeling dead while staying above the digital floor.)
+- **Taper** — log curve, 0 dB at 75% throw, +12 dB at 100%. Pure module `FaderTaper` exposes `dbForPosition(_ pos: Float) -> Float` and `positionFor(db: Float) -> Float`. Implementation: piecewise — linear in dB from +12 dB (top) down through 0 dB (75%) and on to −60 dB (5%), then a sharp kink to −∞ in the bottom 5%. (The kink prevents the bottom of the throw from feeling dead while staying above the digital floor.)
 - **Reset to unity** — double-click on the fader cap or the readout text snaps to 0 dB.
 - **dB readout** — single decimal place, `+0.0 dB`, `−1.5 dB`, etc. `−∞` rendered when the gain is fully muted.
 - **Keyboard** — when the fader has focus, ↑/↓ adjust by ±0.5 dB; ⇧↑/⇧↓ by ±0.1 dB; ⌥-double-click resets.
