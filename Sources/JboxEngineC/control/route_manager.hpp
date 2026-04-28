@@ -25,6 +25,7 @@
 #define JBOX_CONTROL_ROUTE_MANAGER_HPP
 
 #include "atomic_meter.hpp"
+#include "gain_smoother.hpp"
 #include "audio_converter_wrapper.hpp"
 #include "channel_mapper.hpp"
 #include "device_backend.hpp"
@@ -36,6 +37,7 @@
 #include "ring_buffer.hpp"
 #include "rt_log_queue.hpp"
 
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <cstdint>
@@ -161,6 +163,25 @@ struct RouteRecord {
     // latency_estimate.hpp and docs/spec.md § 2.12.
     LatencyComponents latency_components{};
     std::uint64_t     estimated_latency_us = 0;
+
+    // ----- Per-route gain state (master + per-channel trims + mute).
+    //
+    // Targets are written by the control thread in setMasterGainDb /
+    // setChannelTrimDb / setRouteMute and read by the RT thread once
+    // per IOProc block. Linear amplitude (dB→linear conversion happens
+    // on the control thread). target_trim_gain is sized to
+    // kAtomicMeterMaxChannels but only the first `channels_count`
+    // entries are read on the RT side. addRoute initializes them to
+    // 1.0; entries beyond channels_count keep std::atomic's default
+    // and are never read.
+    std::atomic<float>  target_master_gain{1.0f};
+    std::array<std::atomic<float>, jbox::rt::kAtomicMeterMaxChannels> target_trim_gain;
+    std::atomic<bool>   target_muted{false};
+
+    // RT-thread-local smoothers. Configured at attemptStart from the
+    // destination device's nominal rate via setTimeConstant(...).
+    jbox::rt::GainSmoother master_smoother;
+    std::array<jbox::rt::GainSmoother, jbox::rt::kAtomicMeterMaxChannels> trim_smoothers;
 };
 
 class RouteManager {
@@ -191,6 +212,13 @@ public:
         // device(s) at start time — no hog mode, no eviction;
         // macOS resolves with `max-across-clients`.
         std::uint32_t                    buffer_frames = 0;
+        // Per-route VCA-style gain. master_gain_db = 0 → unity; mute
+        // is independent of fader position. trims default to all 0 dB
+        // when channel_trims_db is empty; otherwise must match
+        // mapping.size() and is enforced in addRoute.
+        float                            master_gain_db = 0.0f;
+        std::vector<float>               channel_trims_db;
+        bool                             muted          = false;
     };
 
     // Add a route in state STOPPED. Returns the new id on success, or
