@@ -304,6 +304,26 @@ jbox_route_id_t RouteManager::addRoute(const RouteConfig& cfg, jbox_error_t* err
         setError(err, JBOX_ERR_MAPPING_INVALID, channelMapperErrorName(mapping_err));
         return JBOX_INVALID_ROUTE_ID;
     }
+    // The per-route gain state (target_trim_gain / trim_smoothers) is
+    // a fixed std::array sized to kAtomicMeterMaxChannels. ChannelMapper
+    // does not enforce this bound itself, so we reject oversize mappings
+    // here defensively — without this check the per-channel init loop
+    // below would write past the array on a >64-edge mapping.
+    if (cfg.mapping.size() > jbox::rt::kAtomicMeterMaxChannels) {
+        setError(err, JBOX_ERR_MAPPING_INVALID,
+                 "mapping has more channels than kAtomicMeterMaxChannels");
+        return JBOX_INVALID_ROUTE_ID;
+    }
+    // Per-channel trims must either be omitted entirely (default to 0 dB
+    // per channel) or match the mapping size exactly. Validated before
+    // we allocate the record so a misconfigured caller can't leak a
+    // half-initialized RouteRecord.
+    if (!cfg.channel_trims_db.empty() &&
+        cfg.channel_trims_db.size() != cfg.mapping.size()) {
+        setError(err, JBOX_ERR_INVALID_ARGUMENT,
+                 "channel_trims_db size must match mapping size");
+        return JBOX_INVALID_ROUTE_ID;
+    }
 
     auto rec = std::make_unique<RouteRecord>();
     rec->id             = next_id_++;
@@ -316,6 +336,31 @@ jbox_route_id_t RouteManager::addRoute(const RouteConfig& cfg, jbox_error_t* err
     rec->channels_count = static_cast<std::uint32_t>(cfg.mapping.size());
     rec->state          = JBOX_ROUTE_STATE_STOPPED;
     rec->log_queue      = log_queue_;
+
+    // dB → linear conversion happens on the control thread so the RT
+    // path stays free of pow() calls. Inputs are clamped to [-inf,+12 dB]:
+    // anything <= -120 dB (and NaN, -inf, because neither compares > -120)
+    // collapses to 0 to avoid denormals; anything > +12 dB is capped at
+    // +12 dB so a misbehaving caller can't push the engine into +inf gain.
+    auto dbToAmp = [](float db) -> float {
+        if (!(db > -120.0f)) return 0.0f;   // NaN, -inf, <= -120 → silent
+        if (db > 12.0f) db = 12.0f;
+        return std::pow(10.0f, db / 20.0f);
+    };
+
+    rec->target_master_gain.store(dbToAmp(cfg.master_gain_db),
+                                  std::memory_order_relaxed);
+    rec->target_muted.store(cfg.muted, std::memory_order_relaxed);
+
+    // Trims default to unity per channel when the caller passes none.
+    // Loop is a no-op for channels_count == 0 (rejected earlier by the
+    // mapping validator's kEmpty check, but harmless either way).
+    for (std::uint32_t i = 0; i < rec->channels_count; ++i) {
+        const float db = cfg.channel_trims_db.empty()
+                             ? 0.0f
+                             : cfg.channel_trims_db[i];
+        rec->target_trim_gain[i].store(dbToAmp(db), std::memory_order_relaxed);
+    }
 
     const jbox_route_id_t id = rec->id;
     routes_[id] = std::move(rec);
@@ -705,6 +750,25 @@ jbox_error_code_t RouteManager::attemptStart(RouteRecord& r) {
                                  : 48000.0;
         r.nominal_dst_rate = r.nominal_src_rate;
 
+        // 10 ms time constant — fast enough to feel instantaneous on
+        // slider drags, slow enough to kill zipper noise / clicks.
+        // Matches design doc § 5.2. Priming `current` to the configured
+        // target — and to 0 when the route is muted at start — avoids
+        // an audible 30 ms decay-from-unity at start time on a route
+        // restored as muted from state.json.
+        constexpr double kGainTau = 0.010;
+        const bool start_muted_d =
+            r.target_muted.load(std::memory_order_relaxed);
+        r.master_smoother.setTimeConstant(r.nominal_dst_rate, kGainTau);
+        r.master_smoother.current = start_muted_d
+            ? 0.0f
+            : r.target_master_gain.load(std::memory_order_relaxed);
+        for (std::uint32_t i = 0; i < r.channels_count; ++i) {
+            r.trim_smoothers[i].setTimeConstant(r.nominal_dst_rate, kGainTau);
+            r.trim_smoothers[i].current =
+                r.target_trim_gain[i].load(std::memory_order_relaxed);
+        }
+
         // Latency components for the fast path: no ring, no converter.
         // The device buffer contributes exactly once (one callback
         // carries both directions), so we drop dst_buffer_frames.
@@ -806,6 +870,24 @@ jbox_error_code_t RouteManager::attemptStart(RouteRecord& r) {
     r.nominal_dst_rate = dst->nominal_sample_rate > 0.0
                              ? dst->nominal_sample_rate
                              : r.nominal_src_rate;
+
+    // 10 ms time constant — fast enough to feel instantaneous on slider
+    // drags, slow enough to kill zipper noise / clicks. Matches design
+    // doc § 5.2. Priming `current` to the configured target — and to 0
+    // when the route is muted at start — avoids an audible decay-from-
+    // unity on a route restored as muted from state.json.
+    constexpr double kGainTau = 0.010;
+    const bool start_muted_r =
+        r.target_muted.load(std::memory_order_relaxed);
+    r.master_smoother.setTimeConstant(r.nominal_dst_rate, kGainTau);
+    r.master_smoother.current = start_muted_r
+        ? 0.0f
+        : r.target_master_gain.load(std::memory_order_relaxed);
+    for (std::uint32_t i = 0; i < r.channels_count; ++i) {
+        r.trim_smoothers[i].setTimeConstant(r.nominal_dst_rate, kGainTau);
+        r.trim_smoothers[i].current =
+            r.target_trim_gain[i].load(std::memory_order_relaxed);
+    }
 
     try {
         r.converter = std::make_unique<jbox::rt::AudioConverterWrapper>(

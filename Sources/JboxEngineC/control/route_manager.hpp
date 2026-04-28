@@ -174,6 +174,8 @@ struct RouteRecord {
     // entries are read on the RT side. addRoute initializes them to
     // 1.0; entries beyond channels_count keep std::atomic's default
     // and are never read.
+    // Cannot be brace-initialized at declaration because std::atomic
+    // is non-copyable; addRoute does it explicitly.
     std::atomic<float>  target_master_gain{1.0f};
     std::array<std::atomic<float>, jbox::rt::kAtomicMeterMaxChannels> target_trim_gain;
     std::atomic<bool>   target_muted{false};
