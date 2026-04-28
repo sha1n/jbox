@@ -37,6 +37,20 @@ inline void tryPushLog(jbox::rt::DefaultRtLogQueue* q,
     ev.value_b = b;
     (void)q->tryPush(ev);  // drop on full; drainer is best-effort.
 }
+
+// dB → linear amplitude with clamping. Single source of truth shared
+// by addRoute (initial values from RouteConfig) and the runtime
+// setters (setRouteMasterGainDb / setRouteChannelTrimDb). Inputs are
+// clamped to [-inf,+12 dB]: anything <= -120 dB (and NaN, -inf,
+// because neither compares > -120) collapses to 0 to avoid denormals;
+// anything > +12 dB caps at +12 dB so a misbehaving caller can't push
+// the engine into +inf gain. dB → linear conversion happens on the
+// control thread so the RT path stays free of pow().
+inline float dbToAmpClamped(float db) {
+    if (!(db > -120.0f)) return 0.0f;   // NaN, -inf, <= -120 → silent
+    if (db > 12.0f) db = 12.0f;
+    return std::pow(10.0f, db / 20.0f);
+}
 }  // namespace
 
 // -----------------------------------------------------------------------------
@@ -371,17 +385,9 @@ jbox_route_id_t RouteManager::addRoute(const RouteConfig& cfg, jbox_error_t* err
     rec->log_queue      = log_queue_;
 
     // dB → linear conversion happens on the control thread so the RT
-    // path stays free of pow() calls. Inputs are clamped to [-inf,+12 dB]:
-    // anything <= -120 dB (and NaN, -inf, because neither compares > -120)
-    // collapses to 0 to avoid denormals; anything > +12 dB is capped at
-    // +12 dB so a misbehaving caller can't push the engine into +inf gain.
-    auto dbToAmp = [](float db) -> float {
-        if (!(db > -120.0f)) return 0.0f;   // NaN, -inf, <= -120 → silent
-        if (db > 12.0f) db = 12.0f;
-        return std::pow(10.0f, db / 20.0f);
-    };
-
-    rec->target_master_gain.store(dbToAmp(cfg.master_gain_db),
+    // path stays free of pow() calls. See dbToAmpClamped above for the
+    // shared clamping policy ([-inf,+12 dB], NaN/-inf → 0).
+    rec->target_master_gain.store(dbToAmpClamped(cfg.master_gain_db),
                                   std::memory_order_relaxed);
     rec->target_muted.store(cfg.muted, std::memory_order_relaxed);
 
@@ -392,7 +398,8 @@ jbox_route_id_t RouteManager::addRoute(const RouteConfig& cfg, jbox_error_t* err
         const float db = cfg.channel_trims_db.empty()
                              ? 0.0f
                              : cfg.channel_trims_db[i];
-        rec->target_trim_gain[i].store(dbToAmp(db), std::memory_order_relaxed);
+        rec->target_trim_gain[i].store(dbToAmpClamped(db),
+                                       std::memory_order_relaxed);
     }
 
     const jbox_route_id_t id = rec->id;
@@ -431,6 +438,35 @@ jbox_error_code_t RouteManager::renameRoute(jbox_route_id_t id,
     // `name` is only read on the control thread (RT callbacks never
     // touch it), so a plain assign is race-free here.
     it->second->name = new_name;
+    return JBOX_OK;
+}
+
+jbox_error_code_t RouteManager::setRouteMasterGainDb(jbox_route_id_t id,
+                                                      float db) {
+    auto it = routes_.find(id);
+    if (it == routes_.end()) return JBOX_ERR_INVALID_ARGUMENT;
+    it->second->target_master_gain.store(dbToAmpClamped(db),
+                                         std::memory_order_relaxed);
+    return JBOX_OK;
+}
+
+jbox_error_code_t RouteManager::setRouteChannelTrimDb(
+    jbox_route_id_t id,
+    std::uint32_t   channel_index,
+    float           db) {
+    auto it = routes_.find(id);
+    if (it == routes_.end()) return JBOX_ERR_INVALID_ARGUMENT;
+    auto& r = *it->second;
+    if (channel_index >= r.channels_count) return JBOX_ERR_INVALID_ARGUMENT;
+    r.target_trim_gain[channel_index].store(dbToAmpClamped(db),
+                                            std::memory_order_relaxed);
+    return JBOX_OK;
+}
+
+jbox_error_code_t RouteManager::setRouteMute(jbox_route_id_t id, bool muted) {
+    auto it = routes_.find(id);
+    if (it == routes_.end()) return JBOX_ERR_INVALID_ARGUMENT;
+    it->second->target_muted.store(muted, std::memory_order_relaxed);
     return JBOX_OK;
 }
 

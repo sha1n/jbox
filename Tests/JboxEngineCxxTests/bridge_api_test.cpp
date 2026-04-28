@@ -17,6 +17,7 @@
 #include <chrono>
 #include <cstring>
 #include <functional>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <string_view>
@@ -734,6 +735,117 @@ TEST_CASE("bridge: poll_meters rejects bad args and non-running routes",
     const auto bogus_side = static_cast<jbox_meter_side_t>(99);
     REQUIRE(jbox_engine_poll_meters(e, id, bogus_side, peaks, 2) == 0);
     REQUIRE(peaks[0] == 7.0f);
+
+    jbox_engine_destroy(e);
+}
+
+// -----------------------------------------------------------------------------
+// ABI v14 — per-route gain setters
+// -----------------------------------------------------------------------------
+//
+// Task 8 of the Route Gain + Mixer-Strip plan: smoke-test that the
+// three new C ABI entry points reach RouteManager and report the
+// expected error / OK codes for the canonical valid / invalid inputs.
+// The per-channel routing semantics (smoothing, mute behaviour, RT
+// fan-out) live in route_manager_gain_test.cpp; this case is a thin
+// bridge-level seam check, plus the documented edge cases (clamping
+// of out-of-range gain values, NaN tolerance, mute independence from
+// route lifecycle).
+
+TEST_CASE("[bridge_api] new gain setters return JBOX_OK on a valid route",
+          "[bridge_api][gain]") {
+    auto backend_holder = std::make_unique<SimulatedBackend>();
+    auto* backend = backend_holder.get();
+    backend->addDevice(makeDev("src", kBackendDirectionInput,  2, 0));
+    backend->addDevice(makeDev("dst", kBackendDirectionOutput, 0, 2));
+
+    jbox_engine_t* e = jbox::internal::createEngineWithBackend(
+        std::move(backend_holder), /*spawn_sampler_thread=*/false);
+    REQUIRE(e != nullptr);
+
+    jbox_error_t err{};
+    if (auto* l = jbox_engine_enumerate_devices(e, &err)) {
+        jbox_device_list_free(l);
+    }
+
+    const jbox_channel_edge_t mapping[] = {{0, 0}, {1, 1}};
+    jbox_route_config_t rcfg{};
+    rcfg.source_uid     = "src";
+    rcfg.dest_uid       = "dst";
+    rcfg.mapping        = mapping;
+    rcfg.mapping_count  = 2;
+    rcfg.name           = "gain-smoke";
+    rcfg.master_gain_db = 0.0f;
+    rcfg.muted          = 0;
+
+    const jbox_route_id_t id = jbox_engine_add_route(e, &rcfg, &err);
+    REQUIRE(id != JBOX_INVALID_ROUTE_ID);
+
+    SECTION("happy path: each setter returns JBOX_OK") {
+        REQUIRE(jbox_engine_set_route_master_gain_db(e, id, -3.0f) == JBOX_OK);
+        REQUIRE(jbox_engine_set_route_channel_trim_db(e, id, 0, -1.5f) == JBOX_OK);
+        REQUIRE(jbox_engine_set_route_channel_trim_db(e, id, 1, +0.5f) == JBOX_OK);
+        REQUIRE(jbox_engine_set_route_mute(e, id, 1) == JBOX_OK);
+        REQUIRE(jbox_engine_set_route_mute(e, id, 0) == JBOX_OK);
+    }
+
+    SECTION("channel_index past the mapping size is rejected") {
+        REQUIRE(jbox_engine_set_route_channel_trim_db(e, id, 2, 0.0f)
+                == JBOX_ERR_INVALID_ARGUMENT);
+        REQUIRE(jbox_engine_set_route_channel_trim_db(e, id, 9, 0.0f)
+                == JBOX_ERR_INVALID_ARGUMENT);
+    }
+
+    SECTION("unknown route id is rejected on all three setters") {
+        const jbox_route_id_t bogus = 99999;
+        REQUIRE(jbox_engine_set_route_master_gain_db(e, bogus, 0.0f)
+                == JBOX_ERR_INVALID_ARGUMENT);
+        REQUIRE(jbox_engine_set_route_channel_trim_db(e, bogus, 0, 0.0f)
+                == JBOX_ERR_INVALID_ARGUMENT);
+        REQUIRE(jbox_engine_set_route_mute(e, bogus, 1)
+                == JBOX_ERR_INVALID_ARGUMENT);
+    }
+
+    SECTION("null engine is rejected") {
+        REQUIRE(jbox_engine_set_route_master_gain_db(nullptr, id, 0.0f)
+                == JBOX_ERR_INVALID_ARGUMENT);
+        REQUIRE(jbox_engine_set_route_channel_trim_db(nullptr, id, 0, 0.0f)
+                == JBOX_ERR_INVALID_ARGUMENT);
+        REQUIRE(jbox_engine_set_route_mute(nullptr, id, 0)
+                == JBOX_ERR_INVALID_ARGUMENT);
+    }
+
+    SECTION("out-of-range gain values are accepted (clamping is internal)") {
+        // Above the +12 dB ceiling — clamped silently, no error.
+        REQUIRE(jbox_engine_set_route_master_gain_db(e, id, +20.0f) == JBOX_OK);
+        REQUIRE(jbox_engine_set_route_channel_trim_db(e, id, 0, +50.0f) == JBOX_OK);
+        // -infinity collapses to silence; no error.
+        REQUIRE(jbox_engine_set_route_master_gain_db(
+                    e, id, -std::numeric_limits<float>::infinity()) == JBOX_OK);
+        // NaN — also collapsed silently to 0 (the !(x > -120) guard).
+        REQUIRE(jbox_engine_set_route_master_gain_db(
+                    e, id, std::numeric_limits<float>::quiet_NaN()) == JBOX_OK);
+    }
+
+    SECTION("mute is independent of route lifecycle") {
+        REQUIRE(jbox_engine_start_route(e, id) == JBOX_OK);
+
+        jbox_route_status_t status{};
+        REQUIRE(jbox_engine_poll_route_status(e, id, &status) == JBOX_OK);
+        REQUIRE(status.state == JBOX_ROUTE_STATE_RUNNING);
+
+        REQUIRE(jbox_engine_set_route_mute(e, id, 1) == JBOX_OK);
+        REQUIRE(jbox_engine_poll_route_status(e, id, &status) == JBOX_OK);
+        REQUIRE(status.state == JBOX_ROUTE_STATE_RUNNING);
+
+        REQUIRE(jbox_engine_set_route_mute(e, id, 0) == JBOX_OK);
+        REQUIRE(jbox_engine_poll_route_status(e, id, &status) == JBOX_OK);
+        REQUIRE(status.state == JBOX_ROUTE_STATE_RUNNING);
+
+        REQUIRE(jbox_engine_stop_route(e, id) == JBOX_OK);
+    }
+
+    REQUIRE(jbox_engine_abi_version() == 14u);
 
     jbox_engine_destroy(e);
 }

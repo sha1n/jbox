@@ -95,6 +95,18 @@ jbox::control::RouteManager::RouteConfig convertRouteConfig(
     const std::uint32_t raw_mode = cfg.latency_mode;
     out.latency_mode  = raw_mode <= 2 ? static_cast<std::uint8_t>(raw_mode) : 0;
     out.buffer_frames = cfg.buffer_frames;
+    // ABI v14: per-route VCA gain. master_gain_db = 0 (zero-init) → unity.
+    // muted is an int on the C side (0/1) so we collapse to bool here.
+    // channel_trims_db is optional; an empty vector means "all 0 dB" and
+    // RouteManager::addRoute accepts that. When provided, its size must
+    // match mapping size (validated downstream in addRoute).
+    out.master_gain_db = cfg.master_gain_db;
+    out.muted          = (cfg.muted != 0);
+    if (cfg.channel_trims_db != nullptr && cfg.channel_trims_count > 0) {
+        out.channel_trims_db.assign(
+            cfg.channel_trims_db,
+            cfg.channel_trims_db + cfg.channel_trims_count);
+    }
     out.mapping.reserve(cfg.mapping_count);
     for (std::size_t i = 0; i < cfg.mapping_count; ++i) {
         out.mapping.push_back({
@@ -443,6 +455,54 @@ jbox_resampler_quality_t jbox_engine_resampler_quality(
     case jbox::rt::ResamplerQuality::Mastering:
     default:
         return JBOX_RESAMPLER_QUALITY_MASTERING;
+    }
+}
+
+// ABI v14 — per-route runtime gain. All three are thin wrappers over
+// Engine which forwards to RouteManager. Clamping policy lives in
+// RouteManager (single source of truth dbToAmpClamped). Returns
+// JBOX_ERR_INVALID_ARGUMENT for null engine, unknown route id, or
+// (channel setter) channel_index past the mapping size.
+jbox_error_code_t jbox_engine_set_route_master_gain_db(
+    jbox_engine_t*  engine,
+    jbox_route_id_t route_id,
+    float           db) {
+    if (engine == nullptr || engine->impl == nullptr) {
+        return JBOX_ERR_INVALID_ARGUMENT;
+    }
+    try {
+        return engine->impl->setRouteMasterGainDb(route_id, db);
+    } catch (...) {
+        return JBOX_ERR_INTERNAL;
+    }
+}
+
+jbox_error_code_t jbox_engine_set_route_channel_trim_db(
+    jbox_engine_t*  engine,
+    jbox_route_id_t route_id,
+    uint32_t        channel_index,
+    float           db) {
+    if (engine == nullptr || engine->impl == nullptr) {
+        return JBOX_ERR_INVALID_ARGUMENT;
+    }
+    try {
+        return engine->impl->setRouteChannelTrimDb(route_id, channel_index, db);
+    } catch (...) {
+        return JBOX_ERR_INTERNAL;
+    }
+}
+
+jbox_error_code_t jbox_engine_set_route_mute(
+    jbox_engine_t*  engine,
+    jbox_route_id_t route_id,
+    int             muted) {
+    if (engine == nullptr || engine->impl == nullptr) {
+        return JBOX_ERR_INVALID_ARGUMENT;
+    }
+    try {
+        return engine->impl->setRouteMute(route_id, muted != 0);
+    } catch (...) {
+        return JBOX_ERR_INTERNAL;
     }
 }
 

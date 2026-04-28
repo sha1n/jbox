@@ -374,6 +374,13 @@ public final class Engine {
             try destUID.withCString { dstPtr in
                 try name.withCString { namePtr in
                     try cEdges.withUnsafeBufferPointer { edgesPtr in
+                        // ABI v14: jbox_route_config_t gained four
+                        // per-route gain fields. Task 9 will replace
+                        // these literals with values pulled off the
+                        // Swift Route model; for now we pass the
+                        // zero-init defaults (= unity, no trims, not
+                        // muted) so the auto-generated memberwise
+                        // init compiles.
                         var cfg = jbox_route_config_t(
                             source_uid: srcPtr,
                             dest_uid: dstPtr,
@@ -381,7 +388,11 @@ public final class Engine {
                             mapping_count: cEdges.count,
                             name: name.isEmpty ? nil : namePtr,
                             latency_mode: latencyMode.rawValue,
-                            buffer_frames: bufferFrames
+                            buffer_frames: bufferFrames,
+                            master_gain_db: 0,
+                            channel_trims_db: nil,
+                            channel_trims_count: 0,
+                            muted: 0
                         )
                         var err = jbox_error_t(code: JBOX_OK, message: nil)
                         let id = jbox_engine_add_route(

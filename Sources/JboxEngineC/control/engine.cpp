@@ -136,6 +136,20 @@ jbox_error_code_t Engine::stopRoute(jbox_route_id_t id) {
     return rm_.stopRoute(id);
 }
 
+jbox_error_code_t Engine::setRouteMasterGainDb(jbox_route_id_t id, float db) {
+    return rm_.setRouteMasterGainDb(id, db);
+}
+
+jbox_error_code_t Engine::setRouteChannelTrimDb(jbox_route_id_t id,
+                                                 std::uint32_t channel_index,
+                                                 float db) {
+    return rm_.setRouteChannelTrimDb(id, channel_index, db);
+}
+
+jbox_error_code_t Engine::setRouteMute(jbox_route_id_t id, bool muted) {
+    return rm_.setRouteMute(id, muted);
+}
+
 jbox_error_code_t Engine::pollStatus(jbox_route_id_t id,
                                      jbox_route_status_t* out) const {
     return rm_.pollStatus(id, out);

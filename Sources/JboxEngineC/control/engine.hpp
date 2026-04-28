@@ -74,6 +74,17 @@ public:
     jbox_error_code_t renameRoute(jbox_route_id_t id, const std::string& new_name);
     jbox_error_code_t startRoute(jbox_route_id_t id);
     jbox_error_code_t stopRoute(jbox_route_id_t id);
+
+    // ABI v14 — per-route runtime gain. All three forward to
+    // RouteManager which converts dB → clamped linear amplitude on
+    // the control thread and atomically stores into the per-route
+    // target. The RT path reads the targets once per IOProc block
+    // and ramps via GainSmoother.
+    jbox_error_code_t setRouteMasterGainDb(jbox_route_id_t id, float db);
+    jbox_error_code_t setRouteChannelTrimDb(jbox_route_id_t id,
+                                             std::uint32_t channel_index,
+                                             float db);
+    jbox_error_code_t setRouteMute(jbox_route_id_t id, bool muted);
     jbox_error_code_t pollStatus(jbox_route_id_t id,
                                  jbox_route_status_t* out) const;
     jbox_error_code_t pollLatencyComponents(

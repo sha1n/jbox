@@ -254,6 +254,19 @@ public:
     // Transition to STOPPED from any other state.
     jbox_error_code_t stopRoute(jbox_route_id_t id);
 
+    // ABI v14 — per-route runtime gain. Each setter clamps `db` into
+    // [-inf, +12] (NaN / -inf collapse to silence) and atomically
+    // updates the per-route target. The RT path picks the new value
+    // up on its next block and ramps via GainSmoother. Returns
+    // JBOX_ERR_INVALID_ARGUMENT for an unknown id, or for a
+    // channel_index >= the route's mapping size on the per-channel
+    // setter. Mute is independent of fader state.
+    jbox_error_code_t setRouteMasterGainDb(jbox_route_id_t id, float db);
+    jbox_error_code_t setRouteChannelTrimDb(jbox_route_id_t id,
+                                             std::uint32_t channel_index,
+                                             float db);
+    jbox_error_code_t setRouteMute(jbox_route_id_t id, bool muted);
+
     // Fill in the status snapshot. Thread-safe insofar as counters
     // are atomics; state is mutated only on the control thread.
     jbox_error_code_t pollStatus(jbox_route_id_t id, jbox_route_status_t* out) const;
