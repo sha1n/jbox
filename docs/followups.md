@@ -25,8 +25,11 @@ the questions and the pitfalls explicitly.
 
 ## F1 — Production HAL property listener registration in `CoreAudioBackend`
 
-**Status:** ⏳ Pending. Hardware-gated; lands as a focused commit
-after manual testing on a real device topology.
+**Status:** 🚧 Engine landed (2026-04-28); awaiting manual hardware
+acceptance per § Acceptance below. The HAL listener wiring + pure
+translator helper + reconciliation path all ship in this commit;
+the simulator path remains the CI-runnable contract test, and the
+real-hardware acceptance pass is the user's gate.
 
 ### Problem
 
@@ -34,100 +37,156 @@ after manual testing on a real device topology.
 ChangeWatcher` + `RouteManager::handleDeviceChanges` + the 10 Hz
 consumer thread on `Engine`) and the simulator path that drives it
 deterministically in CI. The production `CoreAudioBackend::set
-DeviceChangeListener` is currently a stub: it stores the callback
-pointer but never fires it. Until this is wired, the entire 7.6.4
-recovery path is dead in production — devices that come and go
-trigger no events; routes stuck in WAITING never auto-recover.
+DeviceChangeListener` was previously a stub: it stored the callback
+pointer but never fired it. Until F1 lands the wiring, the entire
+7.6.4 recovery path is dead in production — devices that come and
+go trigger no events; routes stuck in WAITING never auto-recover.
 
-### What to do
+The **engine half of F1 has now landed** (this commit): the three
+HAL property listeners are installed against the system object +
+each enumerated device + each aggregate; their callbacks translate
+into `DeviceChangeEvent`s via a pure helper
+(`core_audio_hal_translation.hpp`); enumerate() reconciles the
+per-device listener set on every refresh. What remains is the
+**manual hardware acceptance pass** below — CI cannot exercise real
+hot-plug + sample-rate cascades.
 
-In `CoreAudioBackend::setDeviceChangeListener`, install three
-HAL property listeners and translate their callbacks into
-`DeviceChangeEvent` invocations on the stored callback:
+### What was done (engine half)
+
+Lands in `core_audio_backend.{hpp,cpp}` +
+`core_audio_hal_translation.{hpp,cpp}` (new). Three HAL property
+listeners install via `AudioObjectAddPropertyListener` (function-
+pointer variant — see Research below for why-not-block) and
+translate their callbacks into `DeviceChangeEvent` invocations:
 
 - `kAudioHardwarePropertyDevices` on `kAudioObjectSystemObject` →
-  emit `kDeviceListChanged` with empty `uid` (the change isn't
-  scoped to one device — it's an enumeration shift).
+  emits `kDeviceListChanged` with empty `uid`.
 - `kAudioDevicePropertyDeviceIsAlive` per enumerated device →
-  emit `kDeviceIsNotAlive` with the affected device's UID when
-  the new value reads as 0.
+  reads back the current value and emits `kDeviceIsNotAlive` with
+  the device's UID when it reads as 0.
 - `kAudioAggregateDevicePropertyActiveSubDeviceList` per
-  aggregate device → emit `kAggregateMembersChanged` with the
+  aggregate device → emits `kAggregateMembersChanged` with the
   aggregate's UID.
 
-Re-installation on `kAudioHardwarePropertyDevices` events: when
-new devices appear we need to install per-device + per-aggregate
-listeners on them too. The natural shape is to re-walk
-`enumerate()` after each `kAudioHardwarePropertyDevices` event
-and reconcile the listener set.
+`enumerate()` reconciles the per-device listener set on every
+call: it publishes a fresh `id_to_uid_` map under the lock,
+releases the lock, then diff-installs listeners (remove for
+AudioObjectIDs that disappeared, add for AudioObjectIDs that
+arrived). The diff is naturally idempotent — repeated
+`enumerate()` calls on a stable system are a no-op for listener
+state. `~CoreAudioBackend()` clears the listener callback under
+the lock and then removes every installed listener.
 
-Teardown: `AudioObjectRemovePropertyListener` for every installed
-listener in `~CoreAudioBackend()` and on `setDeviceChangeListener
-(nullptr, nullptr)`.
+Translation lives in `core_audio_hal_translation.hpp` as a pure
+helper, covered by 6 Catch2 cases under
+`[core_audio][hal_translation]` (every selector branch — including
+the IsAlive=1 no-event case, the empty-uid IsAlive=0 case, and
+unrelated-selector hardening). 4 additional integration cases
+under `[core_audio][hal_listener_lifecycle]` exercise the
+register / re-register / enumerate-with-listener / destructor
+sequence on the real HAL — these catch typos and argument-shape
+bugs in the Apple API calls but cannot fire callbacks (CI has no
+hot-plug events).
 
-### Research needed
+### Research outcomes (and the still-open questions)
 
-1. **Callback thread.** Does `AudioObjectAddPropertyListener`
-   invoke its callback on a dedicated HAL thread, on the caller's
-   thread, or on a system dispatch queue? The answer determines
-   whether `DeviceChangeWatcher`'s mutex is contended, whether we
-   need to repost to a known queue, and whether the simulator's
-   synchronous-listener-on-test-thread model is a faithful enough
-   approximation.
+1. **Callback thread.** `AudioObjectAddPropertyListener` (function-
+   pointer variant) fires its callback on a HAL-internal thread.
+   Apple has historically used multiple threads in this pool for
+   different objects, so two callbacks for different listeners can
+   run concurrently. The implementation acquires
+   `callback_state_mutex_` in *shared* mode briefly to read
+   `device_change_cb_` + `id_to_uid_`, then releases before doing
+   any per-event work (including the `kAudioDevicePropertyDeviceIs
+   Alive` readback, which can take arbitrary time). **Decision:**
+   function-pointer variant chosen over the block variant — the
+   shared-mutex pattern gives us control over the read-side without
+   pulling in a `dispatch_queue_t` and the surrounding lifetime
+   plumbing. The shipped code is correct under any HAL-thread
+   topology; the trade-off is "sparse contention on a
+   `std::shared_mutex`" over "one extra dispatch queue we own."
 
-2. **Listener queue control.** Apple supports
-   `AudioObjectAddPropertyListenerBlock` which takes a
-   `dispatch_queue_t`. If the function-pointer variant gives no
-   thread control, the block variant probably should be used to
-   serialise on a chosen queue (perhaps a dedicated serial queue
-   owned by `CoreAudioBackend`).
+2. **Listener queue control.** Skipped — see (1). The block API +
+   dispatch queue would have given a known-thread context; the
+   shared-mutex pattern achieves the same correctness with less
+   machinery. If the trace from F3's investigation shows actual
+   contention, revisit.
 
-3. **`kAudioDevicePropertyDeviceIsAlive` semantics.** Does it fire
-   for both transitions (alive → not-alive *and* the reverse)?
-   The 7.6.4 reaction layer cares about both — `kDeviceIsNotAlive`
-   on transition-to-zero, `kDeviceListChanged` on transition-back.
-   Verify and document.
+3. **`kAudioDevicePropertyDeviceIsAlive` semantics.** Open. The
+   shipped code reads `IsAlive` back inside the callback and only
+   emits `kDeviceIsNotAlive` when the value is 0 — so spurious
+   "alive→alive" callbacks are a no-op. The reverse edge is picked
+   up by the `kAudioHardwarePropertyDevices` listener (a device
+   coming back is a list-changed event). **Manual acceptance test
+   #1 below pins this end-to-end.**
 
 4. **Aggregate sub-device list mutations during sample-rate
-   cascades.** Apple's docs are vague on whether
-   `kAudioAggregateDevicePropertyActiveSubDeviceList` fires for
-   transient list changes during a sample-rate cascade. If it
-   does, we need the F3 debounce (below) before this is shippable.
+   cascades.** Open. The reaction layer is idempotent (handle
+   DeviceChanges collapses N kDeviceListChanged into one
+   `dm_.refresh()` per drain) — so even a noisy cascade is bounded
+   to one refresh per 10 Hz consumer-thread tick. **Manual
+   acceptance test #3 below confirms ≤2 reactions per cascade; if
+   it shows thrash, F3 becomes blocking, not optional.**
 
-### Pitfalls
+### Pitfalls (and how the shipped code handles them)
 
-- **HAL callback re-entrance.** If a property listener callback
-  triggers further property reads (e.g., the listener calls
-  `enumerate()` which calls `AudioObjectGetPropertyData`), Apple
-  may serialise differently than expected. Avoid re-entrance —
-  the watcher's `onEvent` should just store the event and return.
+- **HAL callback re-entrance.** Resolved. The callback path
+  (`onHalPropertyEvent`) only reads cross-thread state under the
+  shared lock and emits to the watcher's stored callback — no
+  call back into `enumerate()` and no further HAL property
+  registration. Re-entrance from inside the listener block can't
+  happen. The `IsAlive` readback is a single
+  `AudioObjectGetPropertyData` call against the firing object; not
+  re-entrant.
 
-- **Race against `~Engine`.** Engine destruction's order is:
-  stop sampler thread → stop hot-plug thread → clear
-  `power_watcher_`'s sleep handler → drainer stop → member
-  destruction (which destroys `watcher_` after `rm_`). HAL
-  callbacks could fire between the hot-plug thread stopping and
-  the watcher being destroyed. The watcher's destructor unregisters
-  its callback, but if HAL fires a callback that's already
-  in flight on another thread, the watcher's mutex must protect
-  against use-after-free. Verify the mutex acquire order; consider
-  a "shutting down" flag the listener checks before touching the
-  queue.
+- **Race against `~CoreAudioBackend()` (and indirectly `~Engine`).**
+  Resolved by the no-lock-during-Apple-calls pattern combined with
+  Apple's documented "Remove blocks until in-flight callbacks
+  complete" semantics. Destructor sequence: (1) clear
+  `device_change_cb_` under exclusive lock so any callback that
+  *just* acquired the shared lock observes a null cb and bails;
+  (2) call `removeAllListeners()` outside the lock — Apple Remove
+  blocks on any in-flight callback that started before step (1),
+  but those callbacks are guaranteed to release the shared lock
+  before completing (the shared section is short and contains no
+  Apple calls), so Remove returns; (3) destroy the rest. Engine's
+  destruction order (sampler stop → hot-plug stop → power watcher
+  cleanup → drainer stop → member destruction) is unchanged; F1
+  added no new Engine-level lifetimes.
+
+- **Why no shutdown flag.** F1's research suggested a "shutting
+  down" flag the listener checks. Skipped — clearing
+  `device_change_cb_` under the shared-mutex contract achieves the
+  same correctness and the destructor's `removeAllListeners()`
+  call already blocks on any in-flight callback. The flag would
+  duplicate one or both of those mechanisms.
+
+- **Deadlock between Apple Remove and the callback path.**
+  Resolved by the rule: the control thread NEVER holds
+  `callback_state_mutex_` while calling Apple Add/Remove. Apple's
+  Remove blocks on in-flight callbacks; in-flight callbacks
+  acquire the shared lock briefly. If we held the exclusive lock
+  during Remove, a callback firing on another HAL thread would
+  block on the shared lock; Remove would block on the callback —
+  hung. Search for "callback_state_mutex_" in
+  `core_audio_backend.{hpp,cpp}` for the contract notes.
 
 - **Listener registration cost.** Per-device listeners scale with
-  device count. On a system with 30+ enumerated devices (Audio
-  MIDI Setup users with dozens of aggregates / virtual devices)
-  this is 30+ kAudioDevicePropertyDeviceIsAlive listeners. Should
-  be fine; flag if traces show otherwise.
+  device count. On a 30-device system, `setDeviceChangeListener`
+  fires 30 IsAlive registrations (and N more on aggregates). Each
+  is a single Apple call. The diff-style reconcile in
+  `enumerate()` only adds/removes for the actual delta, so
+  steady-state UI device-list refreshes are no-ops. Flag if traces
+  show this is too slow.
 
 - **The `uid` empty / non-empty contract** in `DeviceChangeEvent`
-  — `kDeviceListChanged` may have empty uid (system-wide event)
-  or non-empty (specific device went away). The simulator's
-  `simulateDeviceRemoval` fires kDeviceListChanged with the
-  removed UID; production may fire it with empty uid. The
-  `RouteManager::handleDeviceChanges` reaction handles both —
-  `kDeviceListChanged` triggers a `dm_.refresh()` + retry-WAITING
-  pass regardless of `uid`. Confirm production semantics match.
+  — Production fires `kDeviceListChanged` with empty `uid` (the
+  system-object listener has no device subject); the simulator
+  fires it with the device's UID. `RouteManager::handle
+  DeviceChanges` accepts both: `kDeviceListChanged` triggers a
+  `dm_.refresh()` + retry-WAITING pass regardless of `uid`. The
+  contract is "uid is informative, never load-bearing for
+  list-changed."
 
 ### Acceptance / verification
 
@@ -158,10 +217,14 @@ Manual hardware tests, since CI can't exercise this path:
   `kAudioHardwarePropertyDevices`,
   `kAudioDevicePropertyDeviceIsAlive`,
   `kAudioAggregateDevicePropertyActiveSubDeviceList`.
-- 7.6.4 deviation entry in `plan.md` for the design rationale and
-  the deferred-bridge note.
-- `Sources/JboxEngineC/control/core_audio_backend.cpp` — the stub
-  that needs filling in.
+- 7.6.4 deviation entry in `plan.md` and the new F1 deviation in
+  the same section for the design choices.
+- `Sources/JboxEngineC/control/core_audio_backend.{hpp,cpp}` —
+  shipped implementation; search "F1" or "callback_state_mutex_"
+  for the contract notes.
+- `Sources/JboxEngineC/control/core_audio_hal_translation.{hpp,cpp}`
+  — pure translator + its `[core_audio][hal_translation]` test
+  group.
 
 ---
 
@@ -426,3 +489,109 @@ better.
 - Mental model for "leading vs trailing debounce":
   https://css-tricks.com/debouncing-throttling-explained-examples/
   (or any equivalent reference).
+
+---
+
+## F4 — Intermittent SIGSEGV in `[multi_route][stress]`
+
+**Status:** ⏳ Pending. Pre-existing flake (observed on baseline
+master before F1 landed). Captured here to prevent it from being
+re-discovered every time `make verify` flakes red.
+
+### Problem
+
+`Tests/JboxEngineCxxTests/multi_route_stress_test.cpp` defines a
+case at line 121 ("Multi-route stress: rapid route start/stop while
+RT is dispatching") that segfaults intermittently — observed at
+roughly 1-in-5 frequency in isolation on baseline master, often as
+the first run after a fresh build. The suite as a whole passes on
+re-run; the segfault is reproducible only by running the case
+multiple times. The crash hits inside the case body — the
+`stop.store(true)` / `rt_thread.join()` sequence around line ~150
+or the destructor sequence at end-of-scope — and Catch2 reports
+"SIGSEGV - Segmentation violation signal" with no stack frame.
+
+The test uses `SimulatedBackend` only; F1 (CoreAudioBackend HAL
+listener wiring) does not affect this code path. Stash-and-rerun
+on baseline master with F1 absent reproduces the same crash at the
+same case.
+
+### What to do
+
+Diagnose. Likely candidates:
+
+1. The RT thread's `deliverBuffer("src")` / `deliverBuffer("dst")`
+   loop races with the main thread's rapid `attachInput` /
+   `detachInput` cycles. The mux's RCU-style active-route swap
+   should make this safe (the comment at line 122-124 says so),
+   but the segfault suggests a hole.
+
+2. The anchor-route teardown order at scope exit may run while
+   the RT thread is still mid-tick; the test does
+   `rt_thread.join()` early but the route's internal teardown
+   path destroys the IOProc record under the RouteManager
+   destructor. Verify the order is safe under contention.
+
+3. Could be a use-after-free in the simulated backend's
+   `slot.input_callback` / `slot.output_callback` storage. The
+   stress phase's rapid route mutations could leave a stale
+   pointer in the callback slot when the RT thread still holds a
+   `BackendDeviceInfo*` from a slot that was just reset.
+
+Suggested approach: run the case in isolation under TSan (`swift
+run --sanitize=thread JboxEngineCxxTests '[multi_route][stress]'`)
+in a loop; collect the first sanitizer hit, work backwards from
+the racing pair.
+
+### Research needed
+
+1. **Is the segfault TSan-detectable?** If yes, TSan output names
+   the racing pair and the diagnosis is straightforward. If no,
+   the bug is single-threaded (e.g., a destruction ordering
+   issue) and TSan won't help.
+
+2. **Does the segfault reproduce in `--sanitize=address`?** If
+   yes, ASan tells us exactly which read/write violates which
+   allocation. If no, the bug is concurrent (TSan should catch
+   it).
+
+3. **Was this introduced with sub-phase 7.6.3's bool-return
+   contract on `closeCallback`?** That commit changed the
+   teardown path to retain the IOProc record on failure;
+   under stress, the test could be hitting an unintended
+   "preserved-but-unsubscribed" state. Walk the commit history
+   on `Tests/JboxEngineCxxTests/multi_route_stress_test.cpp` and
+   `Sources/JboxEngineC/control/route_manager.cpp` from the d418562
+   stress-test introduction forward.
+
+### Pitfalls
+
+- **Quarantining instead of fixing.** Tempting to mark the case
+  `[!mayfail]` or skip it. Don't — the stress case exists
+  because the engine has had real concurrency bugs there before;
+  silencing it loses the regression net.
+
+- **Adding sleeps to "stabilise" the test.** Anti-pattern. The
+  fix should make the engine code robust under the contention
+  the test creates, not slow the test down so the contention
+  doesn't manifest.
+
+### Acceptance / verification
+
+- Cause identified and documented (TSan hit, ASan hit, or root-cause
+  analysis from inspection).
+- Engine code fix lands with a regression test that fails
+  deterministically against the broken code.
+- 100 consecutive runs of `swift run JboxEngineCxxTests
+  '[multi_route][stress]'` pass.
+- `make verify` no longer flakes on this case.
+
+### References
+
+- The test: `Tests/JboxEngineCxxTests/multi_route_stress_test.cpp`
+  line 121 ("Multi-route stress: rapid route start/stop while RT
+  is dispatching"), introduced by commit `d418562` (engine phase 5
+  #4: seq-based RCU quiescence + concurrent stress tests).
+- Observed on baseline `master` (commit `ae6cf17`) with no F1
+  changes applied: stash-and-rerun reproduced the crash at run 4
+  of 5.

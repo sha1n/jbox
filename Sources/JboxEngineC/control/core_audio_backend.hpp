@@ -30,8 +30,10 @@
 
 #include <cstdint>
 #include <memory>
+#include <shared_mutex>
 #include <string>
 #include <unordered_map>
+#include <vector>
 
 namespace jbox::control {
 
@@ -86,12 +88,69 @@ private:
 
     IOProcId next_id_ = 1;
 
-    // Phase 7.6.4: stored device-change listener. Real HAL property
-    // listener wiring lands in a follow-up commit after manual hardware
-    // testing — for now this just stores the callback so the contract
-    // compiles, and CoreAudioBackend never fires a topology event.
-    DeviceChangeListener device_change_cb_      = nullptr;
-    void*                device_change_user_    = nullptr;
+    // Phase 7.6.4 / F1: HAL property-listener wiring.
+    //
+    // Two state buckets, with different ownership rules:
+    //
+    //   1. Cross-thread state (callback_state_mutex_):
+    //        device_change_cb_, device_change_user_, id_to_uid_
+    //      Read by the HAL callback under shared lock; written by the
+    //      control thread under exclusive lock. The control thread
+    //      acquires the lock only to read or publish state — never
+    //      while calling into Apple.
+    //
+    //   2. Single-control-thread state (no lock):
+    //        system_listener_installed_, per_device_listeners_
+    //      Mutated by `setDeviceChangeListener`, `enumerate`, and
+    //      `~CoreAudioBackend`. The HAL callback never touches these,
+    //      so the only safety obligation is the engine's documented
+    //      single-control-thread model (`engine.hpp:8`). That model
+    //      already covers `device_ids_`, `started_`, `ioprocs_` —
+    //      F1's two new fields ride on the same assumption.
+    //
+    // The deadlock to avoid: Apple's AudioObjectRemovePropertyListener
+    // blocks until in-flight callbacks for the listener being removed
+    // complete. The HAL callback acquires the shared lock. If we held
+    // the exclusive lock during Remove, a callback firing on another
+    // object would block on the shared lock; Remove would block on the
+    // first callback; the first callback would block on the shared
+    // lock — hung. The rule: NEVER hold callback_state_mutex_ during
+    // any Apple AudioObject Add/Remove call.
+    struct HalListenerEntry {
+        AudioObjectID              object;
+        AudioObjectPropertyAddress address;
+    };
+
+    mutable std::shared_mutex callback_state_mutex_;
+    DeviceChangeListener device_change_cb_   = nullptr;
+    void*                device_change_user_ = nullptr;
+    std::unordered_map<AudioObjectID, std::string> id_to_uid_;
+
+    bool                          system_listener_installed_ = false;
+    std::vector<HalListenerEntry> per_device_listeners_;
+
+    // Static thunk for AudioObjectAddPropertyListener. Apple invokes
+    // it with `this` as `inClientData`. Forwards to onHalPropertyEvent.
+    static OSStatus halPropertyListenerCallback(
+        AudioObjectID inObjectID,
+        UInt32 inNumberAddresses,
+        const AudioObjectPropertyAddress* inAddresses,
+        void* inClientData);
+
+    void onHalPropertyEvent(
+        AudioObjectID object,
+        UInt32 num_addresses,
+        const AudioObjectPropertyAddress* addresses);
+
+    // Control-thread-only helpers. None of these hold
+    // callback_state_mutex_ while calling into Apple.
+    void installSystemListener();
+    void removeAllListeners();
+    void reconcilePerDeviceListeners();
+
+    // True if the device with the given AudioDeviceID is an aggregate
+    // (has a non-empty active sub-device list).
+    static bool isAggregateDevice(AudioDeviceID id);
 };
 
 }  // namespace jbox::control

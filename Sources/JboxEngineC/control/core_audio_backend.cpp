@@ -2,12 +2,14 @@
 
 #include "core_audio_backend.hpp"
 #include "audio_buffer_interleave.hpp"
+#include "core_audio_hal_translation.hpp"
 
 #include <CoreAudio/CoreAudio.h>
 #include <os/log.h>
 
 #include <cstring>
 #include <unistd.h>
+#include <utility>
 #include <vector>
 
 namespace jbox::control {
@@ -292,6 +294,20 @@ OSStatus ioProcTrampoline(AudioObjectID /*inDevice*/,
 CoreAudioBackend::CoreAudioBackend() = default;
 
 CoreAudioBackend::~CoreAudioBackend() {
+    // F1: tear down HAL property listeners FIRST. Apple's
+    // AudioObjectRemovePropertyListener blocks until any in-flight
+    // callback completes, so by the time these calls return, no
+    // HAL thread can be inside onHalPropertyEvent — safe to destroy
+    // the rest of the backend afterward. Clear the cross-thread
+    // state under lock so any callback in flight on its way to
+    // taking the shared lock observes a null cb and bails.
+    {
+        std::unique_lock<std::shared_mutex> lock(callback_state_mutex_);
+        device_change_cb_   = nullptr;
+        device_change_user_ = nullptr;
+    }
+    removeAllListeners();
+
     // Best-effort cleanup: stop any running devices and tear down
     // IOProcs. Any failures here are logged implicitly via macOS
     // kernel logs; nothing we can propagate from a destructor.
@@ -374,6 +390,20 @@ std::vector<BackendDeviceInfo> CoreAudioBackend::enumerate() {
         device_ids_[info.uid] = id;
         result.push_back(std::move(info));
     }
+
+    // F1: publish the AudioObjectID → UID reverse map under the
+    // exclusive lock (so HAL callbacks see consistent state), then
+    // reconcile per-device listeners outside the lock. reconcile
+    // bails as a no-op when no listener is registered.
+    {
+        std::unique_lock<std::shared_mutex> lock(callback_state_mutex_);
+        id_to_uid_.clear();
+        id_to_uid_.reserve(device_ids_.size());
+        for (const auto& [uid, id] : device_ids_) {
+            id_to_uid_[id] = uid;
+        }
+    }
+    reconcilePerDeviceListeners();
 
     return result;
 }
@@ -566,14 +596,223 @@ IOProcId CoreAudioBackend::openDuplexCallback(const std::string& uid,
 
 void CoreAudioBackend::setDeviceChangeListener(DeviceChangeListener cb,
                                                void* user_data) {
-    // 7.6.4 prep: store the callback so the contract is wired end to
-    // end. Real HAL property-listener registration (kAudioHardware
-    // PropertyDevices, kAudioDevicePropertyDeviceIsAlive, kAudio
-    // AggregateDevicePropertyActiveSubDeviceList) lands in a separate
-    // commit after manual hardware testing — for now this backend
-    // never fires a topology event.
-    device_change_cb_   = cb;
-    device_change_user_ = user_data;
+    // F1: install (or tear down) HAL property listeners.
+    //
+    //   1. Tear down whatever's currently installed (control-thread-
+    //      only state — no lock needed for the bookkeeping; the Apple
+    //      Remove calls themselves can run unlocked).
+    //   2. Publish the new cb/ud under exclusive lock briefly.
+    //   3. If cb is non-null, install fresh listeners. Apple Add
+    //      calls run unlocked; the per-device set is rebuilt from
+    //      whatever id_to_uid_ currently holds (typically empty on
+    //      first registration, populated after the first
+    //      enumerate()).
+    removeAllListeners();
+    {
+        std::unique_lock<std::shared_mutex> lock(callback_state_mutex_);
+        device_change_cb_   = cb;
+        device_change_user_ = user_data;
+    }
+    if (cb != nullptr) {
+        installSystemListener();
+        reconcilePerDeviceListeners();
+    }
+}
+
+OSStatus CoreAudioBackend::halPropertyListenerCallback(
+    AudioObjectID inObjectID,
+    UInt32 inNumberAddresses,
+    const AudioObjectPropertyAddress* inAddresses,
+    void* inClientData) {
+    auto* self = static_cast<CoreAudioBackend*>(inClientData);
+    self->onHalPropertyEvent(inObjectID, inNumberAddresses, inAddresses);
+    return noErr;
+}
+
+void CoreAudioBackend::onHalPropertyEvent(
+    AudioObjectID object,
+    UInt32 num_addresses,
+    const AudioObjectPropertyAddress* addresses) {
+    // Snapshot the listener + reverse map under shared lock so the
+    // control thread can mutate state without contending. Then
+    // dispatch translation outside the lock — including the
+    // AudioObjectGetPropertyData read for IsAlive, which can take
+    // arbitrary time and must not block the control thread.
+    DeviceChangeListener cb;
+    void*                ud;
+    std::string          uid;
+    {
+        std::shared_lock<std::shared_mutex> lock(callback_state_mutex_);
+        cb = device_change_cb_;
+        ud = device_change_user_;
+        if (cb == nullptr) return;
+        if (object != kAudioObjectSystemObject) {
+            auto it = id_to_uid_.find(object);
+            if (it != id_to_uid_.end()) uid = it->second;
+        }
+    }
+
+    for (UInt32 i = 0; i < num_addresses; ++i) {
+        const AudioObjectPropertyAddress& addr = addresses[i];
+        // For IsAlive, read the current value to distinguish the
+        // alive→not-alive edge from the reverse.
+        UInt32 is_alive_readback = 1;
+        if (addr.mSelector == kAudioDevicePropertyDeviceIsAlive) {
+            UInt32 size = sizeof(is_alive_readback);
+            AudioObjectPropertyAddress query_addr = addr;
+            if (AudioObjectGetPropertyData(object, &query_addr, 0, nullptr,
+                                           &size, &is_alive_readback) != noErr) {
+                // Read failure → treat as "not alive" so we surface the
+                // event. The reaction layer is idempotent on the loss
+                // path, so a spurious kDeviceIsNotAlive on a still-alive
+                // device is corrected by the next list-changed pass.
+                is_alive_readback = 0;
+            }
+        }
+        const auto event = translateHalPropertyChange(
+            addr.mSelector, uid, is_alive_readback);
+        if (event.has_value()) {
+            cb(*event, ud);
+        }
+    }
+}
+
+void CoreAudioBackend::installSystemListener() {
+    // Control-thread only; no lock held.
+    if (system_listener_installed_) return;
+    AudioObjectPropertyAddress addr{
+        kAudioHardwarePropertyDevices,
+        kAudioObjectPropertyScopeGlobal,
+        kAudioObjectPropertyElementMain};
+    const OSStatus err = AudioObjectAddPropertyListener(
+        kAudioObjectSystemObject, &addr,
+        &CoreAudioBackend::halPropertyListenerCallback, this);
+    if (err == noErr) {
+        system_listener_installed_ = true;
+    } else {
+        os_log_error(backendLog(),
+                     "AddPropertyListener(system,Devices) failed: %d",
+                     static_cast<int>(err));
+    }
+}
+
+void CoreAudioBackend::removeAllListeners() {
+    // Control-thread only; no lock held. Apple Remove blocks on
+    // in-flight callbacks; not holding the mutex means the callback
+    // can release the shared lock before Remove returns.
+    for (const auto& entry : per_device_listeners_) {
+        (void)AudioObjectRemovePropertyListener(
+            entry.object, &entry.address,
+            &CoreAudioBackend::halPropertyListenerCallback, this);
+    }
+    per_device_listeners_.clear();
+    if (system_listener_installed_) {
+        AudioObjectPropertyAddress addr{
+            kAudioHardwarePropertyDevices,
+            kAudioObjectPropertyScopeGlobal,
+            kAudioObjectPropertyElementMain};
+        (void)AudioObjectRemovePropertyListener(
+            kAudioObjectSystemObject, &addr,
+            &CoreAudioBackend::halPropertyListenerCallback, this);
+        system_listener_installed_ = false;
+    }
+}
+
+void CoreAudioBackend::reconcilePerDeviceListeners() {
+    // Control-thread only; no lock held during Apple calls.
+    //
+    // 1. Snapshot the current device set under the shared lock.
+    // 2. Drop the lock.
+    // 3. Diff against per_device_listeners_ (control-thread-only state).
+    // 4. Call Apple Add/Remove with no lock held.
+    std::unordered_map<AudioObjectID, std::string> snapshot;
+    bool listener_active = false;
+    {
+        std::shared_lock<std::shared_mutex> lock(callback_state_mutex_);
+        listener_active = (device_change_cb_ != nullptr);
+        if (!listener_active) return;
+        snapshot = id_to_uid_;
+    }
+
+    // Pass 1: remove entries whose AudioObjectID is no longer
+    // enumerated.
+    std::vector<HalListenerEntry> kept;
+    kept.reserve(per_device_listeners_.size());
+    for (const auto& entry : per_device_listeners_) {
+        if (snapshot.find(entry.object) == snapshot.end()) {
+            (void)AudioObjectRemovePropertyListener(
+                entry.object, &entry.address,
+                &CoreAudioBackend::halPropertyListenerCallback, this);
+        } else {
+            kept.push_back(entry);
+        }
+    }
+    per_device_listeners_ = std::move(kept);
+
+    auto alreadyHas = [&](AudioObjectID obj,
+                          AudioObjectPropertySelector selector) {
+        for (const auto& e : per_device_listeners_) {
+            if (e.object == obj && e.address.mSelector == selector) return true;
+        }
+        return false;
+    };
+
+    // Pass 2: install IsAlive + (per-aggregate) ActiveSubDeviceList
+    // listeners on any device that does not yet carry them.
+    for (const auto& [id, uid] : snapshot) {
+        if (!alreadyHas(id, kAudioDevicePropertyDeviceIsAlive)) {
+            HalListenerEntry entry;
+            entry.object  = id;
+            entry.address = AudioObjectPropertyAddress{
+                kAudioDevicePropertyDeviceIsAlive,
+                kAudioObjectPropertyScopeGlobal,
+                kAudioObjectPropertyElementMain};
+            const OSStatus err = AudioObjectAddPropertyListener(
+                id, &entry.address,
+                &CoreAudioBackend::halPropertyListenerCallback, this);
+            if (err == noErr) {
+                per_device_listeners_.push_back(entry);
+            } else {
+                os_log_error(backendLog(),
+                             "AddPropertyListener(IsAlive, %{public}s) failed: %d",
+                             uid.c_str(), static_cast<int>(err));
+            }
+        }
+        if (isAggregateDevice(id) &&
+            !alreadyHas(id,
+                        kAudioAggregateDevicePropertyActiveSubDeviceList)) {
+            HalListenerEntry entry;
+            entry.object  = id;
+            entry.address = AudioObjectPropertyAddress{
+                kAudioAggregateDevicePropertyActiveSubDeviceList,
+                kAudioObjectPropertyScopeGlobal,
+                kAudioObjectPropertyElementMain};
+            const OSStatus err = AudioObjectAddPropertyListener(
+                id, &entry.address,
+                &CoreAudioBackend::halPropertyListenerCallback, this);
+            if (err == noErr) {
+                per_device_listeners_.push_back(entry);
+            } else {
+                os_log_error(backendLog(),
+                             "AddPropertyListener(SubDeviceList, %{public}s) failed: %d",
+                             uid.c_str(), static_cast<int>(err));
+            }
+        }
+    }
+}
+
+bool CoreAudioBackend::isAggregateDevice(AudioDeviceID id) {
+    AudioObjectPropertyAddress addr{
+        kAudioAggregateDevicePropertyActiveSubDeviceList,
+        kAudioObjectPropertyScopeGlobal,
+        kAudioObjectPropertyElementMain};
+    UInt32 size = 0;
+    if (AudioObjectGetPropertyDataSize(id, &addr, 0, nullptr, &size) != noErr) {
+        return false;
+    }
+    // Non-aggregate devices either return an error above or report a
+    // zero size. Aggregate devices report > 0 even when empty.
+    return size > 0;
 }
 
 bool CoreAudioBackend::closeCallback(IOProcId id) {
