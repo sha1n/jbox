@@ -8,6 +8,7 @@
 #include <catch_amalgamated.hpp>
 
 #include "device_backend.hpp"
+#include "device_change_watcher.hpp"
 #include "simulated_backend.hpp"
 
 #include <string>
@@ -15,6 +16,7 @@
 
 using jbox::control::BackendDeviceInfo;
 using jbox::control::DeviceChangeEvent;
+using jbox::control::DeviceChangeWatcher;
 using jbox::control::SimulatedBackend;
 using jbox::control::kBackendDirectionInput;
 
@@ -33,6 +35,48 @@ BackendDeviceInfo makeInputDevice(const std::string& uid,
 }
 
 }  // namespace
+
+TEST_CASE("DeviceChangeWatcher: drain on a fresh watcher returns empty",
+          "[device_change_watcher]") {
+    SimulatedBackend backend;
+    DeviceChangeWatcher watcher(backend);
+    REQUIRE(watcher.empty() == true);
+    REQUIRE(watcher.drain().empty());
+}
+
+TEST_CASE("DeviceChangeWatcher: posted events drain in arrival order",
+          "[device_change_watcher]") {
+    SimulatedBackend backend;
+    backend.addDevice(makeInputDevice("src"));
+    DeviceChangeWatcher watcher(backend);
+
+    backend.simulateDeviceRemoval("src");
+    // simulateDeviceRemoval fires kDeviceIsNotAlive then kDeviceListChanged.
+
+    const auto events = watcher.drain();
+    REQUIRE(events.size() == 2);
+    REQUIRE(events[0].kind == DeviceChangeEvent::kDeviceIsNotAlive);
+    REQUIRE(events[0].uid  == "src");
+    REQUIRE(events[1].kind == DeviceChangeEvent::kDeviceListChanged);
+    REQUIRE(events[1].uid  == "src");
+}
+
+TEST_CASE("DeviceChangeWatcher: drain consumes events; second drain is empty",
+          "[device_change_watcher]") {
+    SimulatedBackend backend;
+    backend.addDevice(makeInputDevice("a"));
+    backend.addDevice(makeInputDevice("b"));
+    DeviceChangeWatcher watcher(backend);
+
+    backend.simulateDeviceRemoval("a");
+    backend.simulateDeviceRemoval("b");
+
+    const auto first = watcher.drain();
+    REQUIRE(first.size() == 4);  // two removals × (IsNotAlive + ListChanged)
+
+    REQUIRE(watcher.empty() == true);
+    REQUIRE(watcher.drain().empty());
+}
 
 TEST_CASE("SimulatedBackend: simulateDeviceRemoval fires IsNotAlive then ListChanged",
           "[sim_backend][device_change]") {
