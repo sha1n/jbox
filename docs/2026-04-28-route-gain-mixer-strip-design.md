@@ -6,7 +6,7 @@
 | **Status** | Draft, awaiting user review |
 | **Scope** | Per-route master fader, per-channel trims, mute, mixer-strip UI, DAW-standard meter scale, driver-published channel names |
 | **Out of scope** | Needle-style VU meter (separate spec), VCA groups, true downmix / sum, pan |
-| **ABI impact** | New v12 (MINOR, additive) |
+| **ABI impact** | New v14 (MINOR, additive) |
 
 ---
 
@@ -175,7 +175,7 @@ The control thread converts dB → linear amplitude (`std::pow(10.0f, db / 20.0f
 
 ---
 
-## 6. ABI v12 (MINOR, additive)
+## 6. ABI v14 (MINOR, additive)
 
 ### 6.1 New `RouteConfig` fields
 
@@ -221,7 +221,7 @@ The current `jbox_route_status_t` doesn't need new fields; the Swift side will t
 
 ### 6.4 Header bump
 
-`JBOX_ENGINE_ABI_VERSION` → 12; banner comment in `jbox_engine.h` adds the v12 entry.
+`JBOX_ENGINE_ABI_VERSION` → 14; banner comment in `jbox_engine.h` adds the v12 / v13 / v14 history entries (the v12 / v13 error-code additions were committed without backfilling the comment block — fold them into the same diff so the history block stays current).
 
 ---
 
@@ -370,7 +370,7 @@ Manual: a long-running route with master moved through a slow sweep ±12 dB; ver
 |-------|----------|
 | `gain_smoother.hpp` + tests | 0.5 d |
 | RT path wiring in `route_manager.cpp` + tests | 0.5 d |
-| ABI v12 (header, setters, control plumbing) | 0.5 d |
+| ABI v14 (header, setters, control plumbing) | 0.5 d |
 | `FaderTaper` + tests | 0.25 d |
 | `Route` / `EngineStore` setters + persistence + tests | 0.5 d |
 | `FaderSlider`, `MasterFaderStrip`, `ChannelStripColumn` | 0.75 d |
