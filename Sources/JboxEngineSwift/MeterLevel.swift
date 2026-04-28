@@ -45,4 +45,20 @@ public enum MeterLevel {
         if dB >= nearDb  { return .near }
         return .normal
     }
+
+    /// Standard dBFS marks for the DAW-style meter scale (descending,
+    /// inclusive of 0 and `floorDb`). Used by the SwiftUI `DbScale`
+    /// view to draw gridlines + labels along the bar zone.
+    /// See docs/2026-04-28-route-gain-mixer-strip-design.md § 4.3.
+    public static let dawScaleMarks: [(dB: Float, label: String)] = [
+        (0,   "0"),
+        (-3,  "-3"),
+        (-6,  "-6"),
+        (-12, "-12"),
+        (-18, "-18"),
+        (-24, "-24"),
+        (-36, "-36"),
+        (-48, "-48"),
+        (-60, "-60"),
+    ]
 }

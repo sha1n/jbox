@@ -114,4 +114,30 @@ struct MeterLevelTests {
         #expect(MeterLevel.nearDb  == -6)
         #expect(MeterLevel.clipDb  == -3)
     }
+
+    // MARK: - DAW scale marks
+
+    @Test("dawScaleMarks lists the standard DAW dBFS marks in descending order")
+    func dawScaleMarks() {
+        let dbs = MeterLevel.dawScaleMarks.map { $0.dB }
+        #expect(dbs == [0, -3, -6, -12, -18, -24, -36, -48, -60])
+        // Strictly descending.
+        #expect(zip(dbs, dbs.dropFirst()).allSatisfy { $0 > $1 })
+    }
+
+    @Test("dawScaleMarks labels match their dB values")
+    func dawScaleMarkLabels() {
+        for mark in MeterLevel.dawScaleMarks {
+            // Labels are integer dB strings (e.g. "0", "-3", "-12").
+            #expect(mark.label == String(Int(mark.dB)))
+        }
+    }
+
+    @Test("dawScaleMarks all fall within the meter's renderable range")
+    func dawScaleMarksWithinFloor() {
+        for mark in MeterLevel.dawScaleMarks {
+            #expect(mark.dB <= 0)
+            #expect(mark.dB >= MeterLevel.floorDb)
+        }
+    }
 }
