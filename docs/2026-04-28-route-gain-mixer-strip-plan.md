@@ -270,6 +270,11 @@ EOF
 )"
 ```
 
+### Task 1 deviations
+
+- **Mute-decay assertion relaxed.** The plan's literal "mute target reaches < 1e-6 within 50 ms" is mathematically impossible for an ideal one-pole at τ = 10 ms (`exp(-5) ≈ 6.7e-3` is the floor). Replaced with `< 1e-2` (-40 dB, perceptually inaudible) at 50 ms plus a strict `< 1e-6` at 200 ms (≈ 20 τ, well below FP underflow). Same click-free property, sound math. Implemented in commit `cfc3a8e`. Spec § 5.2 should also be reworded during the Task 18 reconciliation.
+- **NaN / ±inf rejection added.** `step()` checks `std::isfinite(target)` and drops non-finite updates rather than letting them poison the recurrence. Defence-in-depth on top of the control-thread clamp; documented in the header.
+
 ---
 
 ## Task 2: `FaderTaper.swift` — pure dB↔position taper
