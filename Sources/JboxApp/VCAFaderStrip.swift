@@ -1,20 +1,26 @@
 import SwiftUI
 import JboxEngineSwift
 
-/// Master strip on the right edge of the mixer panel. Composes the
-/// master FaderSlider, its dB readout, and the MUTE toggle. Heavier
-/// border so it reads as a separate group from the per-channel strips.
+/// VCA strip on the right edge of the mixer panel. Composes the VCA
+/// FaderSlider, its dB readout, and the MUTE toggle. Heavier border so
+/// it reads as a separate group from the per-channel strips.
+///
+/// "VCA" not "Master" because this fader doesn't sum a bus — it
+/// uniformly scales every mapped channel of the route, the same control
+/// behavior as a console VCA group fader. (The spec / engine ABI still
+/// use the historical `master_gain_db` field name internally; the UI
+/// label and the widget name are the user-visible truth.)
 ///
 /// See docs/2026-04-28-route-gain-mixer-strip-design.md §§ 4.1, 4.5.
-struct MasterFaderStrip: View {
-    @Binding var masterDb: Float
+struct VCAFaderStrip: View {
+    @Binding var dB: Float
     @Binding var muted: Bool
 
     var body: some View {
         VStack(spacing: 4) {
             // Header band — same height as ChannelStripColumn's title so
             // the bar zones across the panel anchor at the same y.
-            Text("MASTER")
+            Text("VCA")
                 .font(.system(size: 10, weight: .bold))
                 .tracking(0.4)
                 .foregroundStyle(.primary)
@@ -25,8 +31,8 @@ struct MasterFaderStrip: View {
                 .foregroundStyle(.tertiary)
                 .frame(height: MeterPanelLayout.capBandHeight)
             // Bar zone — fader. Flex height; same fader width as trims.
-            FaderSlider(dB: $masterDb, style: .master)
-                .frame(width: 32)
+            FaderSlider(dB: $dB, style: .master)
+                .frame(width: 36)
                 .frame(maxHeight: .infinity)
             // −∞ cap band.
             Text("−∞")
@@ -34,7 +40,7 @@ struct MasterFaderStrip: View {
                 .foregroundStyle(.tertiary)
                 .frame(height: MeterPanelLayout.capBandHeight)
             // dB readout band — same height as the channel strips' readout.
-            Text(formattedDb(masterDb, muted: muted))
+            Text(formattedDb(dB, muted: muted))
                 .font(.system(size: 10, weight: .semibold).monospacedDigit())
                 .foregroundStyle(muted ? Color.red : Color.primary)
                 .frame(height: MeterPanelLayout.readoutBandHeight)
@@ -59,7 +65,7 @@ struct MasterFaderStrip: View {
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 6)
-        .frame(width: 84)
+        .frame(width: 88)
         .background(
             RoundedRectangle(cornerRadius: 5)
                 .fill(Color(red: 0.155, green: 0.155, blue: 0.17))
@@ -69,7 +75,7 @@ struct MasterFaderStrip: View {
                 .stroke(Color.secondary.opacity(0.42), lineWidth: 1)
         )
         .accessibilityElement(children: .contain)
-        .accessibilityLabel("Master strip")
+        .accessibilityLabel("VCA strip")
     }
 
     private func formattedDb(_ db: Float, muted: Bool) -> String {
@@ -80,19 +86,19 @@ struct MasterFaderStrip: View {
 }
 
 #if DEBUG
-#Preview("MasterFaderStrip — unmuted at -3 dB") {
+#Preview("VCAFaderStrip — unmuted at -3 dB") {
     PreviewUnmuted()
 }
 
-#Preview("MasterFaderStrip — muted") {
+#Preview("VCAFaderStrip — muted") {
     PreviewMuted()
 }
 
 private struct PreviewUnmuted: View {
-    @State private var master: Float = -3.0
+    @State private var vca: Float = -3.0
     @State private var muted: Bool = false
     var body: some View {
-        MasterFaderStrip(masterDb: $master, muted: $muted)
+        VCAFaderStrip(dB: $vca, muted: $muted)
             .frame(maxHeight: .infinity)
             .padding()
             .frame(width: 110, height: 320)
@@ -101,10 +107,10 @@ private struct PreviewUnmuted: View {
 }
 
 private struct PreviewMuted: View {
-    @State private var master: Float = 0.0
+    @State private var vca: Float = 0.0
     @State private var muted: Bool = true
     var body: some View {
-        MasterFaderStrip(masterDb: $master, muted: $muted)
+        VCAFaderStrip(dB: $vca, muted: $muted)
             .frame(maxHeight: .infinity)
             .padding()
             .frame(width: 110, height: 320)

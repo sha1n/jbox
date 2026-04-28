@@ -428,10 +428,17 @@ The aggregate output isolates media apps from the live route at the IOProc dispa
 
 The phase checklist, sub-phase breakdown, and deviations live in [plan.md § Phase 7.6](./plan.md#phase-76--self-routing-reliability).
 
-### 2.14 Deferred to future versions
+### 2.14 Per-route gain (ABI v14)
+
+Each route carries a master fader (in dB) and an optional per-channel trim array (also in dB), plus a mute boolean. Master and trims are multiplied together and applied per output sample inside `outputIOProcCallback` / `duplexIOProcCallback`. dB → linear conversion runs on the control thread; the RT path is alloc-free, lock-free, and `pow`-free. A 10 ms one-pole IIR (`rt/gain_smoother.hpp`) smooths slider drags and mute toggles to silence zipper noise / clicks. Source meter stays pre-fader; dest meter reads post-fader. Detail: `docs/2026-04-28-route-gain-mixer-strip-design.md`.
+
+ABI surface: `master_gain_db` / `channel_trims_db` / `channel_trims_count` / `muted` appended to `jbox_route_config_t`; new setters `jbox_engine_set_route_master_gain_db` / `_channel_trim_db` / `_mute`. Zero-init callers stay at unity. Engine clamps incoming dB to `[-∞, +12]`.
+
+### 2.15 Deferred to future versions
 
 - **Fan-in / summing mapping** (multiple sources → one destination). Requires mixer-domain decisions (summing attenuation, clipping handling, per-source gain); explicitly out of scope.
-- **Per-route gain and mute.** Would require a small DSP block in the engine; deferred until the user sees a concrete need.
+- **Needle-style VU meter.** Parked. The mixer-strip layout reserves no visual room for it; the VU spec will own its own layout adjustment when it lands.
+- **VCA groups** (one virtual master controlling several routes' faders simultaneously). Separate spec when there's a use case.
 - **Internal CPU budget telemetry** (percentage of audio cycle used per callback). Nice to have; not required for v1.
 - **Alternative resampler backends** (libsamplerate, SoXr). Apple `AudioConverter` is sufficient; revisit if quality or performance ever disappoints.
 
@@ -681,7 +688,7 @@ Not part of v1 — see § 4.9 + § 4.10 (Future feature — Scenes with sidebar)
 ### 4.5 Meters
 
 - Per-channel, per-route, vertical bar indicator.
-- Source-side meter shows input level; destination-side meter shows post-resampling output level.
+- Source-side meter shows input level (pre-fader); destination-side meter shows post-resampling, post-fader output level.
 - Color thresholds:
   - **Gray** — no signal detected (peak < -60 dBFS).
   - **Green** — normal (peak between -60 and -6 dBFS).
@@ -689,6 +696,8 @@ Not part of v1 — see § 4.9 + § 4.10 (Future feature — Scenes with sidebar)
   - **Red** — clipped (peak ≥ -3 dBFS).
 - Thresholds also communicated by bar height and label for color-accessibility.
 - Drawn via SwiftUI `Canvas`. A single timer fires at ~30 Hz for the whole app; each meter reads its atomics, no per-frame allocations.
+
+The expanded route panel uses a **mixer-strip layout** (introduced with the per-route gain feature): SOURCE pre-fader bar group → shared dBFS scale column with DAW-standard marks (`MeterLevel.dawScaleMarks`: `0, -3, -6, -12, -18, -24, -36, -48, -60`) → per-channel strips (trim fader + dest meter side-by-side) → master strip (master fader + MUTE button) on the far right. Compact tier (≥6 channels) shrinks the bar zone to 170 px and falls back to numeric strip headers; tooltips carry the full source → destination channel-name pair via `EngineStore.channelNames` + `ChannelLabel.format`. Detail: `docs/2026-04-28-route-gain-mixer-strip-design.md` § 4.
 
 ### 4.6 Preferences window
 

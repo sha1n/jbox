@@ -72,9 +72,9 @@ struct MeterPanel: View {
                         .frame(maxHeight: .infinity)
                     }
 
-                    // Master strip on the far right.
-                    MasterFaderStrip(
-                        masterDb: masterBinding(),
+                    // VCA strip on the far right.
+                    VCAFaderStrip(
+                        dB: vcaBinding(),
                         muted: muteBinding()
                     )
                     .frame(maxHeight: .infinity)
@@ -140,7 +140,11 @@ struct MeterPanel: View {
 
     // MARK: - Bindings into the store's Route model
 
-    private func masterBinding() -> Binding<Float> {
+    /// Binding for the VCA fader. Reads / writes `Route.masterGainDb` —
+    /// the engine ABI keeps the historical "master_gain_db" name even
+    /// though the UI calls the control "VCA" (it's a non-summing
+    /// per-channel scalar, not a master bus).
+    private func vcaBinding() -> Binding<Float> {
         Binding<Float>(
             get: { store.routes.first(where: { $0.id == route.id })?.masterGainDb ?? 0 },
             set: { store.setMasterGainDb(routeId: route.id, db: $0) }
@@ -173,7 +177,7 @@ struct MeterPanel: View {
 
 /// SOURCE column for the mixer-strip layout — pre-fader bars in the
 /// bar zone, using the same band structure as `ChannelStripColumn` and
-/// `MasterFaderStrip` so its bar zone aligns with theirs in the
+/// `VCAFaderStrip` so its bar zone aligns with theirs in the
 /// MeterPanel HStack.
 struct SourceColumn: View {
     let routeId: UInt32
