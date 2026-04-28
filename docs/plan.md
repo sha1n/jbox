@@ -650,8 +650,8 @@ Phase 7.5 summary of deviations:
   - 3 `[device_change_watcher]` (drain mechanics)
   - 3 `[sim_backend][device_change]` (simulator seams fire the right kinds in the right order)
   - 6 `[route_manager][device_loss]` (loss on src / dst / unrelated; idempotent; auto-recovery via list-changed; multi-route shared device)
-- [ ] **Pending follow-up:** real `CoreAudioBackend` HAL listener registration via `AudioObjectAddPropertyListener` on `kAudioHardwarePropertyDevices` + per-device `kAudioDevicePropertyDeviceIsAlive` + per-aggregate `kAudioAggregateDevicePropertyActiveSubDeviceList`. Lands as a separate commit after manual hardware testing — the simulator path covers correctness in CI; HAL plumbing carries the production-thread-safety cost that's hard to unit-test.
-- [ ] **Pending follow-up:** ~200ms timer-based debounce inside the watcher's drain. Idempotent-reaction approach (current) covers correctness; debounce is a perf refinement to avoid 5 refreshes during a sample-rate cascade. Add when real-hardware traces show it's worth the complexity.
+- [ ] **Pending follow-up — F1 in [`docs/followups.md`](./followups.md#f1--production-hal-property-listener-registration-in-coreaudiobackend):** real `CoreAudioBackend` HAL listener registration. Without this, 7.6.4's recovery path is dead in production. Hardware-gated; surface area + research questions + pitfalls + acceptance plan all written up under § F1.
+- [ ] **Pending follow-up — F3 in [`docs/followups.md`](./followups.md#f3--devicechangewatcher-event-debounce):** ~200ms timer-based debounce inside the watcher's drain. Non-critical perf refinement; add when real-hardware traces (post-F1) show a sample-rate cascade actually thrashes.
 
 #### Sub-phase 7.6.5 — Sleep/wake handling ✅ (engine; macOS event source pending)
 
@@ -668,7 +668,7 @@ Phase 7.5 summary of deviations:
   - 3 `[sim_power]` (the simulator's simulate-* + acknowledgeSleep counter)
   - 3 `[power_state_watcher]` (kWillSleep invokes handler + acks; missing handler still acks; kPoweredOn drains via drain())
   - 6 `[route_manager][sleep_wake]` (prepareForSleep on running; left alone for non-running; first attempt success; bounded retries on missing devices; device-appears-between-attempts wins on the right tick; non-participants untouched)
-- [ ] **Pending follow-up:** real `MacosPowerEventSource` wrapping `IORegisterForSystemPower` (sleep/wake notifications) + the matching `IOAllowPowerChange` ack. Lands as a separate commit after manual hardware testing — the simulator path covers correctness in CI; the macOS notification thread carries production-thread-safety concerns hard to unit-test.
+- [ ] **Pending follow-up — F2 in [`docs/followups.md`](./followups.md#f2--production-macospowereventsource-wrapping-ioregisterforsystempower):** real `MacosPowerEventSource` wrapping `IORegisterForSystemPower`. Without this, 7.6.5's recovery path is dead in production. Hardware-gated; surface area + dispatch-queue research + IOPM ack pitfalls + acceptance plan all written up under § F2.
 
 Phase 7.6 summary of deviations:
 
