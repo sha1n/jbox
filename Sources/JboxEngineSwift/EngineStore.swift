@@ -124,6 +124,15 @@ public struct Route: Identifiable, Equatable, Sendable {
     /// ABI v14 — mute toggle, independent of fader state. Default false.
     public var muted: Bool = false
 
+    /// Per-channel mute, independent of trim. When `channelMuted[i]` is
+    /// true, EngineStore sends `−∞` to the engine's trim setter for that
+    /// channel — so audio is silenced — while `trimDbs[i]` is left
+    /// untouched. The fader cap therefore stays at the user's set trim
+    /// position when mute is toggled, matching the route-wide MUTE
+    /// behavior. UI-only feature: the engine ABI doesn't have a per-
+    /// channel mute field, this is implemented at the Swift wrapper layer.
+    public var channelMuted: [Bool] = []
+
     public init(id: UInt32,
                 config: RouteConfig,
                 status: RouteStatus,
@@ -132,7 +141,8 @@ public struct Route: Identifiable, Equatable, Sendable {
                 modifiedAt: Date = Date(),
                 masterGainDb: Float = 0.0,
                 trimDbs: [Float] = [],
-                muted: Bool = false) {
+                muted: Bool = false,
+                channelMuted: [Bool] = []) {
         self.id           = id
         self.persistId    = persistId
         self.config       = config
@@ -142,6 +152,7 @@ public struct Route: Identifiable, Equatable, Sendable {
         self.masterGainDb = masterGainDb
         self.trimDbs      = trimDbs
         self.muted        = muted
+        self.channelMuted = channelMuted
     }
 }
 
@@ -528,6 +539,13 @@ public final class EngineStore {
     /// constructed with the default empty `trimDbs`, the array is
     /// padded to `mapping.count` so subsequent writes preserve their
     /// neighbours.
+    ///
+    /// The model's `trimDbs[channelIndex]` is updated unconditionally
+    /// — it represents the user's intended trim. The engine, however,
+    /// only sees that value when the channel is *not* muted; when
+    /// `channelMuted[channelIndex]` is true, the engine continues to
+    /// receive `−∞` and the user's drag is preserved for restore on
+    /// un-mute.
     public func setChannelTrimDb(routeId: UInt32, channelIndex: Int, db: Float) {
         if db.isNaN {
             JboxLog.engine.error("setChannelTrimDb id=\(routeId) ch=\(channelIndex) rejected NaN")
@@ -540,16 +558,27 @@ public final class EngineStore {
             JboxLog.engine.error("setChannelTrimDb id=\(routeId) channelIndex=\(channelIndex) out of range (mappingCount=\(mappingCount))")
             return
         }
-        // Pad trimDbs to mapping length on first per-channel write.
-        // Also self-heals legacy / restored routes whose trimDbs.count
-        // doesn't match the current mapping (e.g., mapping was edited
-        // on a route that already had per-channel trims persisted).
+        // Pad trimDbs / channelMuted to mapping length on first
+        // per-channel write. Also self-heals legacy / restored routes
+        // whose array sizes don't match the current mapping (e.g.,
+        // mapping was edited on a route that already had per-channel
+        // trims persisted).
         if routes[idx].trimDbs.count != mappingCount {
             routes[idx].trimDbs = Array(repeating: 0, count: mappingCount)
         }
+        if routes[idx].channelMuted.count != mappingCount {
+            routes[idx].channelMuted = Array(repeating: false, count: mappingCount)
+        }
+        // Always update the model — this is the user's intended trim.
+        routes[idx].trimDbs[channelIndex] = stored
+        // Engine only sees the trim when the channel is unmuted; when
+        // muted, engine stays at −∞ and the model preserves the user's
+        // adjustment for restore on un-mute.
+        let engineDb: Float = routes[idx].channelMuted[channelIndex]
+            ? -Float.infinity
+            : stored
         do {
-            try engine.setRouteChannelTrimDb(routeId, channel: channelIndex, db: stored)
-            routes[idx].trimDbs[channelIndex] = stored
+            try engine.setRouteChannelTrimDb(routeId, channel: channelIndex, db: engineDb)
             routes[idx].modifiedAt = Date()
             lastError = nil
             onRoutesChanged?()
@@ -571,6 +600,39 @@ public final class EngineStore {
         } catch {
             lastError = String(describing: error)
             JboxLog.engine.error("setRouteMuted id=\(routeId) failed: \(String(describing: error), privacy: .public)")
+        }
+    }
+
+    /// Toggle the per-channel mute, independent of the per-channel trim.
+    /// The model's `trimDbs[channelIndex]` is left untouched; the engine
+    /// is told to set its trim to `−∞` (when muting) or back to the
+    /// stored trim (when un-muting). Match the route-wide MUTE shape:
+    /// the fader cap stays put when the user toggles mute.
+    public func setChannelMuted(routeId: UInt32, channelIndex: Int, muted: Bool) {
+        guard let idx = routes.firstIndex(where: { $0.id == routeId }) else { return }
+        let mappingCount = routes[idx].config.mapping.count
+        guard channelIndex >= 0, channelIndex < mappingCount else {
+            JboxLog.engine.error("setChannelMuted id=\(routeId) channelIndex=\(channelIndex) out of range (mappingCount=\(mappingCount))")
+            return
+        }
+        if routes[idx].channelMuted.count != mappingCount {
+            routes[idx].channelMuted = Array(repeating: false, count: mappingCount)
+        }
+        if routes[idx].trimDbs.count != mappingCount {
+            routes[idx].trimDbs = Array(repeating: 0, count: mappingCount)
+        }
+        routes[idx].channelMuted[channelIndex] = muted
+        let engineDb: Float = muted
+            ? -Float.infinity
+            : routes[idx].trimDbs[channelIndex]
+        do {
+            try engine.setRouteChannelTrimDb(routeId, channel: channelIndex, db: engineDb)
+            routes[idx].modifiedAt = Date()
+            lastError = nil
+            onRoutesChanged?()
+        } catch {
+            lastError = String(describing: error)
+            JboxLog.engine.error("setChannelMuted id=\(routeId) ch=\(channelIndex) failed: \(String(describing: error), privacy: .public)")
         }
     }
 

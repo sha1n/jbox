@@ -54,28 +54,34 @@ struct MeterPanel: View {
                         .frame(width: 36)
                         .frame(maxHeight: .infinity)
 
-                    // Per-channel strips.
+                    // Per-channel strips — meter alongside trim fader.
                     ForEach(0..<channelCount, id: \.self) { i in
-                        ChannelStripColumn(
-                            routeId: route.id,
-                            channelIndex: i,
-                            primaryLabel: stripPrimaryLabel(i),
-                            tooltipLabel: stripTooltip(i),
+                        MixerStripColumn(
+                            title: stripPrimaryLabel(i),
+                            tooltip: stripTooltip(i),
+                            trimDb: trimBinding(channelIndex: i),
+                            muted: channelMutedBinding(channelIndex: i),
                             peak: peakAt(i),
                             hold: store.heldPeak(routeId: route.id,
                                                  side: .destination,
                                                  channel: i,
                                                  now: now),
-                            trimDb: trimBinding(channelIndex: i),
-                            isCompact: isCompact
+                            isCompact: isCompact,
+                            style: .channel
                         )
                         .frame(maxHeight: .infinity)
                     }
 
-                    // VCA strip on the far right.
-                    VCAFaderStrip(
-                        dB: vcaBinding(),
-                        muted: muteBinding()
+                    // VCA strip on the far right — same widget, no meter.
+                    MixerStripColumn(
+                        title: "VCA",
+                        tooltip: nil,
+                        trimDb: vcaBinding(),
+                        muted: muteBinding(),
+                        peak: nil,
+                        hold: nil,
+                        isCompact: isCompact,
+                        style: .vca
                     )
                     .frame(maxHeight: .infinity)
                     .padding(.leading, 4)
@@ -173,12 +179,31 @@ struct MeterPanel: View {
             }
         )
     }
+
+    /// Per-channel mute. Reads / writes `Route.channelMuted[i]`. Same
+    /// shape as `muteBinding()` for the route-wide VCA mute — toggling
+    /// it doesn't move the trim fader, the engine just sees `−∞` for
+    /// the muted channel until un-mute restores the user's trim.
+    private func channelMutedBinding(channelIndex: Int) -> Binding<Bool> {
+        Binding<Bool>(
+            get: {
+                let r = store.routes.first(where: { $0.id == route.id })
+                let mutes = r?.channelMuted ?? []
+                return channelIndex < mutes.count ? mutes[channelIndex] : false
+            },
+            set: {
+                store.setChannelMuted(
+                    routeId: route.id,
+                    channelIndex: channelIndex,
+                    muted: $0)
+            }
+        )
+    }
 }
 
 /// SOURCE column for the mixer-strip layout — pre-fader bars in the
-/// bar zone, using the same band structure as `ChannelStripColumn` and
-/// `VCAFaderStrip` so its bar zone aligns with theirs in the
-/// MeterPanel HStack.
+/// bar zone, using the same band structure as `MixerStripColumn` so
+/// its bar zone aligns in the MeterPanel HStack.
 struct SourceColumn: View {
     let routeId: UInt32
     let peaks: [Float]
@@ -259,95 +284,6 @@ struct ScaleColumn: View {
         }
         .padding(.vertical, 6)
         .accessibilityHidden(true)
-    }
-}
-
-/// Legacy bar group, retained for any out-of-tree consumers; the
-/// new mixer-strip layout uses `SourceColumn` instead. Bars use
-/// `maxWidth: .infinity` inside a capped container so small channel
-/// counts spread to comfortable widths while large channel counts still
-/// fit without pushing the row.
-struct BarGroup: View {
-    let title: String
-    let labels: [String]
-    let peaks: [Float]
-    let routeId: UInt32
-    let side: Engine.MeterSide
-    let store: EngineStore
-    let now: TimeInterval
-    let barHeight: CGFloat
-
-    /// Individual bars never grow wider than this. Past ~10 channels
-    /// the group starts shrinking bars from `maxBarWidth` toward
-    /// `minBarWidth` while keeping the group centered.
-    private let maxBarWidth: CGFloat = 36
-    private let minBarWidth: CGFloat = 10
-    private let barSpacing: CGFloat  = 8
-    private let scaleWidth: CGFloat  = 36
-
-    var body: some View {
-        VStack(spacing: 10) {
-            Text(title)
-                .font(.caption.weight(.semibold))
-                .tracking(0.6)
-                .foregroundStyle(.secondary)
-                .frame(maxWidth: .infinity)
-
-            HStack(spacing: 0) {
-                Spacer(minLength: 0)
-                VStack(spacing: 6) {
-                    HStack(alignment: .bottom, spacing: 0) {
-                        DbScale()
-                            .frame(width: scaleWidth, height: barHeight)
-
-                        HStack(alignment: .bottom, spacing: barSpacing) {
-                            ForEach(Array(peaks.enumerated()), id: \.offset) { i, v in
-                                let hold = store.heldPeak(routeId: routeId,
-                                                          side: side,
-                                                          channel: i,
-                                                          now: now)
-                                ChannelBar(peak: v, hold: hold)
-                                    .frame(minWidth: minBarWidth,
-                                           maxWidth: maxBarWidth,
-                                           minHeight: barHeight,
-                                           maxHeight: barHeight)
-                            }
-                        }
-
-                        // Phantom column mirroring the scale so the bars
-                        // (not the scale+bars block) are what gets
-                        // horizontally centered inside the card.
-                        Spacer().frame(width: scaleWidth)
-                    }
-
-                    HStack(spacing: 0) {
-                        Spacer().frame(width: scaleWidth)
-                        HStack(spacing: barSpacing) {
-                            ForEach(Array(labels.enumerated()), id: \.offset) { _, label in
-                                Text(label)
-                                    .font(.system(size: 10, weight: .medium).monospaced())
-                                    .foregroundStyle(.secondary)
-                                    .frame(minWidth: minBarWidth,
-                                           maxWidth: maxBarWidth)
-                            }
-                        }
-                        Spacer().frame(width: scaleWidth)
-                    }
-                }
-                Spacer(minLength: 0)
-            }
-        }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 12)
-        .frame(maxWidth: .infinity)
-        .background(
-            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                .fill(Color.secondary.opacity(0.05))
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                .strokeBorder(Color.secondary.opacity(0.22), lineWidth: 1)
-        )
     }
 }
 

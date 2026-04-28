@@ -82,6 +82,11 @@ public struct StoredRoute: Codable, Equatable, Identifiable, Sendable {
     public var trimDbs: [Float]
     /// ABI v14 — mute toggle, independent of fader state.
     public var muted: Bool
+    /// Per-channel mute, independent of trim. UI-only feature (no
+    /// engine ABI field). Empty means "no per-channel mutes". Aligns
+    /// to mapping length on the first per-channel mute write through
+    /// `EngineStore.setChannelMuted`.
+    public var channelMuted: [Bool]
 
     public init(id: UUID,
                 name: String,
@@ -95,7 +100,8 @@ public struct StoredRoute: Codable, Equatable, Identifiable, Sendable {
                 bufferFrames: UInt32? = nil,
                 masterGainDb: Float = 0.0,
                 trimDbs: [Float] = [],
-                muted: Bool = false) {
+                muted: Bool = false,
+                channelMuted: [Bool] = []) {
         self.id           = id
         self.name         = name
         self.isAutoName   = isAutoName
@@ -109,6 +115,7 @@ public struct StoredRoute: Codable, Equatable, Identifiable, Sendable {
         self.masterGainDb = masterGainDb
         self.trimDbs      = trimDbs
         self.muted        = muted
+        self.channelMuted = channelMuted
     }
 
     public init(from decoder: Decoder) throws {
@@ -126,6 +133,7 @@ public struct StoredRoute: Codable, Equatable, Identifiable, Sendable {
         self.masterGainDb = try c.decodeIfPresent(Float.self, forKey: .masterGainDb) ?? 0.0
         self.trimDbs      = try c.decodeIfPresent([Float].self, forKey: .trimDbs) ?? []
         self.muted        = try c.decodeIfPresent(Bool.self, forKey: .muted) ?? false
+        self.channelMuted = try c.decodeIfPresent([Bool].self, forKey: .channelMuted) ?? []
     }
 }
 

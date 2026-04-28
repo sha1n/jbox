@@ -452,9 +452,28 @@ final class AppState {
                 latencyMode: sr.latencyMode,
                 bufferFrames: sr.bufferFrames)
             do {
-                _ = try store.addRoute(cfg,
-                                       persistId: sr.id,
-                                       createdAt: sr.createdAt)
+                let route = try store.addRoute(cfg,
+                                               persistId: sr.id,
+                                               createdAt: sr.createdAt)
+                // Replay the persisted gain state through the EngineStore
+                // setters so the route resumes at the user's last fader
+                // / trim / mute settings instead of unity / unmuted.
+                if sr.masterGainDb != 0 {
+                    store.setMasterGainDb(routeId: route.id, db: sr.masterGainDb)
+                }
+                for (i, db) in sr.trimDbs.enumerated()
+                where i < sr.mapping.count && db != 0 {
+                    store.setChannelTrimDb(routeId: route.id,
+                                           channelIndex: i, db: db)
+                }
+                if sr.muted {
+                    store.setRouteMuted(routeId: route.id, muted: true)
+                }
+                for (i, m) in sr.channelMuted.enumerated()
+                where i < sr.mapping.count && m {
+                    store.setChannelMuted(routeId: route.id,
+                                          channelIndex: i, muted: true)
+                }
                 JboxLog.app.notice("restored route persistId=\(sr.id.uuidString, privacy: .public)")
             } catch {
                 JboxLog.app.error("failed to restore route \(sr.id.uuidString, privacy: .public): \(String(describing: error), privacy: .public)")
@@ -509,7 +528,11 @@ final class AppState {
                 createdAt: r.createdAt,
                 modifiedAt: r.modifiedAt,
                 latencyMode: r.config.latencyMode,
-                bufferFrames: r.config.bufferFrames)
+                bufferFrames: r.config.bufferFrames,
+                masterGainDb: r.masterGainDb,
+                trimDbs: r.trimDbs,
+                muted: r.muted,
+                channelMuted: r.channelMuted)
         }
         scheduleSave()
     }
