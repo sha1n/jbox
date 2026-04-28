@@ -731,6 +731,42 @@ Phase 7.6 summary of deviations:
 
 ---
 
+## Phase 7.7 — Per-route gain + mixer-strip UI ✅
+
+**Goal.** Add a per-route VCA-style fader, per-channel trims, route-wide and per-channel mute, and a console-style mixer-strip UI with DAW-standard meter scale and driver-published channel labels. Detail: [`docs/2026-04-28-route-gain-mixer-strip-design.md`](./2026-04-28-route-gain-mixer-strip-design.md).
+
+**Status.** Implementation-complete on `feature/route-gain-mixer-strip`; manual smoke confirmed. Awaiting merge to `master`.
+
+- [x] T1: `Sources/JboxEngineC/rt/gain_smoother.hpp` — RT-safe block-rate one-pole IIR + 16 Catch2 cases (commit `69f7e6d`).
+- [x] T2: `Sources/JboxEngineSwift/FaderTaper.swift` — pure dB ↔ position taper + 28 Swift Testing cases (commit `02be324`).
+- [x] T3: `RouteRecord` + C++ `RouteConfig` gain state plumbing (commit `922f071`).
+- [x] T4: `addRoute` + `attemptStart` wire dB → linear and configure smoothers (commit `c40413b`).
+- [x] T5: `outputIOProcCallback` applies smoothed `master * trim[ch]` + 6 Catch2 cases (commit `a4ab7ac`).
+- [x] T6: `duplexIOProcCallback` mirrors the gain wiring + 3 Catch2 cases (commit `e99c8f3`).
+- [x] T7: ABI v13 → v14 header bump, fields, setter declarations, history backfill (commit `17a7997`).
+- [x] T8: `bridge_api.cpp` setters + Engine / RouteManager pass-throughs + Swift call-site patch + 1 Catch2 case (commit `5e16df6`).
+- [x] T9: Swift `Route` model gains `masterGainDb` / `trimDbs` / `muted` (commit `1dbced0`).
+- [x] T10: `StoredRoute` persists the new fields additively + 6 Swift Testing cases (commit `8e253f4`).
+- [x] T11: `EngineStore.setMasterGainDb` / `setChannelTrimDb` / `setRouteMuted` + Option A non-finite policy + 8 Swift Testing cases (commit `ad51c30`).
+- [x] T12: `MeterLevel.dawScaleMarks` + 3 Swift Testing cases (commit `1778abc`).
+- [x] T13: `FaderSlider` widget — vertical, dB-bound, console-style cap (commit `f62de39`, polished in `efa01ca`).
+- [x] T14: `ChannelStripColumn` widget (commit `a47a9c1`, later folded into `MixerStripColumn` in T18).
+- [x] T15: `MasterFaderStrip` widget (commit `12726ba`, later renamed to `VCAFaderStrip` then folded into `MixerStripColumn`).
+- [x] T16: `MeterPanel` rewrite as mixer-strip layout (commit `61594b2`, layout iterated through `147a882` → `04617c2` → `a0c40d6` → `816eb52`).
+- [x] T17: `make verify` green; manual smoke confirmed by project owner.
+- [x] T18: this entry + spec.md § 2.14 / § 4.5 updates.
+
+Phase 7.7 summary of deviations:
+
+- **Task 1 — mute-decay test relaxed.** Plan asserted `< 1e-6` at 50 ms with τ = 10 ms; mathematically impossible (`exp(-5) ≈ 6.7e-3` is the floor for an ideal one-pole). Replaced with `< 1e-2` (-40 dB, perceptually inaudible) at 50 ms plus a strict `< 1e-6` at 200 ms (≈ 20 τ). NaN / ±inf rejection in `step()` added on top of the spec'd surface.
+- **Task 4 — defensive `kAtomicMeterMaxChannels` guard in addRoute.** `ChannelMapper::validate()` does not bound mapping size against the `std::array<…, 64>` storage in `RouteRecord`; the new guard prevents an out-of-bounds write on a 65-edge mapping and was placed before the partial-`RouteRecord` allocation in the `addRoute` body.
+- **Task 7 — build is red between Task 7 and Task 8 in the Swift wrapper, not in `bridge_api.cpp`.** Plan predicted an undefined-symbol link error; in practice Swift's auto-generated memberwise init for `jbox_route_config_t` requires the new fields at the call site so the failure surfaces earlier in the Swift compile. Task 8's prompt was extended to patch the Swift call site too.
+- **Task 11 — Option A non-finite handling.** EngineStore's gain setters reject NaN (no-op) and clamp `-Float.infinity` to `FaderTaper.minFiniteDb` (-60 dB) before storing. Keeps `StateStore`'s default JSONEncoder (which throws on non-finite floats) safe without configuring a `nonConformingFloatEncodingStrategy`. True silence flows through the route-wide MUTE button (`Route.muted`) or the per-channel MUTE button (`Route.channelMuted`) — the trim setter is never the silence path.
+- **Manual-smoke iterations (post-T16).** Four polish commits after the initial mixer-strip rewrite: `147a882` fixed an accumulating-translation drag bug + 2.5× sensitivity divisor; `04617c2` unified column layout via flex-height bar zones; `efa01ca` renamed Master → VCA in the UI (engine ABI keeps `master_gain_db`), gave the cap a console-style shape, and dropped the sensitivity divisor for 1:1 cursor tracking; `a0c40d6` added per-channel MUTE for column-height parity; `816eb52` collapsed `ChannelStripColumn` + `VCAFaderStrip` into one `MixerStripColumn` widget AND made per-channel mute a separate `Route.channelMuted: [Bool]` flag (with its own EngineStore setter + StoredRoute persistence + restore-on-launch replay) so toggling mute leaves the trim fader where the user put it — matching the route-wide VCA mute behavior.
+- **Per-channel mute is UI-only.** The engine ABI has no per-channel mute field. The Swift wrapper translates a per-channel mute toggle into a `setRouteChannelTrimDb(... -∞)` engine call while preserving `Route.trimDbs[i]` (the user's intended trim) in the model for restore on un-mute. A real engine-side `target_channel_muted[i]` would force a v15 ABI bump; the Swift-wrapper approach gets the same audible result without one.
+
+---
+
 ## Phase 8 — Packaging and installation
 
 **Goal.** Produce a real distributable `.app` bundle. Make the installation story clear.
@@ -836,7 +872,7 @@ The items in [spec.md § Appendix A](./spec.md#appendix-a--deferred--out-of-scop
    - [ ] **Menu-bar Scene row** — shape TBD post-brainstorm.
    - [ ] **Persistence wiring** — add scene mutations (create / edit / delete / mode change) to `EngineStore.onRoutesChanged` / `AppState` save triggers; spec § 3.2 already lists the trigger format.
    - [ ] **Smoke tests** — SwiftUI `#Preview` blocks for whatever views the brainstorm produces.
-7. **Virtual Core Audio device (Jbox as a selectable input / output)** — larger post-v1 feature; see [spec.md § 2.13](./spec.md#213-deferred-to-future-versions). Rough phase shape (exact scope revisited at implementation time):
+7. **Virtual Core Audio device (Jbox as a selectable input / output)** — larger post-v1 feature; see [spec.md § 2.15](./spec.md#215-deferred-to-future-versions). Rough phase shape (exact scope revisited at implementation time):
    - [ ] HAL plugin skeleton — a userspace `.driver` bundle that registers a virtual device with configurable channel count and sample rate, and exposes an in-process transport (shared-memory ring or Mach port) for samples. Separate SPM target; ad-hoc signed with its own entitlements.
    - [ ] Engine-side contract — teach `RouteManager` / `DeviceIOMux` to recognise the virtual device UID and bypass the HAL `AudioDeviceIOProc` path, feeding samples directly through an SPSC ring that mirrors the existing ring-buffer primitive. Drift correction is unnecessary for this leg (both ends share the host's clock domain), so the route's PI loop degenerates to a rate-identity passthrough when either endpoint is virtual.
    - [ ] Installer path — the HAL plugin directory (`/Library/Audio/Plug-Ins/HAL/`) is system-owned and requires admin authorization to write. Ship a small privileged helper (SMJobBless or the modern equivalent at the time) invoked from the app on first run; make sure uninstall removes the plugin cleanly.

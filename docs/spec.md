@@ -28,7 +28,7 @@ The motivating workflow is routing two output channels of a Roland V31 USB sound
 
 ### What Jbox is not
 
-- **Not a mixer.** Jbox does 1:N channel mapping (fan-out allowed). No summing / fan-in, no per-channel gain, no mute.
+- **Not a fan-in / summing mixer.** Jbox does 1:N channel mapping (fan-out allowed) but never sums multiple sources into one destination. Per-route VCA, per-channel trim, route + per-channel mute have shipped — see § 2.14.
 - **Not a DAW.** No recording, no plugins, no timeline, no MIDI.
 - **Does not ship its own audio driver.** Jbox does not create or install a virtual audio device. The recommended topology for combining a live hardware source with media-app audio at the same physical destination uses macOS's native **aggregate device** mechanism plus the destination interface's hardware mixer (§ 2.13) — no third-party install, no virtual driver. Users who do not have a hardware-mixer-equipped interface can substitute a third-party loopback driver such as [BlackHole](https://github.com/ExistentialAudio/BlackHole) for the aggregate device; Jbox treats it as an ordinary Core Audio device and needs no driver-specific code. An in-house `AudioServerPlugIn` was prototyped (archive branch `archive/phase7.6-own-driver`) and abandoned on 2026-04-23 when ad-hoc-signed bundles failed the macOS 13+ HAL-sandbox codesign check; the project's "no paid Apple Developer Program" constraint rules out Developer-ID signing that would have unblocked the own-driver path. DriverKit kernel extensions remain permanently out of scope.
 - **Not a broadcast router.** No network audio (Dante, AVB, NDI), no IP streaming.
@@ -423,14 +423,18 @@ The aggregate output isolates media apps from the live route at the IOProc dispa
 **Non-goals.**
 
 - **Shipping our own HAL plugin or DriverKit DEXT.** Archived — see § 1's "What Jbox is not".
-- **Fan-in / summing inside Jbox.** v1 explicitly does not sum (§ 2.14 Deferred). The destination interface's hardware mixer is the summing point; users without one can layer in a third-party loopback driver as above but Jbox still does not sum.
+- **Fan-in / summing inside Jbox.** v1 explicitly does not sum (§ 2.15 Deferred). The destination interface's hardware mixer is the summing point; users without one can layer in a third-party loopback driver as above but Jbox still does not sum.
 - **Auto-creating aggregate devices.** Aggregate devices are user-managed in Audio MIDI Setup; Jbox neither creates nor modifies them.
 
 The phase checklist, sub-phase breakdown, and deviations live in [plan.md § Phase 7.6](./plan.md#phase-76--self-routing-reliability).
 
 ### 2.14 Per-route gain (ABI v14)
 
-Each route carries a master fader (in dB) and an optional per-channel trim array (also in dB), plus a mute boolean. Master and trims are multiplied together and applied per output sample inside `outputIOProcCallback` / `duplexIOProcCallback`. dB → linear conversion runs on the control thread; the RT path is alloc-free, lock-free, and `pow`-free. A 10 ms one-pole IIR (`rt/gain_smoother.hpp`) smooths slider drags and mute toggles to silence zipper noise / clicks. Source meter stays pre-fader; dest meter reads post-fader. Detail: `docs/2026-04-28-route-gain-mixer-strip-design.md`.
+Each route carries a route-wide VCA-style fader (in dB), an optional per-channel trim array (also in dB), a route-wide mute boolean, AND a per-channel mute boolean array. The VCA and trims are multiplied together and applied per output sample inside `outputIOProcCallback` / `duplexIOProcCallback`. dB → linear conversion runs on the control thread; the RT path is alloc-free, lock-free, and `pow`-free. A 10 ms one-pole IIR (`rt/gain_smoother.hpp`) smooths slider drags and mute toggles to silence zipper noise / clicks. Source meter stays pre-fader; dest meter reads post-fader. Detail: `docs/2026-04-28-route-gain-mixer-strip-design.md`.
+
+The UI labels the route-wide fader **VCA**, not "master" — it does not sum a bus, it uniformly scales every mapped channel of the route, which is the control behavior of a console VCA group fader. The engine ABI keeps the historical field name `master_gain_db` to avoid a v14 → v15 rename for a label-only change.
+
+**Mute model.** Both route-wide mute (`Route.muted`) and per-channel mute (`Route.channelMuted: [Bool]`) are independent of fader position — toggling either leaves the trim or VCA fader where the user put it. The Swift wrapper translates a per-channel mute toggle into a `setRouteChannelTrimDb(... -∞)` engine call while preserving the user's intended trim in `Route.trimDbs[i]` for restore on un-mute. Per-channel mute is a UI / Swift-side concept; the engine ABI itself has no per-channel mute field.
 
 ABI surface: `master_gain_db` / `channel_trims_db` / `channel_trims_count` / `muted` appended to `jbox_route_config_t`; new setters `jbox_engine_set_route_master_gain_db` / `_channel_trim_db` / `_mute`. Zero-init callers stay at unity. Engine clamps incoming dB to `[-∞, +12]`.
 
@@ -697,7 +701,7 @@ Not part of v1 — see § 4.9 + § 4.10 (Future feature — Scenes with sidebar)
 - Thresholds also communicated by bar height and label for color-accessibility.
 - Drawn via SwiftUI `Canvas`. A single timer fires at ~30 Hz for the whole app; each meter reads its atomics, no per-frame allocations.
 
-The expanded route panel uses a **mixer-strip layout** (introduced with the per-route gain feature): SOURCE pre-fader bar group → shared dBFS scale column with DAW-standard marks (`MeterLevel.dawScaleMarks`: `0, -3, -6, -12, -18, -24, -36, -48, -60`) → per-channel strips (trim fader + dest meter side-by-side) → master strip (master fader + MUTE button) on the far right. Compact tier (≥6 channels) shrinks the bar zone to 170 px and falls back to numeric strip headers; tooltips carry the full source → destination channel-name pair via `EngineStore.channelNames` + `ChannelLabel.format`. Detail: `docs/2026-04-28-route-gain-mixer-strip-design.md` § 4.
+The expanded route panel uses a **mixer-strip layout** (introduced with the per-route gain feature): SOURCE pre-fader bar group → shared dBFS scale column with DAW-standard marks (`MeterLevel.dawScaleMarks`: `0, -3, -6, -12, -18, -24, -36, -48, -60`) → per-channel strips (trim fader + dest meter + MUTE button) → VCA strip (route-wide fader + MUTE) on the far right. Channel strips and the VCA strip are the same `MixerStripColumn` widget differentiated by a `Style` enum and an optional meter slot — the channel strips pass `peak`/`hold`, the VCA strip passes nil. Every column shares the same band stack (header / +12 cap / bar zone / −∞ cap / readout / mute) at fixed band heights, so when the panel HStack uses a flex panel height every bar zone aligns top-and-bottom and the 0-dB point on every fader sits at the same y by construction. The fader cap is rendered console-style (rectangular, taller than wide, horizontal grip line, metallic gradient) and tracks the cursor 1:1. Compact tier (≥6 channels) shrinks the strip width and falls back to numeric strip headers; tooltips carry the full source → destination channel-name pair via `EngineStore.channelNames` + `ChannelLabel.format`. Detail: `docs/2026-04-28-route-gain-mixer-strip-design.md` § 4.
 
 ### 4.6 Preferences window
 
@@ -1023,8 +1027,8 @@ Consolidated list of items explicitly deferred from v1, for easy cross-reference
 - Fan-in / summing (multiple sources → one destination). Fan-out (one source → multiple destinations) was **promoted out of deferred** and is supported — see § 3.1 mapping invariants and § 4.3 editor validation.
 
 **Mixer-adjacent features.**
-- Per-route gain / trim.
-- Per-route mute.
+- Per-route VCA / per-channel trim — **shipped in Phase 7.7** (see § 2.14).
+- Per-route mute and per-channel mute — **shipped in Phase 7.7** (see § 2.14).
 - Per-route pan.
 - Global hotkeys.
 

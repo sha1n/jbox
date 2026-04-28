@@ -217,7 +217,7 @@ dB values clamped to `[−∞, +12]` on entry. A value of `−∞` (`-std::numer
 
 ### 6.3 No new poll surface
 
-The current `jbox_route_status_t` doesn't need new fields; the Swift side will track its own commanded values for UI, since the engine side is just storing what was last written and there's no engine-derived information to read back. (If we ever want to expose the *smoothed* current value for diagnostics, that's an additive v13.)
+The current `jbox_route_status_t` doesn't need new fields; the Swift side will track its own commanded values for UI, since the engine side is just storing what was last written and there's no engine-derived information to read back. (If we ever want to expose the *smoothed* current value for diagnostics, that's an additive future ABI minor (v15+; v13 was already used for `JBOX_ERR_SYSTEM_SUSPENDED`).)
 
 ### 6.4 Header bump
 
