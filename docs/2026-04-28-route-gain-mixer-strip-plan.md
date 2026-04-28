@@ -1612,11 +1612,26 @@ EOF
 
 **Files:**
 - Modify: `Sources/JboxEngineSwift/EngineStore.swift`
+- Modify: `Sources/JboxEngineSwift/JboxEngine.swift` (add throwing wrappers)
 - Test: `Tests/JboxEngineTests/EngineStoreGainTests.swift` (new)
 
 Three setter methods on `EngineStore` that update the in-memory `Route` and forward to the C ABI.
 
-- [ ] **Step 1: Write the failing test**
+**Deviation (Option A non-finite handling):** `setMasterGainDb` /
+`setChannelTrimDb` reject NaN (no-op + log) and clamp `-infinity` to
+`FaderTaper.minFiniteDb` (-60 dB) before storing, so the persisted
+`Route.masterGainDb` / `trimDbs` are always finite. `StateStore`'s
+default `JSONEncoder` defaults to `.throw` on non-finite floats — this
+keeps the persistence path safe without forcing a non-standard
+`.convertToString` round-trip in `state.json`. True silence still
+flows through the MUTE button via `setRouteMuted` / `Route.muted`.
+The plan originally implied a direct `db`-passthrough; the live
+implementation chose Option A and added 5 extra regression tests
+(NaN rejection, -infinity clamp, unknown id no-op, default-empty
+trimDbs pad, out-of-range channel no-op) on top of the 3 prescribed
+cases.
+
+- [x] **Step 1: Write the failing test**
 
 Create `Tests/JboxEngineTests/EngineStoreGainTests.swift`:
 
@@ -1670,7 +1685,7 @@ route. Match whatever existing EngineStoreTests use as a fixture (read
 `Tests/JboxEngineTests/EngineStoreTests.swift` if it exists) — there's
 almost certainly already a similar helper to copy from.
 
-- [ ] **Step 2: Run the test to verify it fails**
+- [x] **Step 2: Run the test to verify it fails**
 
 ```sh
 swift test --filter EngineStoreGainTests
@@ -1678,7 +1693,7 @@ swift test --filter EngineStoreGainTests
 
 Expected: fails — the three setter methods don't exist yet.
 
-- [ ] **Step 3: Add the three setter methods to `EngineStore`**
+- [x] **Step 3: Add the three setter methods to `EngineStore`**
 
 In `Sources/JboxEngineSwift/EngineStore.swift`, near the existing route-mutation methods (search for `renameRoute` for an analogue), add:
 
@@ -1722,7 +1737,7 @@ In `Sources/JboxEngineSwift/EngineStore.swift`, near the existing route-mutation
 > actually uses for the engine pointer and the StateStore-flush call.
 > Existing methods like `renameRoute` will show the pattern.
 
-- [ ] **Step 4: Run the test + Swift suite**
+- [x] **Step 4: Run the test + Swift suite**
 
 ```sh
 swift test --filter EngineStoreGainTests
@@ -1731,7 +1746,7 @@ swift test
 
 Expected: green.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```sh
 git add Sources/JboxEngineSwift/EngineStore.swift \

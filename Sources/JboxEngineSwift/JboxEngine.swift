@@ -453,6 +453,43 @@ public final class Engine {
         }
     }
 
+    /// Set the per-route master fader, in dB. 0 = unity. Engine clamps
+    /// to `[-inf, +12]`. Thread-safe via the C ABI; bounded execution.
+    public func setRouteMasterGainDb(_ id: UInt32, db: Float) throws {
+        guard let h = handle else {
+            throw JboxError(code: JBOX_ERR_INTERNAL, message: "engine not initialised")
+        }
+        let code = jbox_engine_set_route_master_gain_db(h, id, db)
+        if code != JBOX_OK {
+            throw JboxError(code: code, message: "set master gain failed")
+        }
+    }
+
+    /// Set the per-channel trim, in dB, for `route.config.mapping[channel]`.
+    /// Same range / clamp / threading as the master setter.
+    public func setRouteChannelTrimDb(_ id: UInt32,
+                                      channel: Int,
+                                      db: Float) throws {
+        guard let h = handle else {
+            throw JboxError(code: JBOX_ERR_INTERNAL, message: "engine not initialised")
+        }
+        let code = jbox_engine_set_route_channel_trim_db(h, id, UInt32(channel), db)
+        if code != JBOX_OK {
+            throw JboxError(code: code, message: "set channel trim failed")
+        }
+    }
+
+    /// Toggle the per-route mute. Independent of fader state. Thread-safe.
+    public func setRouteMute(_ id: UInt32, muted: Bool) throws {
+        guard let h = handle else {
+            throw JboxError(code: JBOX_ERR_INTERNAL, message: "engine not initialised")
+        }
+        let code = jbox_engine_set_route_mute(h, id, muted ? 1 : 0)
+        if code != JBOX_OK {
+            throw JboxError(code: code, message: "set mute failed")
+        }
+    }
+
     public func pollStatus(_ id: UInt32) throws -> RouteStatus {
         guard let h = handle else {
             throw JboxError(code: JBOX_ERR_INTERNAL, message: "engine not initialised")

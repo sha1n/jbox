@@ -488,6 +488,92 @@ public final class EngineStore {
         }
     }
 
+    // MARK: Route gain (ABI v14)
+
+    /// Set the per-route master fader, in dB. Updates the in-memory
+    /// `Route`, calls the engine setter, persists.
+    ///
+    /// Non-finite handling (Option A): NaN is rejected (no-op + log).
+    /// `-infinity` is clamped to `FaderTaper.minFiniteDb` (-60 dB)
+    /// before storing, so the persisted `Route.masterGainDb` is always
+    /// finite — this keeps `StateStore`'s default `JSONEncoder` (which
+    /// throws on non-finite floats) safe. The user's separate MUTE
+    /// button still produces true silence via `Route.muted`. -60 dBFS
+    /// is well below the human perception threshold for typical
+    /// playback; for explicit mute, the user uses the MUTE button.
+    public func setMasterGainDb(routeId: UInt32, db: Float) {
+        if db.isNaN {
+            JboxLog.engine.error("setMasterGainDb id=\(routeId) rejected NaN")
+            return
+        }
+        let stored = (db == -Float.infinity) ? FaderTaper.minFiniteDb : db
+        guard let idx = routes.firstIndex(where: { $0.id == routeId }) else { return }
+        do {
+            try engine.setRouteMasterGainDb(routeId, db: stored)
+            routes[idx].masterGainDb = stored
+            routes[idx].modifiedAt = Date()
+            lastError = nil
+            onRoutesChanged?()
+        } catch {
+            lastError = String(describing: error)
+            JboxLog.engine.error("setMasterGainDb id=\(routeId) failed: \(String(describing: error), privacy: .public)")
+        }
+    }
+
+    /// Set the per-channel trim, in dB, for the given mapped channel.
+    /// Same NaN / -infinity policy as the master setter (see
+    /// `setMasterGainDb`). Out-of-range `channelIndex` is a logged
+    /// no-op and matches the engine's `JBOX_ERR_INVALID_ARGUMENT`
+    /// rejection. On the first per-channel write to a route that was
+    /// constructed with the default empty `trimDbs`, the array is
+    /// padded to `mapping.count` so subsequent writes preserve their
+    /// neighbours.
+    public func setChannelTrimDb(routeId: UInt32, channelIndex: Int, db: Float) {
+        if db.isNaN {
+            JboxLog.engine.error("setChannelTrimDb id=\(routeId) ch=\(channelIndex) rejected NaN")
+            return
+        }
+        let stored = (db == -Float.infinity) ? FaderTaper.minFiniteDb : db
+        guard let idx = routes.firstIndex(where: { $0.id == routeId }) else { return }
+        let mappingCount = routes[idx].config.mapping.count
+        guard channelIndex >= 0, channelIndex < mappingCount else {
+            JboxLog.engine.error("setChannelTrimDb id=\(routeId) channelIndex=\(channelIndex) out of range (mappingCount=\(mappingCount))")
+            return
+        }
+        // Pad trimDbs to mapping length on first per-channel write.
+        // Also self-heals legacy / restored routes whose trimDbs.count
+        // doesn't match the current mapping (e.g., mapping was edited
+        // on a route that already had per-channel trims persisted).
+        if routes[idx].trimDbs.count != mappingCount {
+            routes[idx].trimDbs = Array(repeating: 0, count: mappingCount)
+        }
+        do {
+            try engine.setRouteChannelTrimDb(routeId, channel: channelIndex, db: stored)
+            routes[idx].trimDbs[channelIndex] = stored
+            routes[idx].modifiedAt = Date()
+            lastError = nil
+            onRoutesChanged?()
+        } catch {
+            lastError = String(describing: error)
+            JboxLog.engine.error("setChannelTrimDb id=\(routeId) ch=\(channelIndex) failed: \(String(describing: error), privacy: .public)")
+        }
+    }
+
+    /// Toggle the per-route mute. Independent of fader state; persists.
+    public func setRouteMuted(routeId: UInt32, muted: Bool) {
+        guard let idx = routes.firstIndex(where: { $0.id == routeId }) else { return }
+        do {
+            try engine.setRouteMute(routeId, muted: muted)
+            routes[idx].muted = muted
+            routes[idx].modifiedAt = Date()
+            lastError = nil
+            onRoutesChanged?()
+        } catch {
+            lastError = String(describing: error)
+            JboxLog.engine.error("setRouteMuted id=\(routeId) failed: \(String(describing: error), privacy: .public)")
+        }
+    }
+
     /// Apply edits to an existing route. When only the name differs,
     /// this short-circuits to `renameRoute`. Any other change (mapping,
     /// devices, latency mode, buffer frames) requires a reconfig —
@@ -555,12 +641,34 @@ public final class EngineStore {
             lastError: JBOX_OK,
             framesProduced: 0, framesConsumed: 0,
             underrunCount: 0, overrunCount: 0)
-        // Preserve the original persistId and createdAt so the route
-        // keeps its identity across an edit; only modifiedAt advances.
+        // Preserve the original persistId, createdAt, AND the user's
+        // gain state (VCA fader, per-channel trims, route + per-channel
+        // mute) so an edit doesn't silently snap the route back to
+        // unity / no trim / unmuted. The new engine id needs the gain
+        // state replayed via the setters — same shape as the
+        // restore-on-launch path in JboxApp.swift.
+        let preservedMaster   = old.masterGainDb
+        let preservedTrims    = old.trimDbs
+        let preservedMuted    = old.muted
+        let preservedChannels = old.channelMuted
         routes[idx] = Route(id: newId, config: newConfig, status: initialStatus,
                             persistId: old.persistId,
                             createdAt: old.createdAt,
                             modifiedAt: Date())
+        if preservedMaster != 0 {
+            setMasterGainDb(routeId: newId, db: preservedMaster)
+        }
+        for (i, db) in preservedTrims.enumerated()
+        where i < newConfig.mapping.count && db != 0 {
+            setChannelTrimDb(routeId: newId, channelIndex: i, db: db)
+        }
+        if preservedMuted {
+            setRouteMuted(routeId: newId, muted: true)
+        }
+        for (i, m) in preservedChannels.enumerated()
+        where i < newConfig.mapping.count && m {
+            setChannelMuted(routeId: newId, channelIndex: i, muted: true)
+        }
 
         if wasActive {
             startRoute(newId)
