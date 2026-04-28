@@ -71,8 +71,22 @@ extern "C" {
  *              fan-out via the aggregate driver). macOS resolves
  *              the actual value via `max-across-clients` so co-
  *              resident apps stay alive. Zero means "no preference".
+ *  12  MINOR — added JBOX_ERR_DEVICE_GONE so callers can distinguish
+ *              "device was unplugged underneath a running route" from
+ *              "the route was started before its devices appeared".
+ *  13  MINOR — added JBOX_ERR_SYSTEM_SUSPENDED so callers can show a
+ *              dedicated "waiting for system wake" status, distinct
+ *              from device-gone and initial-WAITING.
+ *  14  MINOR — appended `master_gain_db`, `channel_trims_db`,
+ *              `channel_trims_count`, and `muted` to
+ *              jbox_route_config_t, plus three setters
+ *              (jbox_engine_set_route_master_gain_db /
+ *              jbox_engine_set_route_channel_trim_db /
+ *              jbox_engine_set_route_mute) for runtime fader control.
+ *              Zero-initialised callers stay at unity gain, no trim,
+ *              unmuted.
  */
-#define JBOX_ENGINE_ABI_VERSION 13u
+#define JBOX_ENGINE_ABI_VERSION 14u
 
 uint32_t jbox_engine_abi_version(void);
 
@@ -235,6 +249,15 @@ typedef struct {
     const char*                name;
     uint32_t                   latency_mode;
     uint32_t                   buffer_frames;
+    /* ABI v14 — VCA-style per-route gain. master_gain_db = 0 means
+     * unity (default for zero-init callers). channel_trims_db is
+     * caller-owned; if non-NULL its length must equal mapping_count
+     * and the engine copies it. NULL / count==0 means "no trims",
+     * which is equivalent to all 0 dB. muted = 0 → not muted. */
+    float        master_gain_db;
+    const float* channel_trims_db;
+    size_t       channel_trims_count;
+    int          muted;
 } jbox_route_config_t;
 
 typedef enum {
@@ -429,6 +452,35 @@ jbox_error_code_t jbox_engine_set_resampler_quality(
  * JBOX_RESAMPLER_QUALITY_MASTERING on NULL engine (the default). */
 jbox_resampler_quality_t jbox_engine_resampler_quality(
     jbox_engine_t* engine);
+
+/* ----------------------------------------------------------------- */
+/*  Per-route runtime gain (ABI v14)                                 */
+/* ----------------------------------------------------------------- */
+
+/* Set the per-route master fader, in dB. 0 = unity. -infinity is
+ * accepted and maps to silence. Values clamped to [-infinity, +12].
+ * Thread-safe; bounded execution. */
+jbox_error_code_t jbox_engine_set_route_master_gain_db(
+    jbox_engine_t*  engine,
+    jbox_route_id_t route_id,
+    float           db);
+
+/* Set the per-channel trim, in dB, for the route's mapping[channel_index].
+ * Same range / clamp / threading as the master setter.
+ * Returns JBOX_ERR_INVALID_ARGUMENT if channel_index >= mapping_count. */
+jbox_error_code_t jbox_engine_set_route_channel_trim_db(
+    jbox_engine_t*  engine,
+    jbox_route_id_t route_id,
+    uint32_t        channel_index,
+    float           db);
+
+/* Toggle the per-route mute. 0 = unmuted, non-zero = muted.
+ * Mute is independent of fader state; un-mute returns to whatever
+ * the master + trims currently are. Thread-safe; bounded. */
+jbox_error_code_t jbox_engine_set_route_mute(
+    jbox_engine_t*  engine,
+    jbox_route_id_t route_id,
+    int             muted);
 
 /* -------------------------------------------------------------------- */
 /*  Metering                                                            */
