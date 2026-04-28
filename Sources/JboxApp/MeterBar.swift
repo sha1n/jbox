@@ -13,44 +13,75 @@ struct MeterPanel: View {
     let store: EngineStore
     let peaks: MeterPeaks
 
-    @AppStorage(JboxPreferences.showDiagnosticsKey) private var showDiagnostics = false
+    @AppStorage(JboxPreferences.showDiagnosticsKey)
+    private var showDiagnostics = false
 
-    private let barHeight: CGFloat = 200
+    private var channelCount: Int { max(1, route.config.mapping.count) }
+    private var isCompact: Bool   { channelCount >= 6 }
+    /// Total height of the mixer-strip row. Every column expands to this
+    /// height; bar zones inside each column take whatever is left after
+    /// the fixed-height top/bottom bands. This is the "everything same
+    /// height, use most of the panel height, just keep some padding"
+    /// rule.
+    private var panelHeight: CGFloat { isCompact ? 240 : 280 }
 
     var body: some View {
         TimelineView(.animation(minimumInterval: 1.0 / 30.0, paused: false)) { timeline in
             let now = timeline.date.timeIntervalSinceReferenceDate
             VStack(alignment: .leading, spacing: 16) {
-                HStack(alignment: .center, spacing: 12) {
-                    BarGroup(
-                        title: "SOURCE",
-                        labels: sourceLabels,
+                // Every column in the row uses the same band layout —
+                // header, top cap, bar zone (flex), bottom cap, readout,
+                // optional action — so bar zones across SOURCE, the dB
+                // scale, the channel strips, and the master strip all
+                // anchor at the same y AND share the same bar-zone
+                // height.
+                HStack(alignment: .top, spacing: isCompact ? 6 : 10) {
+
+                    // SOURCE column — pre-fader bars in the bar zone.
+                    SourceColumn(
+                        routeId: route.id,
                         peaks: peaks.source,
-                        routeId: route.id,
-                        side: .source,
+                        labels: sourceLabels,
                         store: store,
                         now: now,
-                        barHeight: barHeight
+                        isCompact: isCompact
                     )
-                    .frame(maxWidth: .infinity)
+                    .frame(width: sourceColumnWidth)
+                    .frame(maxHeight: .infinity)
 
-                    Image(systemName: "arrow.right")
-                        .font(.title2.weight(.light))
-                        .foregroundStyle(.tertiary)
-                        .frame(width: 32)
+                    // dB scale column.
+                    ScaleColumn()
+                        .frame(width: 36)
+                        .frame(maxHeight: .infinity)
 
-                    BarGroup(
-                        title: "DEST",
-                        labels: destLabels,
-                        peaks: peaks.destination,
-                        routeId: route.id,
-                        side: .destination,
-                        store: store,
-                        now: now,
-                        barHeight: barHeight
+                    // Per-channel strips.
+                    ForEach(0..<channelCount, id: \.self) { i in
+                        ChannelStripColumn(
+                            routeId: route.id,
+                            channelIndex: i,
+                            primaryLabel: stripPrimaryLabel(i),
+                            tooltipLabel: stripTooltip(i),
+                            peak: peakAt(i),
+                            hold: store.heldPeak(routeId: route.id,
+                                                 side: .destination,
+                                                 channel: i,
+                                                 now: now),
+                            trimDb: trimBinding(channelIndex: i),
+                            isCompact: isCompact
+                        )
+                        .frame(maxHeight: .infinity)
+                    }
+
+                    // Master strip on the far right.
+                    MasterFaderStrip(
+                        masterDb: masterBinding(),
+                        muted: muteBinding()
                     )
-                    .frame(maxWidth: .infinity)
+                    .frame(maxHeight: .infinity)
+                    .padding(.leading, 4)
                 }
+                .frame(height: panelHeight)
+                .padding(.horizontal, 12)
 
                 if showDiagnostics {
                     DiagnosticsBlock(
@@ -66,23 +97,172 @@ struct MeterPanel: View {
             destination: peaks.destination))
     }
 
-    /// Short labels for the source bars — one per mapped channel.
-    /// A future enhancement could fold in `store.channelNames(...)`
-    /// for hardware that exposes per-channel labels; kept numeric here
-    /// so labels stay compact under the 36 pt bar cap.
-    private var sourceLabels: [String] {
-        (1...max(1, route.config.mapping.count)).map { "\($0)" }
+    // MARK: - Channel labels (Task 16 § 4.7)
+
+    private var sourceNames: [String] {
+        store.channelNames(uid: route.config.source.uid, direction: .input)
+    }
+    private var destNames: [String] {
+        store.channelNames(uid: route.config.destination.uid, direction: .output)
     }
 
-    private var destLabels: [String] {
-        (1...max(1, route.config.mapping.count)).map { "\($0)" }
+    private func stripPrimaryLabel(_ i: Int) -> String {
+        if isCompact { return "\(i + 1)" }
+        let srcCh = Int(route.config.mapping[i].src)
+        return ChannelLabel.format(index: srcCh, names: sourceNames)
+    }
+
+    private func stripTooltip(_ i: Int) -> String {
+        let srcCh = Int(route.config.mapping[i].src)
+        let dstCh = Int(route.config.mapping[i].dst)
+        let src = ChannelLabel.format(index: srcCh, names: sourceNames)
+        let dst = ChannelLabel.format(index: dstCh, names: destNames)
+        return "\(src) → \(dst)"
+    }
+
+    /// SOURCE column width scales with channel count so each bar gets a
+    /// reasonable footprint (~16-20 px per bar in non-compact, ~10 px in
+    /// compact).
+    private var sourceColumnWidth: CGFloat {
+        let perBar: CGFloat = isCompact ? 12 : 18
+        let extra: CGFloat = 24       // padding + label header
+        return min(220, max(80, CGFloat(channelCount) * perBar + extra))
+    }
+
+    private var sourceLabels: [String] {
+        (1...channelCount).map { "\($0)" }
+    }
+
+    private func peakAt(_ i: Int) -> Float {
+        guard i < peaks.destination.count else { return 0 }
+        return peaks.destination[i]
+    }
+
+    // MARK: - Bindings into the store's Route model
+
+    private func masterBinding() -> Binding<Float> {
+        Binding<Float>(
+            get: { store.routes.first(where: { $0.id == route.id })?.masterGainDb ?? 0 },
+            set: { store.setMasterGainDb(routeId: route.id, db: $0) }
+        )
+    }
+
+    private func muteBinding() -> Binding<Bool> {
+        Binding<Bool>(
+            get: { store.routes.first(where: { $0.id == route.id })?.muted ?? false },
+            set: { store.setRouteMuted(routeId: route.id, muted: $0) }
+        )
+    }
+
+    private func trimBinding(channelIndex: Int) -> Binding<Float> {
+        Binding<Float>(
+            get: {
+                let r = store.routes.first(where: { $0.id == route.id })
+                let trims = r?.trimDbs ?? []
+                return channelIndex < trims.count ? trims[channelIndex] : 0
+            },
+            set: {
+                store.setChannelTrimDb(
+                    routeId: route.id,
+                    channelIndex: channelIndex,
+                    db: $0)
+            }
+        )
     }
 }
 
-/// One side of the meter strip. Bars use `maxWidth: .infinity` inside
-/// a capped container so small channel counts spread to comfortable
-/// widths while large channel counts still fit without pushing the
-/// row.
+/// SOURCE column for the mixer-strip layout — pre-fader bars in the
+/// bar zone, using the same band structure as `ChannelStripColumn` and
+/// `MasterFaderStrip` so its bar zone aligns with theirs in the
+/// MeterPanel HStack.
+struct SourceColumn: View {
+    let routeId: UInt32
+    let peaks: [Float]
+    let labels: [String]
+    let store: EngineStore
+    let now: TimeInterval
+    let isCompact: Bool
+
+    var body: some View {
+        VStack(spacing: 4) {
+            // Header band.
+            Text("SOURCE")
+                .font(.system(size: isCompact ? 9 : 10, weight: .bold))
+                .tracking(0.4)
+                .foregroundStyle(.secondary)
+                .frame(height: MeterPanelLayout.headerBandHeight)
+            // Top cap band.
+            Text("0")
+                .font(.system(size: 8))
+                .foregroundStyle(.tertiary)
+                .frame(height: MeterPanelLayout.capBandHeight)
+            // Bar zone — flex height; per-channel bars row.
+            HStack(alignment: .bottom, spacing: isCompact ? 3 : 5) {
+                ForEach(Array(peaks.enumerated()), id: \.offset) { i, v in
+                    let hold = store.heldPeak(routeId: routeId,
+                                              side: .source,
+                                              channel: i,
+                                              now: now)
+                    ChannelBar(peak: v, hold: hold)
+                        .frame(width: isCompact ? 10 : 14)
+                }
+            }
+            .frame(maxHeight: .infinity)
+            // Bottom cap band.
+            Text("−60")
+                .font(.system(size: 8))
+                .foregroundStyle(.tertiary)
+                .frame(height: MeterPanelLayout.capBandHeight)
+            // Readout band — channel-number labels (no dB readout for the
+            // source side; the fader sits on the dest side).
+            HStack(spacing: isCompact ? 3 : 5) {
+                ForEach(Array(labels.enumerated()), id: \.offset) { _, label in
+                    Text(label)
+                        .font(.system(size: 9, weight: .medium).monospacedDigit())
+                        .frame(width: isCompact ? 10 : 14)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .frame(height: MeterPanelLayout.readoutBandHeight)
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 6)
+        .background(
+            RoundedRectangle(cornerRadius: 5)
+                .fill(Color(red: 0.13, green: 0.13, blue: 0.15))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 5)
+                .stroke(Color.secondary.opacity(0.22), lineWidth: 1)
+        )
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("Source meters")
+    }
+}
+
+/// Shared dBFS scale column. Empty header / cap / readout bands keep its
+/// bar zone aligned with the strip columns; the only visible content is
+/// the `DbScale` canvas itself.
+struct ScaleColumn: View {
+    var body: some View {
+        VStack(spacing: 4) {
+            Color.clear.frame(height: MeterPanelLayout.headerBandHeight)
+            Color.clear.frame(height: MeterPanelLayout.capBandHeight)
+            DbScale()
+                .frame(maxHeight: .infinity)
+            Color.clear.frame(height: MeterPanelLayout.capBandHeight)
+            Color.clear.frame(height: MeterPanelLayout.readoutBandHeight)
+        }
+        .padding(.vertical, 6)
+        .accessibilityHidden(true)
+    }
+}
+
+/// Legacy bar group, retained for any out-of-tree consumers; the
+/// new mixer-strip layout uses `SourceColumn` instead. Bars use
+/// `maxWidth: .infinity` inside a capped container so small channel
+/// counts spread to comfortable widths while large channel counts still
+/// fit without pushing the row.
 struct BarGroup: View {
     let title: String
     let labels: [String]
@@ -170,13 +350,13 @@ struct BarGroup: View {
 /// Shared dB gridline / label strip drawn once per side, next to the
 /// bar cluster.
 struct DbScale: View {
-    private static let marks: [(dB: Float, label: String)] = [
-        (0, "0"), (-3, "-3"), (-6, "-6"), (-20, "-20"), (-40, "-40"), (-60, "-60")
-    ]
+    private static let marks = MeterLevel.dawScaleMarks
 
     var body: some View {
         Canvas { ctx, size in
-            for (dB, label) in Self.marks {
+            for mark in Self.marks {
+                let dB = mark.dB
+                let label = mark.label
                 let frac = MeterLevel.fractionFor(dB: dB)
                 let y = size.height * (1 - CGFloat(frac))
                 var line = Path()
@@ -373,7 +553,11 @@ private func meterPanelPreview(channels: Int) -> some View {
     meterPanelPreview(channels: 2)
 }
 
-#Preview("MeterPanel — 8 channels") {
+#Preview("MeterPanel — 4 channels (default tier)") {
+    meterPanelPreview(channels: 4)
+}
+
+#Preview("MeterPanel — 8 channels (compact tier)") {
     meterPanelPreview(channels: 8)
 }
 
