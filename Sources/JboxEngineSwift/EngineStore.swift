@@ -110,18 +110,38 @@ public struct Route: Identifiable, Equatable, Sendable {
     public let createdAt: Date
     public var modifiedAt: Date
 
+    /// ABI v14 — master VCA-style fader, in dB. 0 = unity. -.infinity = silence.
+    /// Default 0 so existing call sites stay at unity gain.
+    /// Persisted in StoredRoute (Task 10) and surfaced via EngineStore
+    /// setters (Task 11).
+    public var masterGainDb: Float = 0.0
+
+    /// ABI v14 — per-channel trim, in dB. Length matches `config.mapping.count`
+    /// for routes added through EngineStore; legacy / direct-init paths may
+    /// leave it empty (which is treated as "all 0 dB" by the engine).
+    public var trimDbs: [Float] = []
+
+    /// ABI v14 — mute toggle, independent of fader state. Default false.
+    public var muted: Bool = false
+
     public init(id: UInt32,
                 config: RouteConfig,
                 status: RouteStatus,
                 persistId: UUID = UUID(),
                 createdAt: Date = Date(),
-                modifiedAt: Date = Date()) {
-        self.id         = id
-        self.persistId  = persistId
-        self.config     = config
-        self.status     = status
-        self.createdAt  = createdAt
-        self.modifiedAt = modifiedAt
+                modifiedAt: Date = Date(),
+                masterGainDb: Float = 0.0,
+                trimDbs: [Float] = [],
+                muted: Bool = false) {
+        self.id           = id
+        self.persistId    = persistId
+        self.config       = config
+        self.status       = status
+        self.createdAt    = createdAt
+        self.modifiedAt   = modifiedAt
+        self.masterGainDb = masterGainDb
+        self.trimDbs      = trimDbs
+        self.muted        = muted
     }
 }
 

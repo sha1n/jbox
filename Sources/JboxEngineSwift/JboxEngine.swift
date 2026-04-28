@@ -374,13 +374,10 @@ public final class Engine {
             try destUID.withCString { dstPtr in
                 try name.withCString { namePtr in
                     try cEdges.withUnsafeBufferPointer { edgesPtr in
-                        // ABI v14: jbox_route_config_t gained four
-                        // per-route gain fields. Task 9 will replace
-                        // these literals with values pulled off the
-                        // Swift Route model; for now we pass the
-                        // zero-init defaults (= unity, no trims, not
-                        // muted) so the auto-generated memberwise
-                        // init compiles.
+                        // ABI v14 gain fields are not exposed at addRoute time —
+                        // runtime gain mutation happens via EngineStore.setMasterGainDb /
+                        // setChannelTrimDb / setRouteMuted (which call the matching C
+                        // setters). New routes start at unity / no trim / unmuted.
                         var cfg = jbox_route_config_t(
                             source_uid: srcPtr,
                             dest_uid: dstPtr,
