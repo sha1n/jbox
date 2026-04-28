@@ -445,6 +445,79 @@ std::vector<RouteRecord*> RouteManager::runningRoutes() {
     return out;
 }
 
+void RouteManager::handleDeviceChanges(
+    const std::vector<DeviceChangeEvent>& events) {
+    // 7.6.4: react to backend-emitted topology changes.
+    //
+    // Two kinds of work to do per drained event batch:
+    //
+    //   (1) Force-stop running routes whose source / destination
+    //       UID matches a kDeviceIsNotAlive event. The route
+    //       transitions to WAITING with last_error = DEVICE_GONE
+    //       (vs JBOX_OK on initial-WAITING from startRoute) so the
+    //       UI can differentiate "waiting on first plug-in" from
+    //       "yanked, recovering". Idempotent: an already-WAITING
+    //       route on the same UID is left alone.
+    //
+    //   (2) Refresh the device manager + retry every WAITING route
+    //       on any kDeviceListChanged or kAggregateMembersChanged
+    //       event. attemptStart already handles "still missing →
+    //       stay WAITING" gracefully, so a burst of events during
+    //       a sample-rate cascade collapses naturally.
+    //
+    // Coalescing is implicit: two passes — losses first, then
+    // reappearance + refresh — so a single batch carrying both
+    // kinds (e.g. a device flap) leaves the manager in a coherent
+    // state at the end. No timer-based debounce inside this method;
+    // see `device_change_watcher.hpp` for the rationale.
+    if (events.empty()) return;
+
+    bool any_list_change = false;
+    for (const auto& ev : events) {
+        switch (ev.kind) {
+            case DeviceChangeEvent::kDeviceIsNotAlive: {
+                if (ev.uid.empty()) continue;
+                for (auto& [id, rec] : routes_) {
+                    auto& r = *rec;
+                    if (r.state != JBOX_ROUTE_STATE_RUNNING) continue;
+                    if (r.source_uid != ev.uid && r.dest_uid != ev.uid) continue;
+                    // Tear down — releases ring / converter / scratch /
+                    // mux attachments — then transition to WAITING with
+                    // the device-loss origin code. teardown() always
+                    // sets state = STOPPED + last_error = JBOX_OK; we
+                    // override both immediately afterward.
+                    teardown(r);
+                    r.state      = JBOX_ROUTE_STATE_WAITING;
+                    r.last_error = JBOX_ERR_DEVICE_GONE;
+                    tryPushLog(log_queue_, jbox::rt::kLogRouteWaiting,
+                               id,
+                               r.source_uid == ev.uid ? 1u : 0u,
+                               r.dest_uid   == ev.uid ? 1u : 0u);
+                }
+                break;
+            }
+            case DeviceChangeEvent::kDeviceListChanged:
+            case DeviceChangeEvent::kAggregateMembersChanged: {
+                any_list_change = true;
+                break;
+            }
+        }
+    }
+
+    // (2) — collapse all list-changed / members-changed events into a
+    // single refresh + retry pass. Refresh updates the cached
+    // enumeration so attemptStart's `dm_.findByUid` lookups see the
+    // new topology.
+    if (any_list_change) {
+        dm_.refresh();
+        for (auto& [id, rec] : routes_) {
+            auto& r = *rec;
+            if (r.state != JBOX_ROUTE_STATE_WAITING) continue;
+            (void)attemptStart(r);
+        }
+    }
+}
+
 // -----------------------------------------------------------------------------
 // Internal helpers
 // -----------------------------------------------------------------------------

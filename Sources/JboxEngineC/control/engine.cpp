@@ -2,6 +2,7 @@
 
 #include "engine.hpp"
 
+#include <chrono>
 #include <utility>
 
 namespace jbox::control {
@@ -11,14 +12,27 @@ Engine::Engine(std::unique_ptr<IDeviceBackend> backend,
                bool spawn_log_drainer)
     : drainer_(spawn_log_drainer ? std::make_unique<LogDrainer>() : nullptr),
       dm_(std::move(backend)),
+      // Watcher must be constructed AFTER dm_ — the backend reference
+      // it captures is dm_.backend(), and dm_ owns that backend.
+      watcher_(dm_.backend()),
       rm_(dm_, drainer_ ? drainer_->queue() : nullptr),
       sampler_(rm_) {
     dm_.refresh();
-    if (spawn_sampler_thread) sampler_.start();
+    if (spawn_sampler_thread) {
+        sampler_.start();
+        // 7.6.4 hot-plug consumer. Same gating flag as the drift
+        // sampler: tests that opt out (`spawn_sampler_thread=false`)
+        // drive `tickHotPlug()` synchronously instead.
+        hotplug_running_.store(true, std::memory_order_release);
+        hotplug_thread_ = std::thread(&Engine::hotPlugThreadLoop, this);
+    }
 }
 
 Engine::~Engine() {
     sampler_.stop();
+    if (hotplug_running_.exchange(false, std::memory_order_acq_rel)) {
+        if (hotplug_thread_.joinable()) hotplug_thread_.join();
+    }
     // Stop the drainer explicitly before the member destructors run,
     // so any control-thread events queued during rm_ teardown are
     // drained to the sink.
@@ -27,6 +41,25 @@ Engine::~Engine() {
 
 const std::vector<BackendDeviceInfo>& Engine::enumerateDevices() {
     return dm_.refresh();
+}
+
+void Engine::tickHotPlug() {
+    auto events = watcher_.drain();
+    if (events.empty()) return;
+    rm_.handleDeviceChanges(events);
+}
+
+void Engine::hotPlugThreadLoop() {
+    using namespace std::chrono;
+    auto next = steady_clock::now();
+    constexpr auto period = milliseconds(100);  // 10 Hz
+    while (hotplug_running_.load(std::memory_order_relaxed)) {
+        next += period;
+        const auto now = steady_clock::now();
+        if (next < now) next = now;
+        std::this_thread::sleep_until(next);
+        tickHotPlug();
+    }
 }
 
 std::vector<std::string> Engine::channelNames(const std::string& uid,

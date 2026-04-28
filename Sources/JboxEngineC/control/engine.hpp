@@ -13,13 +13,16 @@
 #define JBOX_CONTROL_ENGINE_HPP
 
 #include "device_backend.hpp"
+#include "device_change_watcher.hpp"
 #include "device_manager.hpp"
 #include "drift_sampler.hpp"
 #include "log_drainer.hpp"
 #include "route_manager.hpp"
 #include "jbox_engine.h"
 
+#include <atomic>
 #include <memory>
+#include <thread>
 #include <vector>
 
 namespace jbox::control {
@@ -44,6 +47,14 @@ public:
     // invalid direction.
     std::vector<std::string> channelNames(const std::string& uid,
                                           std::uint32_t direction);
+
+    // Phase 7.6.4: drain the device-change watcher and feed every
+    // pending event to RouteManager::handleDeviceChanges. Driven by
+    // an internal 10 Hz consumer thread that ships when
+    // `spawn_sampler_thread = true`; tests that opt out of that
+    // thread call `tickHotPlug()` synchronously to drive the same
+    // path. Idempotent — safe to call when no events are pending.
+    void tickHotPlug();
 
     // Forwards to RouteManager.
     jbox_route_id_t  addRoute(const RouteManager::RouteConfig& cfg,
@@ -75,18 +86,27 @@ public:
         return rm_.resamplerQuality();
     }
 
-    DeviceManager&   deviceManager() { return dm_; }
-    RouteManager&    routeManager()  { return rm_; }
-    DriftSampler&    driftSampler()  { return sampler_; }
-    LogDrainer*      logDrainer()    { return drainer_.get(); }
+    DeviceManager&         deviceManager()       { return dm_; }
+    RouteManager&          routeManager()        { return rm_; }
+    DriftSampler&          driftSampler()        { return sampler_; }
+    LogDrainer*            logDrainer()          { return drainer_.get(); }
+    DeviceChangeWatcher&   deviceChangeWatcher() { return watcher_; }
 
 private:
+    // 10 Hz consumer loop: drains `watcher_` and feeds the events to
+    // `rm_.handleDeviceChanges`. Tied to `spawn_sampler_thread` —
+    // tests that pass false drive `tickHotPlug` synchronously instead.
+    void hotPlugThreadLoop();
+
     // The drainer is owned here so both the queue pointer (handed to
     // RouteManager) and the consumer thread share one lifetime.
     std::unique_ptr<LogDrainer> drainer_;
-    DeviceManager dm_;
-    RouteManager  rm_;
-    DriftSampler  sampler_;
+    DeviceManager       dm_;
+    DeviceChangeWatcher watcher_;
+    RouteManager        rm_;
+    DriftSampler        sampler_;
+    std::atomic<bool>   hotplug_running_{false};
+    std::thread         hotplug_thread_;
 };
 
 }  // namespace jbox::control

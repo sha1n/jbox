@@ -27,6 +27,7 @@
 #include "atomic_meter.hpp"
 #include "audio_converter_wrapper.hpp"
 #include "channel_mapper.hpp"
+#include "device_backend.hpp"
 #include "device_io_mux.hpp"
 #include "device_manager.hpp"
 #include "drift_tracker.hpp"
@@ -244,6 +245,20 @@ public:
     // Control-thread only. Returns raw pointers into the owning map;
     // the pointers are valid until the next add/remove/stop call.
     std::vector<RouteRecord*> runningRoutes();
+
+    // Phase 7.6.4 device-loss / hot-plug reaction. Apply each event:
+    //   - kDeviceIsNotAlive: any running route whose source_uid or
+    //     dest_uid matches transitions to WAITING with last_error
+    //     set to JBOX_ERR_DEVICE_GONE. Idempotent — already-WAITING
+    //     routes on the same UID are left alone.
+    //   - kDeviceListChanged / kAggregateMembersChanged: refresh the
+    //     DeviceManager snapshot, then attempt to start every route
+    //     in WAITING. attemptStart returns the route to RUNNING when
+    //     its devices reappear; otherwise it stays WAITING.
+    //
+    // Control-thread only. Caller is responsible for draining the
+    // DeviceChangeWatcher queue and passing the snapshot here.
+    void handleDeviceChanges(const std::vector<DeviceChangeEvent>& events);
 
     // Engine-wide resampler quality preset. Read at `attemptStart` when
     // constructing each route's `AudioConverterWrapper` — changing it

@@ -3,6 +3,7 @@
 
 #include <catch_amalgamated.hpp>
 
+#include "device_backend.hpp"
 #include "device_manager.hpp"
 #include "route_manager.hpp"
 #include "rt_log_codes.hpp"
@@ -14,6 +15,7 @@
 
 using jbox::control::BackendDeviceInfo;
 using jbox::control::ChannelEdge;
+using jbox::control::DeviceChangeEvent;
 using jbox::control::DeviceManager;
 using jbox::control::kBackendDirectionInput;
 using jbox::control::kBackendDirectionOutput;
@@ -1517,5 +1519,211 @@ TEST_CASE("RouteManager: mux teardown leaves slot populated when retries exhaust
     // Output close consumed budget #2; the destructor's retry on the
     // output side has nothing to retry (it cleared on first attempt).
     REQUIRE(backend->hasOutputCallback("dst") == false);
+}
+
+// -----------------------------------------------------------------------------
+// Phase 7.6.4 — device-loss reaction + auto-recovery.
+//
+// `RouteManager::handleDeviceChanges` is the reaction layer for HAL
+// topology events surfaced via DeviceChangeWatcher. The contract:
+//
+//   - kDeviceIsNotAlive on a UID matching a RUNNING route's source or
+//     destination → teardown the route and transition to WAITING with
+//     last_error = JBOX_ERR_DEVICE_GONE.
+//   - kDeviceListChanged / kAggregateMembersChanged → refresh the
+//     DeviceManager snapshot, then attempt to start every WAITING
+//     route (auto-recovery on reappearance).
+//   - Idempotent on repeats (already-WAITING route stays WAITING).
+//   - Routes whose UIDs don't match the event are untouched.
+//
+// Tests drive the simulator's simulateDevice* seams and observe state
+// transitions through pollStatus. No real Engine + watcher integration
+// here — those tests live in engine_test (or are deferred to manual
+// hardware acceptance).
+// -----------------------------------------------------------------------------
+
+TEST_CASE("RouteManager: device loss on src uid transitions running route to WAITING with DEVICE_GONE",
+          "[route_manager][device_loss]") {
+    auto backend_ptr = std::make_unique<SimulatedBackend>();
+    SimulatedBackend* backend = backend_ptr.get();
+    backend->addDevice(makeInputDevice("src", 2));
+    backend->addDevice(makeOutputDevice("dst", 2));
+    auto dm = std::make_unique<DeviceManager>(std::move(backend_ptr));
+    dm->refresh();
+    RouteManager rm(*dm);
+
+    std::vector<ChannelEdge> m{{0, 0}, {1, 1}};
+    RouteManager::RouteConfig cfg{"src", "dst", m, "loss-on-src"};
+    jbox_error_t err{};
+    const auto id = rm.addRoute(cfg, &err);
+    REQUIRE(rm.startRoute(id) == JBOX_OK);
+
+    // Simulate the source device disappearing. The HAL would emit
+    // kDeviceIsNotAlive followed by kDeviceListChanged. To match
+    // production semantics — handleDeviceChanges runs *after* the
+    // backend's state already reflects the loss — drop the device
+    // from the simulator before driving the events.
+    backend->removeDevice("src");
+    rm.handleDeviceChanges({
+        {DeviceChangeEvent::kDeviceIsNotAlive,  "src"},
+        {DeviceChangeEvent::kDeviceListChanged, "src"},
+    });
+
+    jbox_route_status_t status{};
+    REQUIRE(rm.pollStatus(id, &status) == JBOX_OK);
+    REQUIRE(status.state      == JBOX_ROUTE_STATE_WAITING);
+    REQUIRE(status.last_error == JBOX_ERR_DEVICE_GONE);
+}
+
+TEST_CASE("RouteManager: device loss on dst uid also transitions to WAITING",
+          "[route_manager][device_loss]") {
+    auto backend_ptr = std::make_unique<SimulatedBackend>();
+    SimulatedBackend* backend = backend_ptr.get();
+    backend->addDevice(makeInputDevice("src", 2));
+    backend->addDevice(makeOutputDevice("dst", 2));
+    auto dm = std::make_unique<DeviceManager>(std::move(backend_ptr));
+    dm->refresh();
+    RouteManager rm(*dm);
+
+    std::vector<ChannelEdge> m{{0, 0}};
+    RouteManager::RouteConfig cfg{"src", "dst", m, "loss-on-dst"};
+    jbox_error_t err{};
+    const auto id = rm.addRoute(cfg, &err);
+    REQUIRE(rm.startRoute(id) == JBOX_OK);
+
+    backend->removeDevice("dst");
+    rm.handleDeviceChanges({
+        {DeviceChangeEvent::kDeviceIsNotAlive,  "dst"},
+        {DeviceChangeEvent::kDeviceListChanged, "dst"},
+    });
+
+    jbox_route_status_t status{};
+    REQUIRE(rm.pollStatus(id, &status) == JBOX_OK);
+    REQUIRE(status.state      == JBOX_ROUTE_STATE_WAITING);
+    REQUIRE(status.last_error == JBOX_ERR_DEVICE_GONE);
+}
+
+TEST_CASE("RouteManager: device loss on an unrelated uid leaves running route alone",
+          "[route_manager][device_loss]") {
+    auto backend_ptr = std::make_unique<SimulatedBackend>();
+    backend_ptr->addDevice(makeInputDevice("src", 2));
+    backend_ptr->addDevice(makeOutputDevice("dst", 2));
+    backend_ptr->addDevice(makeInputDevice("other", 2));
+    auto dm = std::make_unique<DeviceManager>(std::move(backend_ptr));
+    dm->refresh();
+    RouteManager rm(*dm);
+
+    std::vector<ChannelEdge> m{{0, 0}};
+    RouteManager::RouteConfig cfg{"src", "dst", m, "unrelated-loss"};
+    jbox_error_t err{};
+    const auto id = rm.addRoute(cfg, &err);
+    REQUIRE(rm.startRoute(id) == JBOX_OK);
+
+    rm.handleDeviceChanges({
+        {DeviceChangeEvent::kDeviceIsNotAlive,  "other"},
+        {DeviceChangeEvent::kDeviceListChanged, "other"},
+    });
+
+    jbox_route_status_t status{};
+    REQUIRE(rm.pollStatus(id, &status) == JBOX_OK);
+    REQUIRE(status.state == JBOX_ROUTE_STATE_RUNNING);
+}
+
+TEST_CASE("RouteManager: device loss is idempotent — repeat events keep route WAITING",
+          "[route_manager][device_loss]") {
+    auto backend_ptr = std::make_unique<SimulatedBackend>();
+    backend_ptr->addDevice(makeInputDevice("src", 2));
+    backend_ptr->addDevice(makeOutputDevice("dst", 2));
+    auto dm = std::make_unique<DeviceManager>(std::move(backend_ptr));
+    dm->refresh();
+    RouteManager rm(*dm);
+
+    std::vector<ChannelEdge> m{{0, 0}};
+    RouteManager::RouteConfig cfg{"src", "dst", m, "idempotent-loss"};
+    jbox_error_t err{};
+    const auto id = rm.addRoute(cfg, &err);
+    REQUIRE(rm.startRoute(id) == JBOX_OK);
+
+    // First batch: route → WAITING.
+    rm.handleDeviceChanges({
+        {DeviceChangeEvent::kDeviceIsNotAlive, "src"},
+    });
+    jbox_route_status_t status{};
+    REQUIRE(rm.pollStatus(id, &status) == JBOX_OK);
+    REQUIRE(status.state == JBOX_ROUTE_STATE_WAITING);
+
+    // Second batch on same uid: still WAITING, no error promotion.
+    rm.handleDeviceChanges({
+        {DeviceChangeEvent::kDeviceIsNotAlive, "src"},
+        {DeviceChangeEvent::kDeviceIsNotAlive, "src"},
+    });
+    REQUIRE(rm.pollStatus(id, &status) == JBOX_OK);
+    REQUIRE(status.state      == JBOX_ROUTE_STATE_WAITING);
+    REQUIRE(status.last_error == JBOX_ERR_DEVICE_GONE);
+}
+
+TEST_CASE("RouteManager: kDeviceListChanged refreshes DeviceManager and retries WAITING routes",
+          "[route_manager][device_loss]") {
+    // Setup: src is missing initially → route enters WAITING via the
+    // existing user-driven start path. A simulateDeviceReappearance
+    // adds src back; handleDeviceChanges with kDeviceListChanged
+    // refreshes dm_ + retries. Route reaches RUNNING without an
+    // explicit user-driven retry.
+    auto backend_holder = std::make_unique<SimulatedBackend>();
+    auto* backend = backend_holder.get();
+    backend->addDevice(makeOutputDevice("dst", 2));
+    auto dm = std::make_unique<DeviceManager>(std::move(backend_holder));
+    dm->refresh();
+    RouteManager rm(*dm);
+
+    std::vector<ChannelEdge> m{{0, 0}};
+    RouteManager::RouteConfig cfg{"src", "dst", m, "auto-recover"};
+    jbox_error_t err{};
+    const auto id = rm.addRoute(cfg, &err);
+    REQUIRE(rm.startRoute(id) == JBOX_OK);
+    jbox_route_status_t status{};
+    REQUIRE(rm.pollStatus(id, &status) == JBOX_OK);
+    REQUIRE(status.state == JBOX_ROUTE_STATE_WAITING);
+
+    // src reappears in the backend snapshot.
+    backend->addDevice(makeInputDevice("src", 2));
+    rm.handleDeviceChanges({
+        {DeviceChangeEvent::kDeviceListChanged, "src"},
+    });
+
+    REQUIRE(rm.pollStatus(id, &status) == JBOX_OK);
+    REQUIRE(status.state == JBOX_ROUTE_STATE_RUNNING);
+}
+
+TEST_CASE("RouteManager: device loss on shared device transitions all attached routes",
+          "[route_manager][device_loss]") {
+    // Two routes with the same source — when the source is lost both
+    // must transition to WAITING in a single handleDeviceChanges call.
+    auto backend_ptr = std::make_unique<SimulatedBackend>();
+    backend_ptr->addDevice(makeInputDevice("src", 2));
+    backend_ptr->addDevice(makeOutputDevice("dst1", 2));
+    backend_ptr->addDevice(makeOutputDevice("dst2", 2));
+    auto dm = std::make_unique<DeviceManager>(std::move(backend_ptr));
+    dm->refresh();
+    RouteManager rm(*dm);
+
+    std::vector<ChannelEdge> mapping{{0, 0}};
+    RouteManager::RouteConfig cfg_a{"src", "dst1", mapping, "shared-a"};
+    RouteManager::RouteConfig cfg_b{"src", "dst2", mapping, "shared-b"};
+    jbox_error_t err{};
+    const auto id_a = rm.addRoute(cfg_a, &err);
+    const auto id_b = rm.addRoute(cfg_b, &err);
+    REQUIRE(rm.startRoute(id_a) == JBOX_OK);
+    REQUIRE(rm.startRoute(id_b) == JBOX_OK);
+
+    rm.handleDeviceChanges({
+        {DeviceChangeEvent::kDeviceIsNotAlive, "src"},
+    });
+
+    jbox_route_status_t status{};
+    REQUIRE(rm.pollStatus(id_a, &status) == JBOX_OK);
+    REQUIRE(status.state == JBOX_ROUTE_STATE_WAITING);
+    REQUIRE(rm.pollStatus(id_b, &status) == JBOX_OK);
+    REQUIRE(status.state == JBOX_ROUTE_STATE_WAITING);
 }
 
