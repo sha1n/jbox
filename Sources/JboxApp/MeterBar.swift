@@ -1,9 +1,12 @@
 import SwiftUI
 import JboxEngineSwift
 
-/// Expanded-route meter panel. Renders the source-side bar group, a
-/// direction arrow, and the destination-side bar group, with each
-/// group growing to fill available row width. Spec § 4.5.
+/// Expanded-route meter panel. Renders two outlined sections side by
+/// side: SOURCE (input bar meters on the left) and DESTINATION
+/// (per-channel strips + VCA pinned on the far right). Section widths
+/// are partitioned by `MixerPanelLayout.sectionWidths` so the two
+/// sections share an identical per-channel-strip area and the
+/// destination is wider only by exactly the VCA-strip slot. Spec § 4.5.
 ///
 /// A local `TimelineView` redraws at ~30 Hz so peak-hold ticks decay
 /// smoothly between the store's `pollMeters()` passes (which run at
@@ -17,74 +20,44 @@ struct MeterPanel: View {
     private var showDiagnostics = false
 
     private var channelCount: Int { max(1, route.config.mapping.count) }
-    private var isCompact: Bool   { channelCount >= 6 }
-    /// Total height of the mixer-strip row. Every column expands to this
-    /// height; bar zones inside each column take whatever is left after
-    /// the fixed-height top/bottom bands. This is the "everything same
-    /// height, use most of the panel height, just keep some padding"
-    /// rule.
-    private var panelHeight: CGFloat { isCompact ? 240 : 280 }
+    private var isCompact: Bool {
+        MixerPanelLayout.isCompact(channelCount: channelCount)
+    }
+    private var panelHeight: CGFloat {
+        MixerPanelLayout.panelHeight(isCompact: isCompact)
+    }
 
     var body: some View {
         TimelineView(.animation(minimumInterval: 1.0 / 30.0, paused: false)) { timeline in
             let now = timeline.date.timeIntervalSinceReferenceDate
             VStack(alignment: .leading, spacing: 16) {
-                // Every column in the row uses the same band layout —
-                // header, top cap, bar zone (flex), bottom cap, readout,
-                // optional action — so bar zones across SOURCE, the dB
-                // scale, the channel strips, and the master strip all
-                // anchor at the same y AND share the same bar-zone
-                // height.
-                HStack(alignment: .top, spacing: isCompact ? 6 : 10) {
+                GeometryReader { geo in
+                    let widths = MixerPanelLayout.sectionWidths(
+                        panelInnerWidth: geo.size.width,
+                        isCompact: isCompact)
 
-                    // SOURCE column — pre-fader bars in the bar zone.
-                    SourceColumn(
-                        routeId: route.id,
-                        peaks: peaks.source,
-                        labels: sourceLabels,
-                        store: store,
-                        now: now,
-                        isCompact: isCompact
-                    )
-                    .frame(width: sourceColumnWidth)
-                    .frame(maxHeight: .infinity)
-
-                    // dB scale column.
-                    ScaleColumn()
-                        .frame(width: 36)
+                    HStack(alignment: .top,
+                           spacing: MixerPanelLayout.sectionSpacing) {
+                        SourceSection(
+                            routeId: route.id,
+                            peaks: peaks.source,
+                            store: store,
+                            now: now,
+                            isCompact: isCompact
+                        )
+                        .frame(width: widths.source, alignment: .leading)
                         .frame(maxHeight: .infinity)
 
-                    // Per-channel strips — meter alongside trim fader.
-                    ForEach(0..<channelCount, id: \.self) { i in
-                        MixerStripColumn(
-                            title: stripPrimaryLabel(i),
-                            tooltip: stripTooltip(i),
-                            trimDb: trimBinding(channelIndex: i),
-                            muted: channelMutedBinding(channelIndex: i),
-                            peak: peakAt(i),
-                            hold: store.heldPeak(routeId: route.id,
-                                                 side: .destination,
-                                                 channel: i,
-                                                 now: now),
-                            isCompact: isCompact,
-                            style: .channel
+                        DestinationSection(
+                            route: route,
+                            store: store,
+                            peaks: peaks.destination,
+                            now: now,
+                            isCompact: isCompact
                         )
+                        .frame(width: widths.destination, alignment: .leading)
                         .frame(maxHeight: .infinity)
                     }
-
-                    // VCA strip on the far right — same widget, no meter.
-                    MixerStripColumn(
-                        title: "VCA",
-                        tooltip: nil,
-                        trimDb: vcaBinding(),
-                        muted: muteBinding(),
-                        peak: nil,
-                        hold: nil,
-                        isCompact: isCompact,
-                        style: .vca
-                    )
-                    .frame(maxHeight: .infinity)
-                    .padding(.leading, 4)
                 }
                 .frame(height: panelHeight)
                 .padding(.horizontal, 12)
@@ -102,8 +75,160 @@ struct MeterPanel: View {
             source: peaks.source,
             destination: peaks.destination))
     }
+}
 
-    // MARK: - Channel labels (Task 16 § 4.7)
+/// Outlined section frame used to wrap the SOURCE and DESTINATION
+/// halves of the mixer panel. Renders the section title above the
+/// content and a thin rounded border around the whole thing — the
+/// "console meter bridge" look. Content fills the remaining space so
+/// every section in the panel HStack ends at the same y.
+struct MeterSectionFrame<Content: View>: View {
+    let title: String
+    let content: Content
+
+    init(title: String, @ViewBuilder content: () -> Content) {
+        self.title = title
+        self.content = content()
+    }
+
+    var body: some View {
+        VStack(spacing: 12) {
+            Text(title)
+                .font(.system(size: 11, weight: .semibold))
+                .tracking(0.6)
+                .foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity, alignment: .center)
+                .padding(.top, 8)
+                .padding(.horizontal, 12)
+            content
+                .frame(maxHeight: .infinity)
+                .padding(.horizontal, 10)
+                .padding(.bottom, 10)
+        }
+        .background(
+            RoundedRectangle(cornerRadius: 7)
+                .fill(Color(red: 0.115, green: 0.115, blue: 0.13))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 7)
+                .stroke(Color.secondary.opacity(0.32), lineWidth: 1)
+        )
+    }
+}
+
+/// Anchored dB scale rendered inside a section frame. Used identically
+/// in SOURCE and DESTINATION so the scale visually anchors each
+/// section's bar zones at the same vertical extent. Padded top + bottom
+/// by `MixerPanelLayout.capBandHeight` so its tick range matches the
+/// strip columns' bar-zone range.
+private struct SectionScale: View {
+    var body: some View {
+        DbScale()
+            .frame(width: MixerPanelLayout.scaleColumnWidth)
+            .padding(.vertical, MixerPanelLayout.capBandHeight)
+    }
+}
+
+/// Horizontally-scrolling row of `MixerStripColumn` widgets. Used by
+/// both sections so the scroll behavior, indicator visibility, and
+/// trailing padding are defined once.
+private struct ScrollableStripRow<Content: View>: View {
+    let isCompact: Bool
+    let content: Content
+
+    init(isCompact: Bool, @ViewBuilder content: () -> Content) {
+        self.isCompact = isCompact
+        self.content = content()
+    }
+
+    var body: some View {
+        ScrollView(.horizontal, showsIndicators: true) {
+            HStack(alignment: .top,
+                   spacing: MixerPanelLayout.stripSpacing(isCompact: isCompact)) {
+                content
+            }
+            .padding(.trailing, 2)
+        }
+    }
+}
+
+/// Left half of the meter panel — pre-fader source bars rendered in the
+/// same `MixerStripColumn` widget as the destination strips (style
+/// `.sourceMeter`), so source and destination match colors / borders /
+/// title position / meter size / bar-zone height by construction.
+/// Section-local dB scale on the left mirrors the destination layout.
+struct SourceSection: View {
+    let routeId: UInt32
+    let peaks: [Float]
+    let store: EngineStore
+    let now: TimeInterval
+    let isCompact: Bool
+
+    private var stripCount: Int { max(1, peaks.count) }
+
+    private func peakAt(_ i: Int) -> Float {
+        guard i < peaks.count else { return 0 }
+        return peaks[i]
+    }
+
+    var body: some View {
+        MeterSectionFrame(title: "SOURCE") {
+            HStack(alignment: .top,
+                   spacing: MixerPanelLayout.stripSpacing(isCompact: isCompact)) {
+                SectionScale()
+
+                // Source meter strips — scroll horizontally when they
+                // overflow the section width. The dB scale stays
+                // anchored on the left, mirroring how the destination
+                // section pins its scale + VCA at the edges.
+                ScrollableStripRow(isCompact: isCompact) {
+                    ForEach(0..<stripCount, id: \.self) { i in
+                        MixerStripColumn(
+                            title: "\(i + 1)",
+                            tooltip: nil,
+                            trimDb: nil,
+                            muted: nil,
+                            peak: peakAt(i),
+                            hold: store.heldPeak(routeId: routeId,
+                                                 side: .source,
+                                                 channel: i,
+                                                 now: now),
+                            isCompact: isCompact,
+                            style: .sourceMeter
+                        )
+                        .frame(maxHeight: .infinity)
+                    }
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
+            }
+            .accessibilityElement(children: .combine)
+            .accessibilityLabel("Source meters")
+        }
+    }
+}
+
+/// Right half of the meter panel — per-channel strips plus the VCA on
+/// the far right. The strips scroll horizontally when the channel count
+/// exceeds the section's available width; the VCA strip and the
+/// section's own dB scale stay anchored at the edges. Owns its
+/// route-derived bindings (trim, channel mute, VCA, route mute) and
+/// strip labels — the parent `MeterPanel` only hands over `route` +
+/// `store` and the meter snapshot.
+struct DestinationSection: View {
+    let route: Route
+    let store: EngineStore
+    let peaks: [Float]
+    let now: TimeInterval
+    let isCompact: Bool
+
+    private var channelCount: Int { max(1, route.config.mapping.count) }
+
+    private func peakAt(_ i: Int) -> Float {
+        guard i < peaks.count else { return 0 }
+        return peaks[i]
+    }
+
+    // MARK: - Channel labels (Spec § 4.7)
 
     private var sourceNames: [String] {
         store.channelNames(uid: route.config.source.uid, direction: .input)
@@ -126,30 +251,11 @@ struct MeterPanel: View {
         return "\(src) → \(dst)"
     }
 
-    /// SOURCE column width scales with channel count so each bar gets a
-    /// reasonable footprint (~16-20 px per bar in non-compact, ~10 px in
-    /// compact).
-    private var sourceColumnWidth: CGFloat {
-        let perBar: CGFloat = isCompact ? 12 : 18
-        let extra: CGFloat = 24       // padding + label header
-        return min(220, max(80, CGFloat(channelCount) * perBar + extra))
-    }
-
-    private var sourceLabels: [String] {
-        (1...channelCount).map { "\($0)" }
-    }
-
-    private func peakAt(_ i: Int) -> Float {
-        guard i < peaks.destination.count else { return 0 }
-        return peaks.destination[i]
-    }
-
-    // MARK: - Bindings into the store's Route model
+    // MARK: - Route-derived bindings
 
     /// Binding for the VCA fader. Reads / writes `Route.masterGainDb` —
     /// the engine ABI keeps the historical "master_gain_db" name even
-    /// though the UI calls the control "VCA" (it's a non-summing
-    /// per-channel scalar, not a master bus).
+    /// though the UI calls the control "VCA".
     private func vcaBinding() -> Binding<Float> {
         Binding<Float>(
             get: { store.routes.first(where: { $0.id == route.id })?.masterGainDb ?? 0 },
@@ -164,126 +270,82 @@ struct MeterPanel: View {
         )
     }
 
-    private func trimBinding(channelIndex: Int) -> Binding<Float> {
+    private func trimBinding(channelIndex i: Int) -> Binding<Float> {
         Binding<Float>(
             get: {
                 let r = store.routes.first(where: { $0.id == route.id })
                 let trims = r?.trimDbs ?? []
-                return channelIndex < trims.count ? trims[channelIndex] : 0
+                return i < trims.count ? trims[i] : 0
             },
             set: {
-                store.setChannelTrimDb(
-                    routeId: route.id,
-                    channelIndex: channelIndex,
-                    db: $0)
+                store.setChannelTrimDb(routeId: route.id,
+                                       channelIndex: i, db: $0)
             }
         )
     }
 
-    /// Per-channel mute. Reads / writes `Route.channelMuted[i]`. Same
-    /// shape as `muteBinding()` for the route-wide VCA mute — toggling
-    /// it doesn't move the trim fader, the engine just sees `−∞` for
-    /// the muted channel until un-mute restores the user's trim.
-    private func channelMutedBinding(channelIndex: Int) -> Binding<Bool> {
+    /// Per-channel mute. Reads / writes `Route.channelMuted[i]` —
+    /// toggling it doesn't move the trim fader; the engine just sees
+    /// `−∞` for the muted channel until un-mute restores the trim.
+    private func channelMutedBinding(channelIndex i: Int) -> Binding<Bool> {
         Binding<Bool>(
             get: {
                 let r = store.routes.first(where: { $0.id == route.id })
                 let mutes = r?.channelMuted ?? []
-                return channelIndex < mutes.count ? mutes[channelIndex] : false
+                return i < mutes.count ? mutes[i] : false
             },
             set: {
-                store.setChannelMuted(
-                    routeId: route.id,
-                    channelIndex: channelIndex,
-                    muted: $0)
+                store.setChannelMuted(routeId: route.id,
+                                      channelIndex: i, muted: $0)
             }
         )
     }
-}
-
-/// SOURCE column for the mixer-strip layout — pre-fader bars in the
-/// bar zone, using the same band structure as `MixerStripColumn` so
-/// its bar zone aligns in the MeterPanel HStack.
-struct SourceColumn: View {
-    let routeId: UInt32
-    let peaks: [Float]
-    let labels: [String]
-    let store: EngineStore
-    let now: TimeInterval
-    let isCompact: Bool
 
     var body: some View {
-        VStack(spacing: 4) {
-            // Header band.
-            Text("SOURCE")
-                .font(.system(size: isCompact ? 9 : 10, weight: .bold))
-                .tracking(0.4)
-                .foregroundStyle(.secondary)
-                .frame(height: MeterPanelLayout.headerBandHeight)
-            // Top cap band.
-            Text("0")
-                .font(.system(size: 8))
-                .foregroundStyle(.tertiary)
-                .frame(height: MeterPanelLayout.capBandHeight)
-            // Bar zone — flex height; per-channel bars row.
-            HStack(alignment: .bottom, spacing: isCompact ? 3 : 5) {
-                ForEach(Array(peaks.enumerated()), id: \.offset) { i, v in
-                    let hold = store.heldPeak(routeId: routeId,
-                                              side: .source,
-                                              channel: i,
-                                              now: now)
-                    ChannelBar(peak: v, hold: hold)
-                        .frame(width: isCompact ? 10 : 14)
-                }
-            }
-            .frame(maxHeight: .infinity)
-            // Bottom cap band.
-            Text("−60")
-                .font(.system(size: 8))
-                .foregroundStyle(.tertiary)
-                .frame(height: MeterPanelLayout.capBandHeight)
-            // Readout band — channel-number labels (no dB readout for the
-            // source side; the fader sits on the dest side).
-            HStack(spacing: isCompact ? 3 : 5) {
-                ForEach(Array(labels.enumerated()), id: \.offset) { _, label in
-                    Text(label)
-                        .font(.system(size: 9, weight: .medium).monospacedDigit())
-                        .frame(width: isCompact ? 10 : 14)
-                        .foregroundStyle(.secondary)
-                }
-            }
-            .frame(height: MeterPanelLayout.readoutBandHeight)
-        }
-        .padding(.horizontal, 8)
-        .padding(.vertical, 6)
-        .background(
-            RoundedRectangle(cornerRadius: 5)
-                .fill(Color(red: 0.13, green: 0.13, blue: 0.15))
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 5)
-                .stroke(Color.secondary.opacity(0.22), lineWidth: 1)
-        )
-        .accessibilityElement(children: .combine)
-        .accessibilityLabel("Source meters")
-    }
-}
+        MeterSectionFrame(title: "DESTINATION") {
+            HStack(alignment: .top,
+                   spacing: MixerPanelLayout.stripSpacing(isCompact: isCompact)) {
+                SectionScale()
 
-/// Shared dBFS scale column. Empty header / cap / readout bands keep its
-/// bar zone aligned with the strip columns; the only visible content is
-/// the `DbScale` canvas itself.
-struct ScaleColumn: View {
-    var body: some View {
-        VStack(spacing: 4) {
-            Color.clear.frame(height: MeterPanelLayout.headerBandHeight)
-            Color.clear.frame(height: MeterPanelLayout.capBandHeight)
-            DbScale()
+                // Per-channel strips — scroll horizontally when they
+                // overflow. For the default 2-channel route the strips
+                // fit naturally and no scroll bar is shown.
+                ScrollableStripRow(isCompact: isCompact) {
+                    ForEach(0..<channelCount, id: \.self) { i in
+                        MixerStripColumn(
+                            title: stripPrimaryLabel(i),
+                            tooltip: stripTooltip(i),
+                            trimDb: trimBinding(channelIndex: i),
+                            muted: channelMutedBinding(channelIndex: i),
+                            peak: peakAt(i),
+                            hold: store.heldPeak(routeId: route.id,
+                                                 side: .destination,
+                                                 channel: i,
+                                                 now: now),
+                            isCompact: isCompact,
+                            style: .channel
+                        )
+                        .frame(maxHeight: .infinity)
+                    }
+                }
                 .frame(maxHeight: .infinity)
-            Color.clear.frame(height: MeterPanelLayout.capBandHeight)
-            Color.clear.frame(height: MeterPanelLayout.readoutBandHeight)
+
+                // VCA strip on the far right — stays put, doesn't scroll.
+                MixerStripColumn(
+                    title: "VCA",
+                    tooltip: nil,
+                    trimDb: vcaBinding(),
+                    muted: muteBinding(),
+                    peak: nil,
+                    hold: nil,
+                    isCompact: isCompact,
+                    style: .vca
+                )
+                .frame(maxHeight: .infinity)
+            }
+            .accessibilityElement(children: .contain)
+            .accessibilityLabel("Destination strips")
         }
-        .padding(.vertical, 6)
-        .accessibilityHidden(true)
     }
 }
 

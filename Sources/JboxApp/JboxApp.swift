@@ -43,6 +43,15 @@ struct JboxApp: App {
                     }
                 }
         }
+        // Default size sized so a single stereo route's expanded mixer
+        // panel (SOURCE + DESTINATION sections + VCA) fills the visible
+        // area without cropping. Wider channel counts overflow into
+        // horizontal scroll inside the sections; more routes overflow
+        // into the existing vertical list scroll. Constants live with
+        // the layout math in `MixerPanelLayout` so the window default
+        // and the panel's natural size stay in sync.
+        .defaultSize(width: MixerPanelLayout.defaultWindowSize.width,
+                     height: MixerPanelLayout.defaultWindowSize.height)
         .windowResizability(.contentMinSize)
 
         Settings {
@@ -570,7 +579,8 @@ struct AppRootView: View {
                 ProgressView("Starting engine…")
             }
         }
-        .frame(minWidth: 820, minHeight: 520)
+        .frame(minWidth: MixerPanelLayout.minWindowSize.width,
+               minHeight: MixerPanelLayout.minWindowSize.height)
         .task {
             appState.load()
         }

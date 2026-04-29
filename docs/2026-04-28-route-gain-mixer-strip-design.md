@@ -113,6 +113,18 @@ Today's `MeterPanel` uses purely numeric labels (`1`, `2`, …). The new mixer s
 
 **Caching.** `EngineStore` already caches device + channel-name snapshots; no new fetch happens during strip render. Names refresh when devices re-enumerate (existing `refreshDevices` path).
 
+### 4.8 Post-launch refinement — boxed sections, mirror layout, equal-base widths
+
+After Phase 7.7 shipped, the panel was iterated to split into two outlined sections — **SOURCE** and **DESTINATION** — with the destination receiving the VCA strip on its far right. Three invariants from this refinement are pinned by `MixerLayoutTests` and live as a single layout module (`MixerPanelLayout` + `MixerStripDimensions` in `JboxEngineSwift/MixerLayout.swift`) so a future commit can't drift them silently:
+
+1. **Equal-base section widths** — the panel inner width partitions into two sections, with DESTINATION wider than SOURCE by exactly `vcaSlotWidth` (VCA strip + strip spacing). The per-channel-strip area inside each section is identical.
+2. **Mirror strip layout** — `.sourceMeter` strips render the meter at the position where `.channel` strips render the *fader*; the fader-equivalent slot becomes a phantom spacer on source strips. Source meters and destination meters therefore sit on opposite sides of their respective strips, and `.channel` and `.sourceMeter` share `stripWidth` + `meterWidth` so the section frames line up.
+3. **Default window size** — `MixerPanelLayout.defaultWindowSize` is sized so a single stereo route's expanded panel fills the visible area on first launch. `minWindowSize` is the hard floor.
+
+Section titles are centered (`MeterSectionFrame`) with breathing room above the strips. Both sections wrap their per-channel strips in `ScrollView(.horizontal)` so multi-channel routes overflow into scroll while the dB-scale column and the VCA strip stay anchored at the section edges.
+
+The full description in `docs/spec.md § 4.5` is the authoritative one — this sub-section is the design narrative explaining *why* the panel landed in this shape after manual smoke testing.
+
 ---
 
 ## 5. Engine design
