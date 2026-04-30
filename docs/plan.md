@@ -39,7 +39,7 @@
 | 7     | Persistence + launch-at-login         | Relaunching the app restores configured routes; opt-in launch-at-login.                | ✅ Persistence + launch-at-login slices landed. Routes + preferences round-trip through `state.json`; the General Preferences "Launch at login" toggle is wired to `SMAppService.mainApp` via `LaunchAtLoginController` with one-time explanatory note (latched in `StoredPreferences.hasShownLaunchAtLoginNote`), `requiresApproval` callout + System Settings deep link, refresh-on-launch reconciliation. Scenes (and the sidebar shell that hosted them) **deferred to a future release** — see § 4.10 in `docs/spec.md` and the "After v1.0.0 — deferred work" entry below; v1 carries no schema reservation, the feature returns as a `v1 → v2` migration. |
 | 7.5   | Device sharing (hog-mode opt-out)     | ~~Per-route and global "share device with other apps" preference; lock-glyph indicator when hog mode is active.~~ | ⛔ **Superseded and reverted by Phase 7.6 simplification.** The hog-mode + buffer-shrink machinery this phase opted out of has been removed entirely from the engine. Share is now the only mode. |
 | 7.6   | Self-routing reliability              | Drop hog mode + HAL buffer-shrink. Users dial buffer in their interface software; Jbox respects it. Plus a per-route SD-style buffer preference (no hog), device hot-plug, sleep/wake, error-state UX. | 🚧 Big simplification landed (cuts ~2400 lines + Phase 7.5's ABI/UI surface). Re-added a no-hog `setBufferFrameSize` (ABI v10 → v11 additive) after Superior Drummer demonstrated the cascade was hog-eviction-side, not property-write-side. **7.6.3 robust teardown + 7.6.4 hot-plug listeners + 7.6.5 sleep/wake handling all landed engine-side (ABI v11 → v12 → v13 additive with `JBOX_ERR_DEVICE_GONE` + `JBOX_ERR_SYSTEM_SUSPENDED`).** 7.6.4's CoreAudioBackend HAL listener wiring + 7.6.5's MacosPowerEventSource both deferred to hardware-tested follow-ups. |
-| 8     | Packaging and installation            | `Jbox.app` runs from `/Applications` on a clean user account.                          | ⏳ Pending |
+| 8     | Packaging and installation            | `Jbox.app` runs from `/Applications` on a clean user account.                          | 🚧 Bundling lane (`bundle_app.sh` + `build_release.sh` + `package_unsigned_release.sh` + `run_app.sh`) shipped; rotating file sink (`os_log` + `~/Library/Logs/Jbox/<process>.log`, 5 MiB × 3 rotation, fail-silent on I/O errors) landed. Fresh-user smoke test on a clean macOS user account is the remaining item. |
 | 9     | Release hardening                     | v1.0.0 tagged and published to GitHub Releases.                                        | ⏳ Pending |
 
 ---
@@ -785,6 +785,8 @@ Phase 7.7 summary of deviations:
 
 ## Phase 8 — Packaging and installation
 
+**Status:** 🚧 Bundling lane + rotating file sink landed; fresh-user smoke test on a clean macOS user account is the only outstanding item.
+
 **Goal.** Produce a real distributable `.app` bundle. Make the installation story clear.
 
 **Entry criteria.** Phase 7 complete.
@@ -798,34 +800,40 @@ Phase 7.7 summary of deviations:
 **Tasks.**
 
 Scripts:
-- [ ] `scripts/bundle_app.sh` — full implementation:
-  - Create `build/Jbox.app/Contents/{MacOS,Resources}`.
-  - Copy `.build/release/JboxApp` → `Contents/MacOS/Jbox`.
-  - Generate `Info.plist` from template with version / build number / bundle id / microphone usage description.
-  - Copy `Jbox.icns` → `Contents/Resources/`.
-  - `codesign --sign - --force --options runtime Jbox.app` (ad-hoc signing with Hardened Runtime).
-- [ ] `scripts/build_release.sh` — convenience wrapper: `swift build -c release` + `bundle_app.sh`.
+- [x] `scripts/bundle_app.sh` — full implementation. Creates `build/Jbox.app/Contents/{MacOS,Resources}`; copies the release-mode `JboxApp` *and* `JboxEngineCLI` binaries into `Contents/MacOS/`; slices `assets/jbox-icon.png` into `Jbox.icns` via `sips` + `iconutil`; emits `Info.plist` (bundle id `dev.sha1n.Jbox`, `LSMinimumSystemVersion=15.0`, `NSMicrophoneUsageDescription`); emits `Jbox.entitlements` with `com.apple.security.device.audio-input`; ad-hoc signs with Hardened Runtime; post-sign greps the entitlement and fails the build if it's missing (Slice A silent-mic guard, see `CLAUDE.md`).
+- [x] `scripts/build_release.sh` — convenience wrapper: `swift build -c release` then `bundle_app.sh`.
 - [x] `scripts/package_unsigned_release.sh` — builds `Jbox-<version>.dmg` containing the `.app`, an `Applications` symlink, an `Uninstall Jbox.command`, and a `READ-THIS-FIRST.txt`. *(Landed early in `64c6fdd` so the release workflow could ship an alpha DMG.)*
-- [ ] `scripts/run_app.sh` — build + bundle + `open build/Jbox.app`.
+- [x] `scripts/run_app.sh` — build + bundle + `open build/Jbox.app`.
 
 Assets:
-- [ ] Create `Jbox.icns` (placeholder acceptable in early iterations; the project owner can provide or commission one).
-- [ ] `Info.plist.in` template with substitution tokens for version, build number, microphone usage description, bundle identifier.
+- [x] `Jbox.icns` is generated at bundle time from `assets/jbox-icon.png` (no committed `.icns`; `bundle_app.sh` slices the source PNG via `sips`/`iconutil`).
+- [x] `Info.plist` is rendered inline in `bundle_app.sh` via heredoc (no separate `Info.plist.in` template — single substitution site keeps version/build number/bundle id/microphone usage description discoverable in one file).
 
 Documentation:
 - [ ] Update `README.md` quick-start section if any install / build steps changed during implementation.
-- [ ] Add a `READ-THIS-FIRST.txt` template under `Sources/JboxApp/Resources/` used by `package_unsigned_release.sh`.
+- [x] `READ-THIS-FIRST.txt` is rendered inline in `package_unsigned_release.sh` (no committed template under `Sources/JboxApp/Resources/`; the user-facing copy is auditable in the script that ships it).
 
 Logging — rotating file sink (completes [spec.md § 2.9](./spec.md#29-rt-safe-logging)):
-- [ ] Extend `control::LogDrainer` with a second sink that writes to `~/Library/Logs/Jbox/jbox.log`, or wire a separate composite sink alongside the existing `os_log` sink. Either way, both destinations must receive every event.
-- [ ] Size- or date-based rotation (pick one; size-based with a small rotation count is simpler and matches the "sparse events" workload). Default cap ~5 MB per file, keep last 3.
-- [ ] Handle log-directory creation on first write; handle permission / disk-full failures by falling back to os_log-only rather than dropping the whole pipeline.
-- [ ] Decide the on-disk line format — plain text matching the `defaultOsLogSink` format is the natural choice (human-greppable, no parser needed).
-- [ ] Add unit tests that exercise rotation without real filesystem access — the sink should be injectable with a filesystem abstraction, or the test should use a temp directory.
-- [ ] Decide whether `.app`'s `Contents/MacOS/Jbox` and the CLI share the same log file (likely yes) or separate by process (noisier but clearer).
+- [x] New `RotatingFileSink` (`Sources/JboxEngineC/control/rotating_file_sink.{hpp,cpp}`) installed alongside the existing `defaultOsLogSink` via a free `compositeSink(std::vector<Sink>)` helper. Composition lives at the bridge layer (`bridge_api.cpp::jbox_engine_create`) so tests using `createEngineWithBackend` keep the simpler os_log-only setup. Every drained event reaches both destinations.
+- [x] Size-based rotation. Defaults: 5 MiB per file, `keep_count=3` (live + 2 rotated). Pre-write rotation: a write that would push the live file over the cap rotates first into `<base>.1.log` / `<base>.2.log` (oldest dropped) and then writes the event into a fresh live file.
+- [x] Lazy parent-directory creation on first write (via `std::filesystem::create_directories`). On any I/O failure (permission denied, disk full, rename refused) the sink flips `healthy_=false` and silently no-ops further events; the os_log arm of the composite is unaffected — "fall back to os_log-only" is the published contract.
+- [x] On-disk line format: ISO-8601 UTC timestamp + the existing `defaultOsLogSink` body, e.g. `2026-05-01T12:34:56.789Z  jbox evt=route_started route=42 a=2 b=4 ts=12345`. Wall-clock prefix added because file lines have no Console.app sidecar to supply it; the body is identical so file output and `log show` output align grep-by-grep.
+- [x] 17 Catch2 cases under `[rotating_file_sink]` / `[composite_sink]` / `[default_jbox_log_path]` / `[log_code_name]`. Tests use per-case `std::filesystem::temp_directory_path()` scratch dirs (no `~/Library/Logs/Jbox/` writes from CI).
+- [x] **Per-process file with a shared directory.** `~/Library/Logs/Jbox/Jbox.log` from the .app, `~/Library/Logs/Jbox/JboxEngineCLI.log` from the CLI. The plan's hint was "likely yes (share)"; the deviation below explains why per-process won.
 
 Testing:
 - [ ] Fresh-user smoke test: create a new macOS user account, download the `.dmg`, follow the `READ-THIS-FIRST.txt`, verify the app runs and a test route works.
+
+Phase 8 summary of deviations:
+
+- **Per-process log files over a single shared file (2026-05-01).** *Goal:* close the rotating-file-sink TODO from Phase 6+. *Choices made along the way:*
+  - **Per-process file (`<process>.log`) over a shared `jbox.log`.** Plan suggested "likely yes (share)" with "noisier but clearer" as the per-process trade-off. Reasoning that flipped the decision: rotation under `std::filesystem::rename` is racy across processes — two writers hitting the cap simultaneously would step on each other's renames. With per-process files there's no rename contention; the directory itself is shared so the uninstaller's existing `rm -rf $HOME/Library/Logs/Jbox` line still removes everything. "Noisier" reduces to "two filenames" since the .app and CLI are rarely run simultaneously by the same user.
+  - **Composition lives at the bridge, not inside `LogDrainer`.** `LogDrainer` keeps its single-`Sink` contract; a free `compositeSink(std::vector<Sink>)` builds the multiplexer. Result: no churn in `LogDrainer`'s threading + shutdown-flush invariants, and tests that construct `LogDrainer` directly with a capture sink stay one-line. The file sink is non-copyable (owns an `std::ofstream`); the composite captures it via `std::shared_ptr<RotatingFileSink>` so the resulting `std::function`-shaped sink is copyable.
+  - **ISO-8601 UTC prefix on each line.** `defaultOsLogSink`'s line body has no wall-clock — `os_log` infrastructure injects it at view time. A file line lives without that sidecar, so the sink prepends `2026-05-01T12:34:56.789Z  ` (millisecond precision) and keeps the rest of the body identical. "Plain text matching the defaultOsLogSink format" stays true grep-by-grep on the body.
+  - **`logCodeName` extracted to `log_drainer.hpp`.** The existing `defaultOsLogSink` had a private switch covering 9 of the 10 log codes — `kLogTeardownFailure = 104` (added in 7.6.3) was missing. Pulling the helper out to a public header consolidates the switch, fixes the missing case, and gives the file sink the same string output without duplicating the table.
+  - **Pre-write rotation over post-write rotation.** A write that *would* push the live file over the cap rotates first; the post-rotation live file then takes the event. Cleaner cap honour-ing (live file ≤ cap at rest) than the alternative ("write, then rotate if too big") which leaves the rotated file briefly over-cap. Tests pin: live `liveBytes() <= max_bytes_per_file` after every operation.
+  - **`getprogname()` for the per-process basename.** POSIX, no allocation, returns the short program name. The bridge falls back to `"Jbox"` if it returns null/empty so the sink never crashes on a degenerate process state.
+  - *Diff:* engine impl (~190 LOC across `rotating_file_sink.{hpp,cpp}`) + bridge wiring + tests + docs. 315 Catch2 cases (was 298; +17 new — 9 RotatingFileSink + 3 compositeSink + 2 logCodeName + 3 defaultJboxLogPath). `make verify` green.
 
 ---
 

@@ -87,6 +87,13 @@ private:
     std::thread                 thread_;
 };
 
+// Stringify an RT log code for human-readable output. Used by both
+// `defaultOsLogSink` (os_log line) and `RotatingFileSink` (file line)
+// so the two destinations show identical event names. Returns
+// "unknown" for codes a future producer adds before the drainer is
+// updated to know about them.
+const char* logCodeName(jbox::rt::RtLogCode code) noexcept;
+
 }  // namespace jbox::control
 
 #endif  // JBOX_CONTROL_LOG_DRAINER_HPP

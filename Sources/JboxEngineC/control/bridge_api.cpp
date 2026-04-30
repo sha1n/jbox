@@ -10,13 +10,16 @@
 #include "engine.hpp"
 #include "jbox_engine.h"
 #include "log_drainer.hpp"
+#include "rotating_file_sink.hpp"
 
 #include <os/log.h>
 
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
 #include <memory>
 #include <new>
+#include <string>
 #include <utility>
 #include <vector>
 
@@ -126,6 +129,16 @@ void copyFixed(char* dst, std::size_t dst_capacity, const std::string& src) {
     dst[n] = '\0';
 }
 
+// Resolve the per-process basename used for the file-log filename
+// ("Jbox" for the .app, "JboxEngineCLI" for the headless CLI). Falls
+// back to "Jbox" if the platform refuses to surface a name.
+std::string resolveProcessBasename() {
+    if (const char* name = ::getprogname(); name != nullptr && *name != '\0') {
+        return std::string(name);
+    }
+    return std::string("Jbox");
+}
+
 }  // namespace
 
 // -----------------------------------------------------------------------------
@@ -191,6 +204,33 @@ jbox_engine_t* jbox_engine_create(const jbox_engine_config_t* /*config*/,
             std::move(backend),
             /*spawn_sampler_thread=*/true,
             /*spawn_log_drainer=*/true);
+
+        // Compose a (rotating-file + os_log) sink so engine events also
+        // land in ~/Library/Logs/Jbox/<process>.log. Skipped silently
+        // when $HOME is unset — the os_log destination is sufficient.
+        // Tests reach the engine via createEngineWithBackend (above),
+        // bypassing this wiring, so unit-test runs do not touch the
+        // user's real log directory.
+        if (auto* drainer = e->impl->logDrainer(); drainer != nullptr) {
+            const auto log_path = jbox::control::defaultJboxLogPath(
+                resolveProcessBasename());
+            std::vector<jbox::control::LogDrainer::Sink> sinks;
+            if (!log_path.empty()) {
+                auto file_sink =
+                    std::make_shared<jbox::control::RotatingFileSink>(
+                        jbox::control::RotatingFileSink::Config{
+                            log_path,
+                            /*max_bytes_per_file=*/5 * 1024 * 1024,
+                            /*keep_count=*/3});
+                sinks.emplace_back(
+                    [file_sink](const jbox::rt::RtLogEvent& ev) {
+                        (*file_sink)(ev);
+                    });
+            }
+            sinks.emplace_back(&jbox::control::LogDrainer::defaultOsLogSink);
+            drainer->setSink(jbox::control::compositeSink(std::move(sinks)));
+        }
+
         os_log(bridgeLog(), "engine created abi=%u", JBOX_ENGINE_ABI_VERSION);
         return e;
     } catch (const std::bad_alloc&) {

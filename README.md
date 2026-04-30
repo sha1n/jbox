@@ -152,7 +152,7 @@ On first launch, macOS prompts for audio-device access. Grant it — Jbox needs 
 
 ## Debugging and logs
 
-Jbox emits structured log events through the unified logging system (`os_log`). There is no separate log file yet — rotating-file output to `~/Library/Logs/Jbox/` is scheduled for Phase 8 (see [docs/plan.md § Phase 8](./docs/plan.md#phase-8--packaging-and-installation)). In the meantime, everything is visible through the standard `log` command and Console.app.
+Jbox emits structured log events through the unified logging system (`os_log`) and additionally appends every event to a rotating per-process file under `~/Library/Logs/Jbox/` (`Jbox.log` for the .app, `JboxEngineCLI.log` for the headless CLI). The file is size-rotated at 5 MiB with up to 3 files retained (live + 2 rotated), and falls back to os_log-only on I/O errors (permission denied, disk full) rather than dropping the whole pipeline. The `log` command and Console.app still show everything in real time.
 
 ### Subsystem and categories
 

@@ -21,10 +21,13 @@ os_log_t engineLog() {
     return log;
 }
 
-// Human-readable name for a log code. Falls through to "unknown" so a
-// forward-looking producer (newer code, older drainer) still produces
-// readable output.
-const char* codeName(jbox::rt::RtLogCode code) {
+}  // namespace
+
+// -----------------------------------------------------------------------------
+// Code-to-name mapping
+// -----------------------------------------------------------------------------
+
+const char* logCodeName(jbox::rt::RtLogCode code) noexcept {
     switch (code) {
         case jbox::rt::kLogNone:             return "none";
         case jbox::rt::kLogUnderrun:         return "underrun";
@@ -35,11 +38,10 @@ const char* codeName(jbox::rt::RtLogCode code) {
         case jbox::rt::kLogRouteStopped:     return "route_stopped";
         case jbox::rt::kLogRouteWaiting:     return "route_waiting";
         case jbox::rt::kLogRouteError:       return "route_error";
+        case jbox::rt::kLogTeardownFailure:  return "teardown_failure";
     }
     return "unknown";
 }
-
-}  // namespace
 
 // -----------------------------------------------------------------------------
 // Default sink
@@ -48,7 +50,7 @@ const char* codeName(jbox::rt::RtLogCode code) {
 void LogDrainer::defaultOsLogSink(const jbox::rt::RtLogEvent& event) {
     os_log(engineLog(),
            "jbox evt=%{public}s route=%u a=%llu b=%llu ts=%llu",
-           codeName(event.code),
+           logCodeName(event.code),
            event.route_id,
            static_cast<unsigned long long>(event.value_a),
            static_cast<unsigned long long>(event.value_b),

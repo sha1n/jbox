@@ -85,7 +85,7 @@ Four layers, each with its own thread-safety contract:
 - **Docs are the living source of truth.** Commit doc changes together with the code that motivates them — not in commit messages alone. `docs/spec.md` is the authoritative design; `docs/plan.md` tracks phase status with per-phase "deviations" sections where ad-hoc decisions are recorded.
 - **Memorable fix patterns live in `docs/plan.md` Phase deviations**, not in commit messages. New deviations belong there.
 - **C++ tests use Catch2 v3 (amalgamated, vendored in `ThirdParty/Catch2/`)** — not GoogleTest. Swift tests use **Swift Testing** (`@Suite`, `@Test`, `#expect`) — not XCTest.
-- **`os_log` subsystem is `com.jbox.app`** with categories `app | engine | ui | bridge`. RT producers push numeric event codes into `RtLogQueue`; `LogDrainer` forwards to the `os_log` sink. Rotating file sink is Phase 8.
+- **`os_log` subsystem is `com.jbox.app`** with categories `app | engine | ui | bridge`. RT producers push numeric event codes into `RtLogQueue`; `LogDrainer` forwards each drained event to a composite sink — the `os_log` subsystem AND a per-process rotating file at `~/Library/Logs/Jbox/<process>.log` (`Jbox.log` for the .app, `JboxEngineCLI.log` for the headless CLI), 5 MiB × 3 size-rotated, fail-silent on file-side I/O errors so the os_log destination keeps running. Composition is wired at the bridge layer (`bridge_api.cpp::jbox_engine_create`); `LogDrainer` itself keeps its single-`Sink` contract.
 - **Never `git push --force` to `master`.** Destructive git operations require explicit user approval (see the root system prompt).
 
 ## Pre-commit checklist

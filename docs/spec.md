@@ -308,7 +308,7 @@ The grounding evidence — silent IOProc-scheduler stalls under partial hog, and
 
 - RT code must not call any logging function that allocates or syscalls.
 - A lock-free SPSC "log event" queue of pre-allocated fixed-size records (numeric event code, timestamp, small numeric payload).
-- A background drainer reads from the queue every ~100 ms and writes to `os_log` and a rotating file in `~/Library/Logs/Jbox/`.
+- A background drainer reads from the queue every ~100 ms and dispatches each event to a composite sink: the `os_log` subsystem (`com.jbox.app`, category `engine`) AND a per-process rotating file at `~/Library/Logs/Jbox/<process>.log` (`Jbox.log` for the .app, `JboxEngineCLI.log` for the headless CLI). Size-based rotation: 5 MiB per file, 3 files retained (live + 2 rotated). File-side I/O failures (permission denied, disk full) downgrade the file sink to fail-silent so the `os_log` destination keeps running. Per-process files avoid concurrent-rotation races between the .app and the CLI; they share the `~/Library/Logs/Jbox/` directory which the uninstaller removes wholesale.
 - Log events are sparse — only significant events (underrun, overrun, unexpected device state, drift tracker out of bounds). No per-block telemetry.
 
 ### 2.10 RT-safety discipline (enforced by convention and code review)
