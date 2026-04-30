@@ -28,28 +28,35 @@ public struct StoredPreferences: Codable, Equatable, Sendable {
     /// so the user's choice survives relaunch instead of living only
     /// in `UserDefaults` alongside the other preferences.
     public var showDiagnostics: Bool
+    /// One-way latch — true once the user has dismissed the "Launch at
+    /// login" first-time explanation alert. Persisted so the alert
+    /// never reappears across sessions or after toggle cycles.
+    public var hasShownLaunchAtLoginNote: Bool
 
     public init(launchAtLogin: Bool = false,
                 resamplerQuality: Engine.ResamplerQuality = .mastering,
                 appearance: AppearanceMode = .system,
                 showMetersInMenuBar: Bool = false,
-                showDiagnostics: Bool = false) {
-        self.launchAtLogin         = launchAtLogin
-        self.resamplerQuality      = resamplerQuality
-        self.appearance            = appearance
-        self.showMetersInMenuBar   = showMetersInMenuBar
-        self.showDiagnostics       = showDiagnostics
+                showDiagnostics: Bool = false,
+                hasShownLaunchAtLoginNote: Bool = false) {
+        self.launchAtLogin             = launchAtLogin
+        self.resamplerQuality          = resamplerQuality
+        self.appearance                = appearance
+        self.showMetersInMenuBar       = showMetersInMenuBar
+        self.showDiagnostics           = showDiagnostics
+        self.hasShownLaunchAtLoginNote = hasShownLaunchAtLoginNote
     }
 
     // Missing keys fall back to the struct's defaults rather than
     // failing decode — additive fields don't break existing files.
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
-        self.launchAtLogin         = try c.decodeIfPresent(Bool.self, forKey: .launchAtLogin) ?? false
-        self.resamplerQuality      = try c.decodeIfPresent(Engine.ResamplerQuality.self, forKey: .resamplerQuality) ?? .mastering
-        self.appearance            = try c.decodeIfPresent(AppearanceMode.self, forKey: .appearance) ?? .system
-        self.showMetersInMenuBar   = try c.decodeIfPresent(Bool.self, forKey: .showMetersInMenuBar) ?? false
-        self.showDiagnostics       = try c.decodeIfPresent(Bool.self, forKey: .showDiagnostics) ?? false
+        self.launchAtLogin             = try c.decodeIfPresent(Bool.self, forKey: .launchAtLogin) ?? false
+        self.resamplerQuality          = try c.decodeIfPresent(Engine.ResamplerQuality.self, forKey: .resamplerQuality) ?? .mastering
+        self.appearance                = try c.decodeIfPresent(AppearanceMode.self, forKey: .appearance) ?? .system
+        self.showMetersInMenuBar       = try c.decodeIfPresent(Bool.self, forKey: .showMetersInMenuBar) ?? false
+        self.showDiagnostics           = try c.decodeIfPresent(Bool.self, forKey: .showDiagnostics) ?? false
+        self.hasShownLaunchAtLoginNote = try c.decodeIfPresent(Bool.self, forKey: .hasShownLaunchAtLoginNote) ?? false
     }
 }
 

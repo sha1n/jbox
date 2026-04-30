@@ -36,7 +36,7 @@ private enum JSON {
 
 @Suite("StoredPreferences Codable")
 struct StoredPreferencesCodableTests {
-    @Test("defaults match spec § 3.1.4 (+ showDiagnostics extension)")
+    @Test("defaults match spec § 3.1.4 (+ showDiagnostics + hasShownLaunchAtLoginNote extensions)")
     func defaultsMatchSpec() {
         let p = StoredPreferences()
         #expect(p.launchAtLogin == false)
@@ -44,6 +44,7 @@ struct StoredPreferencesCodableTests {
         #expect(p.appearance == .system)
         #expect(p.showMetersInMenuBar == false)
         #expect(p.showDiagnostics == false)
+        #expect(p.hasShownLaunchAtLoginNote == false)
     }
 
     @Test("showDiagnostics round-trips and defaults to false on missing key")
@@ -53,6 +54,32 @@ struct StoredPreferencesCodableTests {
         let data = Data(#"{"showDiagnostics": false}"#.utf8)
         let decoded = try JSON.decoder.decode(StoredPreferences.self, from: data)
         #expect(decoded.showDiagnostics == false)
+    }
+
+    @Test("hasShownLaunchAtLoginNote round-trips when true")
+    func hasShownLaunchAtLoginNoteRoundTripTrue() throws {
+        let p = StoredPreferences(hasShownLaunchAtLoginNote: true)
+        #expect(try JSON.roundTrip(p).hasShownLaunchAtLoginNote == true)
+    }
+
+    @Test("hasShownLaunchAtLoginNote defaults to false on missing key (pre-Phase-7 launch-at-login files)")
+    func hasShownLaunchAtLoginNoteMissingKey() throws {
+        // Files written before the launch-at-login wiring landed will not
+        // carry the key. Decode must fall back to false so existing users
+        // see the explanatory note on their first toggle, not silently
+        // skip it because of a missing key.
+        let data = Data(#"{"launchAtLogin": false}"#.utf8)
+        let p = try JSON.decoder.decode(StoredPreferences.self, from: data)
+        #expect(p.hasShownLaunchAtLoginNote == false)
+    }
+
+    @Test("hasShownLaunchAtLoginNote tolerates extra keys around it")
+    func hasShownLaunchAtLoginNoteExtraKeys() throws {
+        let data = Data(#"""
+        {"hasShownLaunchAtLoginNote": true, "futureToggle": "x"}
+        """#.utf8)
+        let p = try JSON.decoder.decode(StoredPreferences.self, from: data)
+        #expect(p.hasShownLaunchAtLoginNote == true)
     }
 
     @Test("default-initialised preferences round-trip")

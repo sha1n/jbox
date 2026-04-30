@@ -416,7 +416,7 @@ The aggregate output isolates media apps from the live route at the IOProc dispa
 
 **UI surfacing.** The "Engine error" alert binding clears `EngineStore.lastError` on dismiss so a transient engine error never traps the UI in a popup loop. No special indicator for self-routes — they render exactly like any other route. The latency pill carries the honest end-to-end estimate at whatever HAL buffer the device is at.
 
-**Packaging.** The existing ad-hoc-signed `.dmg` lane (§ 1.5) is the only distribution lane. No third-party install, no privileged installer helper, no `SMAppService` registration, no notarization. The "no paid Apple Developer Program" constraint stays intact end to end.
+**Packaging.** The existing ad-hoc-signed `.dmg` lane (§ 1.5) is the only distribution lane. No third-party install, no privileged installer helper, no privileged `SMAppService` registration (no `loginItem(_:)`, `agent(_:)`, or `daemon(_:)` registrations — those would require notarization and Developer ID), no notarization. The "no paid Apple Developer Program" constraint stays intact end to end. *(Note: the user-facing Launch-at-login toggle in § 4.6 General uses `SMAppService.mainApp.register()`, which is a different API — it works ad-hoc-signed and requires no Developer ID.)*
 
 **Alternative transport (BlackHole).** Users without a hardware-mixer-equipped destination interface can substitute a third-party loopback driver such as [BlackHole](https://github.com/ExistentialAudio/BlackHole) for the aggregate device's "media-app target" role — apps target the loopback device, Jbox routes the loopback's input back out to the real destination. From Jbox's perspective the loopback is an ordinary Core Audio device; no loopback-specific code is needed.
 
@@ -518,11 +518,12 @@ Implemented as `StoredPreferences`.
 
 ```swift
 struct StoredPreferences: Codable, Equatable {
-  var launchAtLogin: Bool                       // default: false
-  var resamplerQuality: Engine.ResamplerQuality // default: .mastering
-  var appearance: AppearanceMode                // default: .system
-  var showMetersInMenuBar: Bool                 // default: false
-  var showDiagnostics: Bool                     // default: false (Advanced tab toggle)
+  var launchAtLogin: Bool                        // default: false
+  var resamplerQuality: Engine.ResamplerQuality  // default: .mastering
+  var appearance: AppearanceMode                 // default: .system
+  var showMetersInMenuBar: Bool                  // default: false
+  var showDiagnostics: Bool                      // default: false (Advanced tab toggle)
+  var hasShownLaunchAtLoginNote: Bool            // default: false (one-way latch)
 }
 
 // `Engine.ResamplerQuality` is the UInt32-raw type used by the engine ABI;
@@ -531,7 +532,7 @@ struct StoredPreferences: Codable, Equatable {
 // invalidate older `state.json` files.
 ```
 
-Phase 7.6 removed the `bufferSizePolicy: BufferSizePolicy` field from this struct along with the *global* hog-mode + buffer-shrink machinery it controlled. (Phase 7.6's v11 walk-back re-introduced a *per-route* HAL buffer-frame-size preference on `RouteConfig`, persisted in `StoredRoute.bufferFrames` — see § 3.1.3 — but no global counterpart was re-added; the per-route picker is the only buffer-size knob.) `showDiagnostics` extends the original v1 field list — without persisting the Advanced-tab diagnostics toggle, the user's choice resets on every relaunch.
+Phase 7.6 removed the `bufferSizePolicy: BufferSizePolicy` field from this struct along with the *global* hog-mode + buffer-shrink machinery it controlled. (Phase 7.6's v11 walk-back re-introduced a *per-route* HAL buffer-frame-size preference on `RouteConfig`, persisted in `StoredRoute.bufferFrames` — see § 3.1.3 — but no global counterpart was re-added; the per-route picker is the only buffer-size knob.) `showDiagnostics` extends the original v1 field list — without persisting the Advanced-tab diagnostics toggle, the user's choice resets on every relaunch. `hasShownLaunchAtLoginNote` is the one-way latch behind § 4.6's first-time Launch-at-login alert — once the user dismisses the note, `LaunchAtLoginController` writes it through and never re-arms.
 
 #### 3.1.5 `AppState`
 
@@ -717,7 +718,7 @@ The expanded route panel uses a **mixer-strip layout** (introduced with the per-
 
 Standard macOS settings window (`SwiftUI.Settings` scene) with three tabs, implemented in `Sources/JboxApp/JboxApp.swift` as `PreferencesView` + three subviews (`GeneralPreferencesView`, `AudioPreferencesView`, `AdvancedPreferencesView`). Keys and defaults are centralised in `JboxPreferences`; typed value types (`AppearanceMode`) live in `JboxEngineSwift/Preferences.swift` so they are unit-testable without SwiftUI. Views continue to bind through `@AppStorage` for the two-way SwiftUI ergonomics; the Phase 7 persistence slice keeps `StoredPreferences` in lockstep by observing `UserDefaults.didChangeNotification` and snapshotting the `com.jbox.*` keys into `state.json` via `StateStore` (see § 3.2). On launch the loaded preferences are written back into `UserDefaults` so the `@AppStorage` bindings observe them on first paint.
 
-- **General** — appearance picker (System / Light / Dark; wired to every scene via `.preferredColorScheme(...)`, where System returns `nil` and lets SwiftUI inherit the OS appearance). Launch-at-login and "Show meters in menu bar" are disabled placeholders — both land with Phase 7 (launch-at-login needs persistence, and menu-bar meters need the icon renderer to animate between states).
+- **General** — appearance picker (System / Light / Dark; wired to every scene via `.preferredColorScheme(...)`, where System returns `nil` and lets SwiftUI inherit the OS appearance). **Launch at login** toggle wired to `LaunchAtLoginController` over `SMAppService.mainApp` — synchronous register/unregister, one-time explanatory alert on the first successful enable (latched via `StoredPreferences.hasShownLaunchAtLoginNote`, persisted in `state.json`), inline `requiresApproval` callout with an "Open Login Items…" deep link (`x-apple.systempreferences:com.apple.LoginItems-Settings.extension`) when macOS marks the registration as awaiting user confirmation, inline error callout when register/unregister surfaces a system error (e.g., bundle not in `/Applications`). The controller reconciles with the live system status on every launch and on every Preferences-window appear so an out-of-band toggle (the user disabling Jbox in System Settings) is picked up. Routes restored from `state.json` always start stopped — Jbox does not auto-start audio on login. **"Show meters in menu bar"** stays a disabled placeholder until the menu-bar icon renderer can animate between states.
 - **Audio** —
     - **Resampler quality**: Mastering (default) / High Quality. Pushed through the engine via ABI v8 (`jbox_engine_set_resampler_quality`) and applied to newly-started routes only — already-running routes keep the preset their converter was built with until stopped and started again. Footer copy states this explicitly. See § 2.5.
     - **Buffer size** (informational footer only): copy explaining that Jbox has no *global* HAL buffer-size setting — the per-route Performance-tier Buffer size picker (§ 2.7 v11 mechanism) is the only buffer-size knob, and macOS resolves the device buffer as `max` across all active clients. The user sets the device default in their interface software (UA Console, RME TotalMix, MOTU CueMix, Audio MIDI Setup); routes without a per-route preference respect whatever the device is at. No interactive control on this tab. (Earlier Phase 6 / 7.5 builds shipped a "Buffer-size policy" picker here as a global setting; that global picker is gone in Phase 7.6, replaced by the per-route preference.)

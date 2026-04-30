@@ -83,9 +83,12 @@ struct JboxApp: App {
 /// Central default-storage keys for the three-tab Preferences window
 /// (docs/spec.md § 4.6). Every `@AppStorage`-backed setting in the app
 /// reads from a constant here so the keys can be audited and renamed
-/// in one place. Persisted in `NSUserDefaults` until Phase 7 rolls a
-/// proper `AppState.preferences` struct on top of `state.json`; the
-/// migration is a `UserDefaults.standard.value(forKey:)` read away.
+/// in one place. Source of truth lives in `state.json` (`StoredPreferences`);
+/// these `UserDefaults` keys mirror it so SwiftUI's `@AppStorage` bindings
+/// stay simple and `AppState` watches `UserDefaults.didChangeNotification`
+/// to snapshot the mirror back into `state.json`. Launch-at-login is the
+/// one preference that bypasses `@AppStorage` entirely — its source of
+/// truth is `LaunchAtLoginController` plus `SMAppService.mainApp`.
 enum JboxPreferences {
     // General
     /// Raw value of `AppearanceMode`. Default: `.system`.
@@ -103,7 +106,7 @@ struct PreferencesView: View {
 
     var body: some View {
         TabView {
-            GeneralPreferencesView()
+            GeneralPreferencesView(appState: appState)
                 .tabItem { Label("General", systemImage: "gearshape") }
 
             AudioPreferencesView(appState: appState)
@@ -116,10 +119,13 @@ struct PreferencesView: View {
     }
 }
 
-/// General tab: appearance + menu bar toggles. Launch-at-login and
-/// menu-bar meters are Phase 7 concerns (persistence + menu bar
-/// feature); shown disabled so users see the layout that's coming.
+/// General tab: appearance + menu bar toggles. "Show meters in menu
+/// bar icon" still lands with the icon-renderer feature; "Launch at
+/// login" is wired here through `LaunchAtLoginController`
+/// (`SMAppService.mainApp` under the hood).
 struct GeneralPreferencesView: View {
+    let appState: AppState
+
     @AppStorage(JboxPreferences.appearanceKey) private var appearanceRaw
         = AppearanceMode.default.rawValue
 
@@ -128,9 +134,13 @@ struct GeneralPreferencesView: View {
         + "\"Follow System\" inherits the macOS appearance."
 
     private static let menuBarFooter =
-        "Both land with Phase 7 — launch-at-login needs persistence to "
-        + "round-trip, and menu-bar meters need the icon renderer to "
-        + "animate between states."
+        "Menu-bar meters land with the icon-renderer feature; the "
+        + "menu-bar icon currently shows a static state."
+
+    private static let firstTimeNoteMessage =
+        "Jbox will start automatically when you log in. Routes restored "
+        + "from your saved configuration stay stopped until you start "
+        + "them — Jbox does not auto-start audio on login."
 
     var body: some View {
         Form {
@@ -139,6 +149,36 @@ struct GeneralPreferencesView: View {
         }
         .formStyle(.grouped)
         .padding()
+        .alert(
+            "Launch at login enabled",
+            isPresented: firstTimeNoteBinding,
+            actions: {
+                Button("OK") {
+                    appState.launchAtLogin?.acknowledgeFirstTimeNote()
+                }
+            },
+            message: {
+                Text(Self.firstTimeNoteMessage)
+            })
+        // Reconcile with the live system status whenever the General
+        // tab becomes visible. Covers the requiresApproval round-trip:
+        // user clicks "Open Login Items…", flips the switch in System
+        // Settings, returns to Jbox — without this refresh the
+        // controller would keep reporting the stale pre-approval state
+        // until the next app launch.
+        .task {
+            appState.launchAtLogin?.refresh()
+        }
+    }
+
+    private var firstTimeNoteBinding: Binding<Bool> {
+        Binding(
+            get: { appState.launchAtLogin?.pendingFirstTimeNote ?? false },
+            set: { newValue in
+                if !newValue {
+                    appState.launchAtLogin?.acknowledgeFirstTimeNote()
+                }
+            })
     }
 
     private var appearanceSection: some View {
@@ -158,14 +198,70 @@ struct GeneralPreferencesView: View {
 
     private var menuBarSection: some View {
         Section {
-            Toggle("Launch at login", isOn: .constant(false))
-                .disabled(true)
+            launchAtLoginRow
             Toggle("Show meters in menu bar icon", isOn: .constant(false))
                 .disabled(true)
         } header: {
             Text("Menu bar")
         } footer: {
             Text(Self.menuBarFooter)
+        }
+    }
+
+    @ViewBuilder
+    private var launchAtLoginRow: some View {
+        if let lal = appState.launchAtLogin {
+            Toggle("Launch at login",
+                   isOn: Binding(
+                    get: { lal.isEnabled },
+                    set: { newValue in lal.setEnabled(newValue) }))
+            if lal.requiresApproval {
+                requiresApprovalCallout
+            }
+            if let err = lal.lastError {
+                errorCallout(err)
+            }
+        } else {
+            // Pre-`load()` window — keep the toggle visible but inert
+            // so the layout doesn't reflow when the controller spins up.
+            Toggle("Launch at login", isOn: .constant(false))
+                .disabled(true)
+        }
+    }
+
+    private var requiresApprovalCallout: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 8) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .foregroundStyle(.orange)
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Waiting for approval in System Settings.")
+                    .font(.callout)
+                Button("Open Login Items…") {
+                    openLoginItemsSettings()
+                }
+                .buttonStyle(.link)
+            }
+        }
+    }
+
+    private func errorCallout(_ err: LaunchAtLoginError) -> some View {
+        let message: String
+        switch err {
+        case .registrationFailed(let s):    message = "Could not enable: \(s)"
+        case .unregistrationFailed(let s):  message = "Could not disable: \(s)"
+        }
+        return HStack(alignment: .firstTextBaseline, spacing: 8) {
+            Image(systemName: "exclamationmark.octagon.fill")
+                .foregroundStyle(.red)
+            Text(message)
+                .font(.callout)
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    private func openLoginItemsSettings() {
+        if let url = URL(string: "x-apple.systempreferences:com.apple.LoginItems-Settings.extension") {
+            NSWorkspace.shared.open(url)
         }
     }
 }
@@ -369,6 +465,18 @@ final class AppState {
     /// lockstep with the struct below.
     private(set) var persisted = StoredAppState()
 
+    /// Owns the user-facing "Launch at login" state. Built in `load()`
+    /// once we have the persisted `hasShownLaunchAtLoginNote` latch and
+    /// can register the persistence callback. `nil` only during the
+    /// pre-`load()` window.
+    private(set) var launchAtLogin: LaunchAtLoginController?
+
+    /// Service injection seam. Tests / SwiftUI previews can substitute
+    /// a `FakeLaunchAtLoginService`-shaped dependency by overriding
+    /// before `load()`. Production sets it implicitly to
+    /// `SMAppServiceLaunchAtLogin()` on first use.
+    var launchAtLoginServiceFactory: () -> LaunchAtLoginService = { SMAppServiceLaunchAtLogin() }
+
     private var stateStore: StateStore?
     private var userDefaultsObserver: NSObjectProtocol?
 
@@ -435,6 +543,34 @@ final class AppState {
         ) { [weak self] _ in
             Task { @MainActor in self?.snapshotPreferences() }
         }
+
+        // Build the launch-at-login controller now that `persisted` is
+        // populated. The factory closure is overridable for previews;
+        // production lands at `SMAppServiceLaunchAtLogin`.
+        let lalController = LaunchAtLoginController(
+            service: launchAtLoginServiceFactory(),
+            hasShownFirstTimeNote: persisted.preferences.hasShownLaunchAtLoginNote)
+        // Assign FIRST so that any persistence callback fired by the
+        // refresh+snapshot pair below can find the controller via the
+        // weak `self` reference. Order matters: with the assignment
+        // after refresh(), a callback firing during refresh() would
+        // observe `launchAtLogin == nil` and silently no-op.
+        self.launchAtLogin = lalController
+        lalController.onPersistableChange = { [weak self] in
+            self?.snapshotLaunchAtLogin()
+        }
+        // Reconcile in-memory state with the live system status (covers
+        // out-of-band changes via System Settings while Jbox was
+        // closed), then align persisted state with whatever the
+        // controller now reflects. Without the explicit
+        // `snapshotLaunchAtLogin()`, a stale `state.json`
+        // `launchAtLogin` mirror (e.g., "true" persisted but the system
+        // says `.notRegistered`) would survive until the next user
+        // action; refresh() alone only fires the callback when
+        // `isEnabled` actually changed during the refresh, not when
+        // the persisted mirror was already wrong on entry.
+        lalController.refresh()
+        snapshotLaunchAtLogin()
     }
 
     /// Force any pending debounced save synchronously. Called from the
@@ -511,12 +647,30 @@ final class AppState {
 
     private func snapshotPreferences() {
         let fresh = readPreferencesFromDefaults()
-        guard fresh != persisted.preferences else { return }
-        persisted.preferences = fresh
+        // Preserve the launch-at-login fields — those don't ride
+        // `UserDefaults`; the controller's callback owns them.
+        var merged = fresh
+        merged.launchAtLogin             = persisted.preferences.launchAtLogin
+        merged.hasShownLaunchAtLoginNote = persisted.preferences.hasShownLaunchAtLoginNote
+        guard merged != persisted.preferences else { return }
+        persisted.preferences = merged
         // Keep engine-facing settings aligned with the new preferences
         // so a resampler-quality change takes effect on newly-started
         // routes without needing another code path.
-        store?.setResamplerQuality(fresh.resamplerQuality)
+        store?.setResamplerQuality(merged.resamplerQuality)
+        scheduleSave()
+    }
+
+    /// Mirror the launch-at-login controller's persisted booleans into
+    /// `persisted.preferences` and queue a save. Called via
+    /// `LaunchAtLoginController.onPersistableChange`.
+    private func snapshotLaunchAtLogin() {
+        guard let lal = launchAtLogin else { return }
+        var fresh = persisted.preferences
+        fresh.launchAtLogin             = lal.isEnabled
+        fresh.hasShownLaunchAtLoginNote = lal.hasShownFirstTimeNote
+        guard fresh != persisted.preferences else { return }
+        persisted.preferences = fresh
         scheduleSave()
     }
 
