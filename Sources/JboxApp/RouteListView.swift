@@ -112,6 +112,9 @@ struct RouteListView: View {
                     .listRowBackground(Color.clear)
                     .padding(.vertical, 4)
                 }
+                .onMove { offsets, destination in
+                    store.moveRoute(from: offsets, to: destination)
+                }
             }
             .listStyle(.inset)
         }

@@ -94,9 +94,26 @@ public enum RouteState: Equatable, Hashable, Sendable {
 public struct RouteStatus: Equatable, Hashable, Sendable {
     public let state: RouteState
     public let lastError: jbox_error_code_t
+    /// Stale once a `RouteStatus` lands in `EngineStore.routes[i].status`
+    /// — the wrapper writes this field through the array's `_modify`
+    /// accessor only when the *stable* parts of the status changed
+    /// (see `EngineStore.statusFieldsAreObservablyEqual`), to keep the
+    /// `@Observable` registrar quiet for the drag-to-reorder gesture.
+    /// Read live values from `EngineStore.routeCounters[id]` instead.
+    /// Direct callers of `Engine.pollStatus` (e.g. the CLI) see the
+    /// engine's authoritative counter on every poll.
     public let framesProduced: UInt64
+    /// See `framesProduced` for the staleness contract under
+    /// `EngineStore`. The CLI / direct `Engine.pollStatus` paths are
+    /// unaffected.
     public let framesConsumed: UInt64
+    /// See `framesProduced` for the staleness contract under
+    /// `EngineStore`. The CLI / direct `Engine.pollStatus` paths are
+    /// unaffected.
     public let underrunCount: UInt64
+    /// See `framesProduced` for the staleness contract under
+    /// `EngineStore`. The CLI / direct `Engine.pollStatus` paths are
+    /// unaffected.
     public let overrunCount: UInt64
     /// End-to-end estimate computed once at route start, per
     /// docs/spec.md § 2.12. 0 when the route is not running or the

@@ -206,7 +206,8 @@ public enum PreviewFixtures {
             routes: [r],
             devices: devices,
             meters: [r.id: meters(channels: channels)],
-            latencyComponents: [r.id: latency(for: r)])
+            latencyComponents: [r.id: latency(for: r)],
+            routeCounters: [r.id: RouteCounters(from: r.status)])
     }
 }
 #endif

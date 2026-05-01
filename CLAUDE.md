@@ -9,7 +9,7 @@ Jbox is a macOS-only Core Audio routing utility. C++ engine + C ABI + Swift wrap
 Two companion docs sit alongside `plan.md` and an agent should know they exist:
 
 - `docs/followups.md` — pending implementation work that's been deferred from the main path. Hardware-gated production wiring (real `CoreAudioBackend` HAL listeners, real `MacosPowerEventSource`) and non-critical perf refinements live here. Each entry carries Problem / What-to-do / Research-needed / Pitfalls / Acceptance / References. Read this *before* picking up any "deferred follow-up" item referenced from `plan.md`.
-- `docs/refactoring-backlog.md` — refactoring of existing working code that we want to do but have deliberately not folded into feature work. Currently carries the `jbox_error_code_t` / `last_error` naming smell (R1). Read this *before* renaming anything in those families or adding a new variant to `jbox_error_code_t`.
+- `docs/refactoring-backlog.md` — refactoring of existing working code that we want to do but have deliberately not folded into feature work. Currently carries the `jbox_error_code_t` / `last_error` naming smell (R1), the live-Core-Audio test-skip pattern (R2), and the `@Observable` × subscript-write asymmetry watch-item (R3). Read this *before* renaming anything in those families, adding a new variant to `jbox_error_code_t`, extending the `EngineStoreTests` skip idiom, or adding a new periodic tick that mutates `@Observable` state via subscript paths in `EngineStore`.
 
 When you defer something during feature work, file it in the right doc instead of leaving a TODO comment in code or a one-line mention in `plan.md`. The depth — open questions, pitfalls, acceptance plan — is the point.
 

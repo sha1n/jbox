@@ -156,6 +156,52 @@ public struct Route: Identifiable, Equatable, Sendable {
     }
 }
 
+/// Volatile per-route counters that tick monotonically while a route
+/// is running. Held in a separate observable dict on `EngineStore`
+/// rather than baked into `Route.status`, because the array-subscript
+/// write path that `routes[i].status = …` uses fires the `@Observable`
+/// registrar's willSet *unconditionally* on every assignment (no
+/// equal-value short-circuit for `_modify`-accessor writes), and
+/// `NSTableView` under SwiftUI's `List` treats that as "data source
+/// did change" — cancelling any in-flight `List.onMove` drag drop.
+/// `routeCounters` is written via a *direct* property setter
+/// (`self.routeCounters = next`), which `@Observable` *does*
+/// short-circuit on equality, and even when it fires the registrar
+/// it invalidates only observers tracking `routeCounters` — the
+/// `routes` ForEach in `RouteListView` is unaffected. The fresh
+/// counter values land here on every `pollStatuses` tick; the values
+/// inside `routes[i].status` carry whatever counters were captured the
+/// last time the *stable* part of `RouteStatus` changed and should be
+/// treated as stale by callers that need live numbers (read this
+/// dict instead).
+public struct RouteCounters: Equatable, Hashable, Sendable {
+    public var framesProduced: UInt64
+    public var framesConsumed: UInt64
+    public var underrunCount:  UInt64
+    public var overrunCount:   UInt64
+
+    public static let zero = RouteCounters(
+        framesProduced: 0, framesConsumed: 0,
+        underrunCount: 0, overrunCount: 0)
+
+    public init(framesProduced: UInt64,
+                framesConsumed: UInt64,
+                underrunCount:  UInt64,
+                overrunCount:   UInt64) {
+        self.framesProduced = framesProduced
+        self.framesConsumed = framesConsumed
+        self.underrunCount  = underrunCount
+        self.overrunCount   = overrunCount
+    }
+
+    public init(from status: RouteStatus) {
+        self.init(framesProduced: status.framesProduced,
+                  framesConsumed: status.framesConsumed,
+                  underrunCount:  status.underrunCount,
+                  overrunCount:   status.overrunCount)
+    }
+}
+
 /// Peak snapshot for a single route, one linear peak per mapped
 /// channel on each side. Read-and-reset: each `pollMeters()` pass on
 /// the store replaces this with the peak since the previous pass.
@@ -216,6 +262,18 @@ public final class EngineStore {
     /// zeroed entry immediately on stop and the current values on a
     /// fresh start. Keyed by route id; absent for never-started routes.
     public private(set) var latencyComponents: [UInt32: LatencyComponents] = [:]
+
+    /// Live, monotonically-ticking per-route counters
+    /// (frames produced / consumed, under / overrun counts) refreshed
+    /// by `pollStatuses()`. See `RouteCounters` for why these do not
+    /// live inside `Route.status` — the short version is that
+    /// `routes[i].status = …` fires the `@Observable` registrar's
+    /// willSet unconditionally and would cancel in-flight
+    /// drag-to-reorder drops every 250 ms while any route is running.
+    /// Direct-setter assignments to this dict are short-circuited by
+    /// `@Observable` on equality, and even unequal writes invalidate
+    /// only observers of `routeCounters`, never the `routes` ForEach.
+    public private(set) var routeCounters: [UInt32: RouteCounters] = [:]
 
     /// Per-channel peak-hold tracker driven by `pollMeters()`. Not
     /// `@Observable` — the UI re-reads `heldPeak(...)` on each
@@ -405,6 +463,7 @@ public final class EngineStore {
             routes.removeAll(where: { $0.id == id })
             meters.removeValue(forKey: id)
             latencyComponents.removeValue(forKey: id)
+            routeCounters.removeValue(forKey: id)
             peakHolds.forget(routeId: id)
             lastError = nil
             JboxLog.engine.notice("removeRoute id=\(id) ok")
@@ -413,6 +472,43 @@ public final class EngineStore {
             lastError = String(describing: error)
             JboxLog.engine.error("removeRoute id=\(id) failed: \(String(describing: error), privacy: .public)")
         }
+    }
+
+    /// Reorder the observable `routes` array. Pure UI/persistence
+    /// concern — the engine does not know or care about route order;
+    /// `RouteManager`'s IOProc scheduling is per-device.
+    ///
+    /// `IndexSet` and `destination` follow SwiftUI `List.onMove`
+    /// convention: indices are positions in the current array;
+    /// `destination` is "the index this row(s) should land *before*",
+    /// so dragging row 0 to position 3 in a 3-row list moves it to
+    /// the end.
+    ///
+    /// Fires `onRoutesChanged?()` only when the resulting `id`-sequence
+    /// actually differs. Three no-op shapes collapse to identity under
+    /// the "destination is *before* this index" semantics and are
+    /// silent (so we don't trigger spurious `state.json` snapshots):
+    /// (1) empty `IndexSet`; (2) `{N} → N` (same-position drop);
+    /// (3) `{N} → N+1` (drop-immediately-past-self).
+    public func moveRoute(from offsets: IndexSet, to destination: Int) {
+        let before = routes.map(\.id)
+        // Implement List.onMove semantics manually (Array.move is SwiftUI-only).
+        // Extract items, remove from back to front to keep indices stable,
+        // then insert before destination (adjusted for removals).
+        let items = offsets.map { routes[$0] }
+        var adjusted = destination
+        for idx in offsets.reversed() {
+            routes.remove(at: idx)
+            if idx < destination { adjusted -= 1 }
+        }
+        routes.insert(contentsOf: items, at: adjusted)
+        let after = routes.map(\.id)
+        guard before != after else { return }
+
+        let offsetStr = offsets.map(String.init).joined(separator: ",")
+        JboxLog.engine.notice(
+            "moveRoute from=\(offsetStr, privacy: .public) to=\(destination, privacy: .public) count=\(self.routes.count, privacy: .public)")
+        onRoutesChanged?()
     }
 
     /// Derived state for the menu bar icon (spec.md § 4.2). `.attention`
@@ -696,6 +792,7 @@ public final class EngineStore {
         try? engine.removeRoute(id)
         meters.removeValue(forKey: id)
         latencyComponents.removeValue(forKey: id)
+        routeCounters.removeValue(forKey: id)
         peakHolds.forget(routeId: id)
 
         let initialStatus = (try? engine.pollStatus(newId)) ?? RouteStatus(
@@ -745,17 +842,71 @@ public final class EngineStore {
     /// Refresh `status` on every known route. Meant to be driven by a
     /// ~4 Hz timer from the app layer (Phase 6 #4). Also refreshes the
     /// cached `latencyComponents` so the diagnostics panel sees the
-    /// current breakdown as routes start / stop.
+    /// current breakdown as routes start / stop, and re-publishes the
+    /// per-route counters dict.
+    ///
+    /// Two-channel write discipline (load-bearing for drag-to-reorder):
+    ///
+    /// * `routes[i].status` is written through the Array's `_modify`
+    ///   subscript accessor, which `@Observable` does NOT short-circuit
+    ///   on equal-value writes the way it does for direct property
+    ///   setters. Every assignment fires the registrar's willSet, and
+    ///   `NSTableView` under SwiftUI's `List` treats that as
+    ///   "data source did change" and invalidates in-flight
+    ///   `List.onMove` drops. So we only re-assign when the *stable*
+    ///   subset of `RouteStatus` (state, lastError, estimatedLatencyUs)
+    ///   actually differs. The previous shipped guard
+    ///   (`status != routes[i].status`) was load-bearing only for
+    ///   *idle* routes — running routes legitimately tick
+    ///   `framesProduced` / `framesConsumed` every poll, which would
+    ///   slip past a full-equality check and re-fire 4 Hz × N-running
+    ///   willSets per second, killing the drag UX while audio flows.
+    /// * Live counters land in the `routeCounters` dict via a *direct*
+    ///   setter (`self.routeCounters = next`), which `@Observable`
+    ///   shorts on equality, and which — even when it fires — only
+    ///   invalidates observers of `routeCounters`, never the `routes`
+    ///   ForEach. `MeterBar.CountersColumn` reads from this dict.
+    ///
+    /// Same `_modify`-accessor reasoning applies to the
+    /// `[UInt32: LatencyComponents]` dict subscript-write below.
+    /// Regression tests:
+    /// `EngineStoreTests.pollStatusesIsQuietOnNoChange`,
+    /// `…IsQuietOnRoutesWhenOnlyCountersChanged`,
+    /// `statusFieldsAreObservablyEqual…`.
     public func pollStatuses() {
+        var nextCounters: [UInt32: RouteCounters] = [:]
+        nextCounters.reserveCapacity(routes.count)
         for i in routes.indices {
             let id = routes[i].id
-            if let status = try? engine.pollStatus(id) {
+            guard let status = try? engine.pollStatus(id) else { continue }
+            nextCounters[id] = RouteCounters(from: status)
+            if !Self.statusFieldsAreObservablyEqual(status, routes[i].status) {
                 routes[i].status = status
             }
-            if let components = try? engine.pollLatencyComponents(id) {
+            if let components = try? engine.pollLatencyComponents(id),
+               components != latencyComponents[id] {
                 latencyComponents[id] = components
             }
         }
+        // Direct-setter write — @Observable short-circuits when equal.
+        routeCounters = nextCounters
+    }
+
+    /// Two `RouteStatus` values are "observably equal" — i.e. callers
+    /// reading via `EngineStore.routes` would see the same values for
+    /// every field they actually bind to — exactly when their stable
+    /// fields match. The four monotonic counter fields
+    /// (`framesProduced` / `framesConsumed` / `underrunCount` /
+    /// `overrunCount`) tick every poll for running routes and are
+    /// excluded; their fresh values live in `routeCounters` via a
+    /// direct-setter dict. Exposed `static` for unit testing
+    /// (mirrors `overallState(for:)` / `MeterPeaks.signalThreshold`
+    /// — pure logic gets pure tests).
+    public static func statusFieldsAreObservablyEqual(_ a: RouteStatus,
+                                                      _ b: RouteStatus) -> Bool {
+        return a.state == b.state
+            && a.lastError == b.lastError
+            && a.estimatedLatencyUs == b.estimatedLatencyUs
     }
 
     // MARK: Meters (Phase 6 Slice A)
@@ -786,6 +937,12 @@ public final class EngineStore {
                                   channel: i, value: v, now: now)
             }
         }
+        // No diff-before-write needed here: `meters = next` is a direct
+        // property setter, and the `@Observable` macro short-circuits
+        // willSet on equal-value writes for direct setters (verified
+        // empirically — see `pollMetersIsQuietOnNoChange`). The
+        // subscript-through-collection path in `pollStatuses` does NOT
+        // get this short-circuit and needs an explicit guard.
         meters = next
     }
 
@@ -820,7 +977,14 @@ public final class EngineStore {
 
     private func refreshStatus(_ id: UInt32) {
         guard let idx = routes.firstIndex(where: { $0.id == id }) else { return }
-        if let status = try? engine.pollStatus(id) {
+        guard let status = try? engine.pollStatus(id) else { return }
+        let newCounters = RouteCounters(from: status)
+        if routeCounters[id] != newCounters {
+            // Dict subscript-write fires willSet on `routeCounters`, but
+            // not on `routes` — the drag UX cares only about `routes`.
+            routeCounters[id] = newCounters
+        }
+        if !Self.statusFieldsAreObservablyEqual(status, routes[idx].status) {
             routes[idx].status = status
         }
     }
@@ -842,6 +1006,7 @@ public final class EngineStore {
                                devices: [Device] = [],
                                meters: [UInt32: MeterPeaks] = [:],
                                latencyComponents: [UInt32: LatencyComponents] = [:],
+                               routeCounters: [UInt32: RouteCounters] = [:],
                                lastError: String? = nil) -> EngineStore {
         guard let engine = try? Engine() else {
             preconditionFailure(
@@ -853,6 +1018,7 @@ public final class EngineStore {
         store.devices           = devices
         store.meters            = meters
         store.latencyComponents = latencyComponents
+        store.routeCounters     = routeCounters
         store.lastError         = lastError
         return store
     }

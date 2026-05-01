@@ -461,6 +461,144 @@ Phase 6 first-slice summary of deviations:
 - **XCUITest deferred under the SPM-only constraint.** The Phase 6 follow-up "a couple of XCUITest flows in `JboxAppTests`" was evaluated and intentionally deferred during the 2026-04 Phase 6 close-out pass. The Apple-blessed XCUITest path requires `xcodebuild test` against an `.xcodeproj` + `.xctestplan`; both violate the SPM-only / no Xcode IDE rule (`CLAUDE.md` "Tooling constraints"). The lower-level `xctest`-runner-against-a-built-app-bundle path is undocumented under SPM and brittle. Decision: keep `Tests/JboxAppTests/PlaceholderTests.swift` as the slot the future cases will land in, document the gap fully under "UI tests (minimal):" above (constraint, blocked path, recommended approach when revisited, what already covers the surface), and revisit when either the project policy on a generated `.xcodeproj` artefact relaxes or the surface grows past what `EngineStoreTests` + SwiftUI `#Preview` smoke + `make run` manual passes can credibly cover. **No** XCUITest infrastructure was landed in this phase; closing the deviation is the explicit decision *not* to land it under the current constraint.
 - **setInputRate flush storm → audible clicks.** After the ring-sizing bump above, a real-hardware V31 → Apollo session still produced audible clicks on dynamic content and a slow-climbing underrun counter (u321 after ~1 minute). Root cause sits in the drift-correction path, not in ring sizing: `DriftSampler` recomputes `target_input_rate = nominal * (1 + ppm * 1e-6)` every 10 ms, and with the Phase 4 conservative gains (`kp=1e-6`, `ki=1e-8`) the per-tick PI output adjusts the rate by ~1e-7 ppm — infinitesimally small in practice, but always a distinct float, so the legacy naive `target != last_applied_rate` comparison in `route_manager.cpp` triggered `AudioConverterWrapper::setInputRate` on every RT callback. Each `setInputRate` call flushes Apple's polyphase filter state; a new characterization test (`audio_converter_wrapper_test.cpp`, tag `[hypothesis]`) drives the real Apple converter and quantifies the cost at ~16 extra input frames per call — ~1600 frames/s continuously drained from the ring at the 100 Hz tick rate, which both explains the audible discontinuities on transients and the slow ring drain that manifested as climbing underruns. Fix: new pure `shouldApplyRate(proposed, last_applied, nominal)` decision function in `Sources/JboxEngineC/control/rate_deadband.hpp` with a 1 ppm threshold (48 mHz at 48 k — roughly 10× below the audible rate-error threshold), wired into `route_manager.cpp`'s output IOProc. Tests: 9 unit cases in `rate_deadband_test.cpp` covering cold-start, sub/supra-threshold gating, a PI-noise tick sequence (0 applies expected), and a 5 ppm ramp; plus a companion end-to-end `[hypothesis]` case that mirrors the real apply-or-skip logic against a live Apple converter and asserts the deadband restores baseline input consumption. Side-effect documented in the same commit: `drift_integration_test.cpp` scenario 1 (`+50 ppm source`) had been passing at a 512-frame excursion band only because the flush storm itself was bounding ring fill (drift_tracker.cpp:14-16 calls this out); with the flush storm gone and Phase 4 gains unchanged, open-loop drift accumulation of ~744 frames at 310 s is now visible, so the band is relaxed to 1024 frames with a comment pointing at the real-hardware gain-tuning task still deferred per Phase 4 exit criteria. spec §§ 2.5–2.6 updated.
 
+- **Drag-to-reorder route strips (2026-05-01).** *Goal:* let the user
+  arrange route strips in the main window's order of choice and have
+  that order persist across launches. *Choices:* SwiftUI's native
+  `List.onMove` modifier on the `ForEach` in `RouteListView` over a
+  custom `DropDelegate` (no payoff for v1; native gives the macOS
+  reorder cursor, drop-line indicator, and `RouteRow` identity
+  stability for free). Single new `@MainActor` mutation
+  `EngineStore.moveRoute(from:to:)` mirrors `addRoute` / `removeRoute`
+  shape — `before != after` id-list short-circuit on no-op moves
+  (empty `IndexSet`, same-position drops, drop-immediately-past-self)
+  avoids spurious `state.json` snapshots. Manual `Array.move`
+  reimplementation because Swift's `MutableCollection.move(fromOffsets:toOffset:)`
+  is SwiftUI-only and `EngineStoreSwift` imports only `Foundation` +
+  `Observation` — index-adjustment math (decrement `destination` for
+  every removal preceding it) matches SwiftUI's documented `onMove`
+  semantics. Persistence is automatic: `[StoredRoute]` was already
+  an ordered JSON array and `restoreRoutes` already rehydrates in
+  array order. No engine, ABI, or schema changes (ABI stays at v14,
+  `currentSchemaVersion` stays at 1). Eight
+  `EngineStoreTests.moveRoute*` Swift Testing cases pin: single-row
+  down/up, contiguous-multi-row IndexSet preserving relative order,
+  non-contiguous multi-index `IndexSet([0, 3]) → 2` straddling the
+  destination (defensive against future refactors of the manual
+  index-adjustment math), two identity variants (`→ N`, `→ N+1`),
+  empty IndexSet, single-row list, exactly-once `onRoutesChanged`
+  firing per non-trivial move. Manual smoke covers the gesture (no
+  automated UI-test infrastructure per CLAUDE.md). *Diff:* +171 LOC
+  tests + 34 LOC engine-store + 3 LOC view + doc updates. Shipped as a single squashed commit on
+  `feature/route-reorder` (squashed from per-task TDD slices during
+  the post-review amend pass). See
+  [`docs/2026-05-01-route-reorder-design.md`](./2026-05-01-route-reorder-design.md)
+  + [`docs/2026-05-01-route-reorder-plan.md`](./2026-05-01-route-reorder-plan.md).
+
+- **`@Observable` × `List.onMove` drag cancellation (2026-05-01,
+  surfaced during the drag-to-reorder smoke pass).** *Symptom:* a
+  drag started on a route strip would cancel mid-gesture — the
+  drop indicator would briefly appear, then the row would snap
+  back. *Root cause (subtler than first diagnosed):* Apple's
+  `@Observable` macro is asymmetric on equal-value writes.
+  *Direct* property-setter writes (`self.meters = next`) get a
+  willSet short-circuit when the new value equals the old. But
+  *subscript-through-collection* writes (`routes[i].status = …`,
+  `latencyComponents[id] = …`) go through the `_modify` accessor,
+  which fires the observation registrar's willSet unconditionally
+  — value-equality is NOT compared on that path. With three idle
+  routes the `pollStatuses` 4 Hz tick produced 12 unconditional
+  fires/sec; `NSTableView` (the AppKit class behind SwiftUI
+  `List` on macOS) treats every "data source did change" signal
+  as a reason to invalidate the proposed drop, cancelling the
+  in-flight gesture. *Fix:* diff-before-write guards at the two
+  subscript-write sites in `EngineStore.swift` — `pollStatuses`
+  (covers both `routes[i].status` and `latencyComponents[id]`)
+  and the `refreshStatus` one-liner — gated on `Equatable`
+  comparison of `RouteStatus` / `LatencyComponents`. The
+  `pollMeters` direct-setter path is left without a guard —
+  Observation already shorts equal-value writes there, and adding
+  a redundant guard would be misleading dead code. *Regression
+  coverage:* `EngineStoreTests.pollStatusesIsQuietOnNoChange`
+  pins the `pollStatuses` subscript-write guard (verified to fail
+  if either the `status != routes[i].status` or
+  `components != latencyComponents[id]` arm is removed);
+  `pollMetersIsQuietOnNoChange` pins the framework contract for
+  direct-setter shorts (so that a future Apple change to
+  Observation that drops the short-circuit fails the test loudly
+  and we know to add a guard at that site).
+  `refreshStatusIsQuietOnNoChange` independently pins the
+  `refreshStatus` arm by driving an idempotent `stopRoute(id)` on
+  an already-stopped route (the engine returns `JBOX_OK`, the
+  store's success arm calls `refreshStatus`, and the guard must
+  skip the equal-value subscript write) — verified to fail if the
+  `status != routes[idx].status` clause is removed. The latent
+  asymmetry generalises across `EngineStore` and is filed as
+  `R3` in `docs/refactoring-backlog.md` so future contributors
+  adding new periodic tick paths know to mirror the guard.
+  *Watch-out for future refactors:* the `if … != …` guards on the
+  subscript paths are NOT a perf micro-optimization — removing
+  them silently regresses drag cancellation under any audio.
+  Inline comments at both sites call this out and reference the
+  asymmetry above. **Superseded the same day by the next deviation
+  for *running* routes** — the full-`Equatable` guard turned out to
+  hold only on idle routes, see below.
+
+- **`@Observable` × subscript-write asymmetry, second order — counter
+  ticks slip past full-equality diff (2026-05-01, surfaced in user
+  smoke right after the previous fix).** *Symptom:* the drag-to-reorder
+  gesture worked perfectly when *all* routes were stopped, but as soon
+  as any route was running the drop indicator flickered during the
+  drag and the row often snapped back on release. *Root cause:* the
+  previous fix's diff-before-write predicate was full-`Equatable` on
+  `RouteStatus`. `RouteStatus` carries four monotonic counter fields
+  (`framesProduced` / `framesConsumed` / `underrunCount` /
+  `overrunCount`) which tick on every `pollStatuses` pass for any
+  route in `.running`. The full-equality compare therefore detected
+  a difference *every* poll on running routes, the
+  `routes[i].status = …` subscript-write fired, and the same
+  `NSTableView` data-source-did-change cascade described above
+  cancelled the in-flight drop. The previous diff guard was
+  load-bearing only for *idle* routes; it did nothing for the case
+  the user was actually dragging through. *Fix:* split `RouteStatus`
+  into two channels at the `EngineStore` boundary. Stable fields
+  (`state`, `lastError`, `estimatedLatencyUs`) drive the
+  `routes[i].status` array-subscript write via a new exposed-`static`
+  predicate `EngineStore.statusFieldsAreObservablyEqual(_:_:)`;
+  monotonic counters publish into a new
+  `routeCounters: [UInt32: RouteCounters]` dict via a *direct* setter
+  (`self.routeCounters = next`), which `@Observable` short-circuits
+  on equality and which — even when it fires — invalidates only
+  observers of `routeCounters`, never the `routes` ForEach. The
+  expanded `MeterPanel.DiagnosticsBlock` reads counters from the
+  new dict; the values inside `routes[i].status` are now stale by
+  design and callers that need live numbers must read the dict.
+  `removeRoute` / `replaceRoute` prune the new dict alongside the
+  existing `meters` / `latencyComponents` cleanup. *Regression
+  coverage:* four pure-logic
+  `EngineStoreTests.statusFieldsAreObservablyEqual…` cases pin the
+  predicate (counter-only changes are no-ops; state, lastError, and
+  estimatedLatencyUs changes each invalidate); two integration cases
+  (`pollStatusesPublishesRouteCounters`,
+  `removeRoutePrunesRouteCounters`) pin the new dict's lifecycle;
+  and `pollStatusesIsQuietOnRoutesWhenRunningCountersTick` is a
+  live-Core-Audio regression — it brings a real route to `.running`,
+  verifies counters actually advance between polls, and asserts that
+  `withObservationTracking` on `routes` does not fire across the next
+  `pollStatuses` tick. The test skips via `Issue.record` on hosts
+  that can't bring the route up or where the IOProc is silenced
+  (no usable hardware / Hardened-Runtime sandbox without the
+  `audio-input` entitlement); on a developer machine with audio it
+  exercises the bug path end-to-end. The existing
+  `pollStatusesIsQuietOnNoChange` / `refreshStatusIsQuietOnNoChange`
+  / `pollMetersIsQuietOnNoChange` cases continue to pin the no-change
+  paths and the framework-contract direct-setter short-circuit.
+  *Watch-out for future refactors:* never put a high-frequency-ticking
+  field into a value held by `routes[i].…` and gated on full
+  `Equatable` — it will defeat any subscript-write guard. New volatile
+  per-route data should follow `routeCounters`'s direct-setter dict
+  pattern. `R3` in `docs/refactoring-backlog.md` carries the broader
+  watch-item; this fix resolves its primary realisation.
+
 ---
 
 ## Phase 7 — Persistence + launch-at-login

@@ -768,6 +768,13 @@ struct EngineStoreTests {
             name: "edit-mapping")
         let route = try store.addRoute(original)
 
+        // Settle one poll so `routeCounters[route.id]` is populated;
+        // otherwise the prune assertion below would be vacuous (the
+        // key was never present, so a refactor that drops the prune
+        // line in `replaceRoute` would still pass).
+        store.pollStatuses()
+        #expect(store.routeCounters[route.id] != nil)
+
         // Build an edit that changes the destination channel if possible;
         // otherwise bump the source channel.
         let newMapping: [ChannelEdge] =
@@ -782,7 +789,656 @@ struct EngineStoreTests {
         #expect(updated.config.mapping == newMapping)
         #expect(store.routes.count == 1)
         #expect(store.routes.first?.id == updated.id)
+        // Pin the `routeCounters` prune at the old engine id —
+        // `replaceRoute` removes the old route through the engine,
+        // and the wrapper must drop its `routeCounters` entry along
+        // with the existing `meters` / `latencyComponents` cleanup.
+        #expect(store.routeCounters[route.id] == nil,
+                "replaceRoute must prune routeCounters for the old engine id")
 
         store.removeRoute(updated.id)
+    }
+
+    // MARK: - moveRoute
+
+    /// Helper: build three routes with distinct names, all over the
+    /// same single-input / single-output device pair (matching the
+    /// existing `addRouteLatencyMode` idiom at line ~127). Returns the
+    /// store + the three route IDs in insertion order.
+    private func makeStoreWithThreeRoutes() throws
+        -> (EngineStore, UInt32, UInt32, UInt32)
+    {
+        let store = try makeStore()
+        store.refreshDevices()
+        guard let src = store.devices.first(where: { $0.inputChannelCount  >= 1 }),
+              let dst = store.devices.first(where: { $0.outputChannelCount >= 1 })
+        else {
+            Issue.record("CI runner expected to expose at least one input- and one output-capable device")
+            // `throw` rather than `return` because the helper has a non-Void
+            // return type; the calling test re-throws and Swift Testing
+            // surfaces the recorded `Issue` as a skip.
+            throw CancellationError()
+        }
+        func cfg(_ name: String) -> RouteConfig {
+            RouteConfig(
+                source: DeviceReference(device: src),
+                destination: DeviceReference(device: dst),
+                mapping: [ChannelEdge(src: 0, dst: 0)],
+                name: name)
+        }
+        let a = try store.addRoute(cfg("a"))
+        let b = try store.addRoute(cfg("b"))
+        let c = try store.addRoute(cfg("c"))
+        return (store, a.id, b.id, c.id)
+    }
+
+    @Test("moveRoute moves a single row down and fires onRoutesChanged once")
+    func moveRouteSingleRowDown() throws {
+        let (store, a, b, c) = try makeStoreWithThreeRoutes()
+        defer {
+            store.removeRoute(a)
+            store.removeRoute(b)
+            store.removeRoute(c)
+        }
+        var fireCount = 0
+        store.onRoutesChanged = { fireCount += 1 }
+
+        // Move row 0 ('a') to position 3 (after 'c').
+        // List.onMove convention: destination is "before this index".
+        store.moveRoute(from: IndexSet(integer: 0), to: 3)
+
+        #expect(store.routes.map(\.id) == [b, c, a])
+        #expect(fireCount == 1)
+    }
+
+    @Test("moveRoute moves a single row up and fires onRoutesChanged once")
+    func moveRouteSingleRowUp() throws {
+        let (store, a, b, c) = try makeStoreWithThreeRoutes()
+        defer {
+            store.removeRoute(a)
+            store.removeRoute(b)
+            store.removeRoute(c)
+        }
+        var fireCount = 0
+        store.onRoutesChanged = { fireCount += 1 }
+
+        // Move row 2 ('c') to position 0 (before 'a').
+        store.moveRoute(from: IndexSet(integer: 2), to: 0)
+
+        #expect(store.routes.map(\.id) == [c, a, b])
+        #expect(fireCount == 1)
+    }
+
+    @Test("moveRoute with multi-row IndexSet preserves the relative order of the moved set")
+    func moveRouteMultiRow() throws {
+        let (store, a, b, c) = try makeStoreWithThreeRoutes()
+        defer {
+            store.removeRoute(a)
+            store.removeRoute(b)
+            store.removeRoute(c)
+        }
+        var fireCount = 0
+        store.onRoutesChanged = { fireCount += 1 }
+
+        // Drag rows {0, 1} ({a, b}) to position 3 (after c).
+        // Expected: c first, then a then b in their original
+        // relative order.
+        store.moveRoute(from: IndexSet([0, 1]), to: 3)
+
+        #expect(store.routes.map(\.id) == [c, a, b])
+        #expect(fireCount == 1)
+    }
+
+    @Test("moveRoute is a no-op when destination equals source position")
+    func moveRouteSamePositionNoOp() throws {
+        let (store, a, b, c) = try makeStoreWithThreeRoutes()
+        defer {
+            store.removeRoute(a)
+            store.removeRoute(b)
+            store.removeRoute(c)
+        }
+        var fireCount = 0
+        store.onRoutesChanged = { fireCount += 1 }
+
+        // Drag row 1 ('b') to position 1 — same place.
+        // Swift's Array.move treats this as identity; we must NOT
+        // fire onRoutesChanged for it (avoid spurious state.json
+        // snapshots).
+        store.moveRoute(from: IndexSet(integer: 1), to: 1)
+
+        #expect(store.routes.map(\.id) == [a, b, c])
+        #expect(fireCount == 0)
+    }
+
+    @Test("moveRoute is a no-op when destination is one past the source (List.onMove identity)")
+    func moveRouteAdjacentPositionNoOp() throws {
+        let (store, a, b, c) = try makeStoreWithThreeRoutes()
+        defer {
+            store.removeRoute(a)
+            store.removeRoute(b)
+            store.removeRoute(c)
+        }
+        var fireCount = 0
+        store.onRoutesChanged = { fireCount += 1 }
+
+        // SwiftUI's List.onMove uses "destination is *before* this
+        // index" semantics. Dragging row 1 ('b') to position 2 lands
+        // it right after itself — same array as before. The
+        // implementation reaches the `before != after` short-circuit
+        // through the index-adjustment branch (1 < 2 → adjusted -= 1
+        // → reinsert at 1), distinct from the `→ 1` path (1 < 1 is
+        // false → adjusted unchanged). This case pins both paths.
+        store.moveRoute(from: IndexSet(integer: 1), to: 2)
+
+        #expect(store.routes.map(\.id) == [a, b, c])
+        #expect(fireCount == 0)
+    }
+
+    @Test("moveRoute is a no-op for an empty IndexSet")
+    func moveRouteEmptyIndexSet() throws {
+        let (store, a, b, c) = try makeStoreWithThreeRoutes()
+        defer {
+            store.removeRoute(a)
+            store.removeRoute(b)
+            store.removeRoute(c)
+        }
+        var fireCount = 0
+        store.onRoutesChanged = { fireCount += 1 }
+
+        store.moveRoute(from: IndexSet(), to: 2)
+
+        #expect(store.routes.map(\.id) == [a, b, c])
+        #expect(fireCount == 0)
+    }
+
+    @Test("moveRoute fires onRoutesChanged exactly once per non-trivial move")
+    func moveRouteFiresExactlyOnce() throws {
+        let (store, a, b, c) = try makeStoreWithThreeRoutes()
+        defer {
+            store.removeRoute(a)
+            store.removeRoute(b)
+            store.removeRoute(c)
+        }
+        var fireCount = 0
+        store.onRoutesChanged = { fireCount += 1 }
+
+        store.moveRoute(from: IndexSet(integer: 0), to: 2)  // a → after b
+        store.moveRoute(from: IndexSet(integer: 2), to: 0)  // last → first
+
+        // Two non-trivial moves should fire exactly twice. Regression
+        // guard against accidentally double-firing onRoutesChanged.
+        #expect(fireCount == 2)
+    }
+
+    @Test("moveRoute with a non-contiguous IndexSet straddling the destination preserves the relative order of the moved set")
+    func moveRouteNonContiguousIndexSet() throws {
+        // Defensive guard against future refactors of the manual
+        // `Array.move`-equivalent body (back-to-front removal +
+        // index adjustment). SwiftUI's `List.onMove` only ever
+        // produces contiguous selections in practice, but `IndexSet`
+        // is the public API surface, so we must behave correctly on
+        // any well-formed shape — and the straddling-destination
+        // case (`{0, 3} → 2` over a four-element list) is where the
+        // index-adjustment math is most likely to drift: one
+        // removed index sits below `destination` and decrements
+        // `adjusted`; the other sits above and must NOT decrement
+        // `adjusted`. Expected SwiftUI semantics: a (index 0) and
+        // d (index 3) move together to position 2 (before c),
+        // preserving their relative order, with b and c staying.
+        let store = try makeStore()
+        store.refreshDevices()
+        guard let src = store.devices.first(where: { $0.inputChannelCount  >= 1 }),
+              let dst = store.devices.first(where: { $0.outputChannelCount >= 1 })
+        else {
+            Issue.record("CI runner expected to expose at least one input- and one output-capable device")
+            throw CancellationError()
+        }
+        func cfg(_ name: String) -> RouteConfig {
+            RouteConfig(
+                source: DeviceReference(device: src),
+                destination: DeviceReference(device: dst),
+                mapping: [ChannelEdge(src: 0, dst: 0)],
+                name: name)
+        }
+        let a = try store.addRoute(cfg("a"))
+        let b = try store.addRoute(cfg("b"))
+        let c = try store.addRoute(cfg("c"))
+        let d = try store.addRoute(cfg("d"))
+        defer {
+            store.removeRoute(a.id)
+            store.removeRoute(b.id)
+            store.removeRoute(c.id)
+            store.removeRoute(d.id)
+        }
+        var fireCount = 0
+        store.onRoutesChanged = { fireCount += 1 }
+
+        store.moveRoute(from: IndexSet([0, 3]), to: 2)
+
+        #expect(store.routes.map(\.id) == [b.id, a.id, d.id, c.id])
+        #expect(fireCount == 1)
+    }
+
+    @Test("moveRoute on a single-row list is identity for any valid destination")
+    func moveRouteSingleRowList() throws {
+        let store = try makeStore()
+        store.refreshDevices()
+        guard let src = store.devices.first(where: { $0.inputChannelCount  >= 1 }),
+              let dst = store.devices.first(where: { $0.outputChannelCount >= 1 })
+        else {
+            Issue.record("CI runner expected to expose at least one input- and one output-capable device")
+            throw CancellationError()
+        }
+        let route = try store.addRoute(RouteConfig(
+            source: DeviceReference(device: src),
+            destination: DeviceReference(device: dst),
+            mapping: [ChannelEdge(src: 0, dst: 0)],
+            name: "solo"))
+        defer { store.removeRoute(route.id) }
+        var fireCount = 0
+        store.onRoutesChanged = { fireCount += 1 }
+
+        // For a single-row list, the only valid List.onMove destinations
+        // are 0 (drop-before-self) and 1 (drop-after-self) — both
+        // identity. Both must short-circuit before onRoutesChanged.
+        store.moveRoute(from: IndexSet(integer: 0), to: 0)
+        store.moveRoute(from: IndexSet(integer: 0), to: 1)
+
+        #expect(store.routes.map(\.id) == [route.id])
+        #expect(fireCount == 0)
+    }
+
+    // MARK: - polling diff-before-write (drag-cancellation regression guard)
+
+    /// Reference-type holder so the `@Sendable` `onChange` closure of
+    /// `withObservationTracking` can flip a flag the test then asserts
+    /// on. The closure fires synchronously on the main actor for our
+    /// usage (writes happen on `@MainActor` `EngineStore`), so
+    /// `@unchecked Sendable` is safe here.
+    private final class FireFlag: @unchecked Sendable {
+        var fired = false
+    }
+
+    /// `pollStatuses` writes to `routes[i].status` and `latencyComponents[id]`
+    /// — both subscript-through-collection paths. The `@Observable` macro's
+    /// equal-value short-circuit applies only to *direct* property setters,
+    /// not to `_modify`-accessor mutations through Array / Dictionary
+    /// subscripts. Without an explicit `if status != current` guard, the
+    /// 4 Hz tick fires 12 spurious "data source did change" notifications
+    /// per second (4 Hz × 3 routes) and `NSTableView` under SwiftUI's
+    /// `List` invalidates in-flight `List.onMove` drag drops. The guard
+    /// is load-bearing for the drag UX, NOT a perf micro-optimization.
+    /// Removing it silently regresses the gesture under any audio activity.
+    @Test("pollStatuses does not invalidate route observers when nothing changed")
+    func pollStatusesIsQuietOnNoChange() throws {
+        let (store, a, b, c) = try makeStoreWithThreeRoutes()
+        defer {
+            store.removeRoute(a)
+            store.removeRoute(b)
+            store.removeRoute(c)
+        }
+
+        // Settle: one poll to establish baseline `routes[i].status` and
+        // `latencyComponents[id]` against the engine's current view.
+        store.pollStatuses()
+
+        let flag = FireFlag()
+        withObservationTracking {
+            for r in store.routes {
+                _ = r.status
+            }
+            _ = store.latencyComponents
+        } onChange: { [flag] in
+            flag.fired = true
+        }
+
+        // Engine state hasn't changed between calls — stopped routes
+        // have stable `RouteStatus` and `LatencyComponents == .zero`.
+        // Diff-before-write must skip the assignments.
+        store.pollStatuses()
+
+        #expect(flag.fired == false,
+                "pollStatuses() on unchanged engine state must not invalidate observers")
+    }
+
+    /// `refreshStatus` is the one-route counterpart to `pollStatuses`'s
+    /// loop and is called from `startRoute` / `stopRoute` / `replaceRoute`
+    /// after each engine action. Same `_modify`-accessor concern as
+    /// `pollStatuses`: without the `status != routes[idx].status` guard,
+    /// every successful idempotent action (e.g. a `stopRoute` on a route
+    /// that's already `.stopped`) would write the same `RouteStatus`
+    /// back through the subscript path and fire willSet — and any
+    /// keyboard-shortcut "Stop" while a drag is in flight would cancel
+    /// the drop. The shipped guard at `EngineStore.swift:881` is short
+    /// enough that drift is unlikely, but its callers all also change
+    /// state on the success path, so without an *isolated* regression
+    /// guard a refactor could remove only the `refreshStatus` arm and
+    /// no test would catch it.
+    @Test("refreshStatus does not invalidate route observers when status is unchanged")
+    func refreshStatusIsQuietOnNoChange() throws {
+        let (store, a, b, c) = try makeStoreWithThreeRoutes()
+        defer {
+            store.removeRoute(a)
+            store.removeRoute(b)
+            store.removeRoute(c)
+        }
+
+        // Settle: pollStatuses once so `routes[i].status` matches the
+        // engine's current view. All three routes are `.stopped`.
+        store.pollStatuses()
+
+        let flag = FireFlag()
+        withObservationTracking {
+            for r in store.routes {
+                _ = r.status
+            }
+        } onChange: { [flag] in
+            flag.fired = true
+        }
+
+        // `engine.stopRoute(id)` on an already-stopped route returns
+        // `JBOX_OK` (idempotent — see `RouteManager::stopRoute`), so
+        // `EngineStore.stopRoute` lands in the success arm and calls
+        // `refreshStatus(a)`. The engine's poll returns the same
+        // `.stopped` status; the diff-before-write must skip the
+        // `routes[idx].status = …` assignment.
+        store.stopRoute(a)
+
+        #expect(flag.fired == false,
+                "refreshStatus on unchanged engine state must not invalidate observers")
+    }
+
+    /// `refreshStatus` is the explicit-action counterpart to
+    /// `pollStatuses`'s loop and must publish per-route counters into
+    /// `routeCounters` independently of the periodic poller — otherwise
+    /// the dict only ever rehydrates on the next 4 Hz tick after a
+    /// `startRoute` / `stopRoute` / `replaceRoute` success arm fires,
+    /// and the expanded `MeterPanel.DiagnosticsBlock` shows zeroes for
+    /// up to a quarter-second after every route transition. Pinned
+    /// independently of `pollStatusesPublishesRouteCounters` so a
+    /// refactor that drops only `refreshStatus`'s
+    /// `routeCounters[id] = newCounters` assignment fails *this* test
+    /// rather than slipping through.
+    @Test("refreshStatus publishes per-route counters into the routeCounters dict")
+    func refreshStatusPublishesRouteCounters() throws {
+        let store = try makeStore()
+        store.refreshDevices()
+        guard let src = store.devices.first(where: { $0.inputChannelCount  >= 1 }),
+              let dst = store.devices.first(where: { $0.outputChannelCount >= 1 })
+        else {
+            Issue.record("CI runner expected to expose at least one input- and one output-capable device")
+            return
+        }
+        let route = try store.addRoute(RouteConfig(
+            source: DeviceReference(device: src),
+            destination: DeviceReference(device: dst),
+            mapping: [ChannelEdge(src: 0, dst: 0)],
+            name: "refresh-counters"))
+        defer { store.removeRoute(route.id) }
+
+        // `addRoute` polls status once into `routes[i].status` but does
+        // NOT touch `routeCounters` — only the periodic poller and the
+        // post-action `refreshStatus` are wired to publish there. Pin
+        // that pre-condition so the test isn't vacuous.
+        #expect(store.routeCounters[route.id] == nil)
+
+        // `startRoute`'s success arm calls `refreshStatus(id)`, which
+        // must populate `routeCounters` for the route's id even when
+        // the engine has not yet been polled by the periodic loop.
+        store.startRoute(route.id)
+        #expect(store.routeCounters[route.id] != nil,
+                "refreshStatus on startRoute success must publish counters into the dict")
+    }
+
+    /// `pollMeters` writes the `meters` dictionary via a *direct* property
+    /// setter (`self.meters = next`). Apple's `@Observable` macro
+    /// short-circuits willSet on equal-value direct-setter writes — so
+    /// even without an `if meters != next` guard, an unchanged snapshot
+    /// does not fire onChange. This test pins that framework contract:
+    /// if Apple ever changes Observation to fire on every assignment
+    /// regardless of equality, this test fails and we'd need to add an
+    /// explicit guard at `pollMeters` (matching the `pollStatuses` /
+    /// `refreshStatus` subscript-write paths, which DO need guards
+    /// because the `_modify` accessor doesn't get the same short-circuit).
+    @Test("pollMeters does not invalidate meters observers when the snapshot is unchanged")
+    func pollMetersIsQuietOnNoChange() throws {
+        let (store, a, b, c) = try makeStoreWithThreeRoutes()
+        defer {
+            store.removeRoute(a)
+            store.removeRoute(b)
+            store.removeRoute(c)
+        }
+
+        // Routes are stopped so `pollMeters` produces an empty snapshot.
+        // Settle once so `meters` matches the next tick's `next`.
+        store.pollMeters()
+
+        let flag = FireFlag()
+        withObservationTracking {
+            // `.count` engages the dict's getter through the observation
+            // registrar; a `_ = store.meters` rebind is sometimes elided
+            // by the optimizer and fails to register the dependency.
+            _ = store.meters.count
+        } onChange: { [flag] in
+            flag.fired = true
+        }
+
+        store.pollMeters()
+
+        #expect(flag.fired == false,
+                "pollMeters() with unchanged snapshot must not invalidate observers")
+    }
+
+    // MARK: - statusFieldsAreObservablyEqual (drag-cancellation regression guard, part 2)
+
+    /// Stable `RouteStatus` parts only. Two values that differ in the
+    /// monotonic counter fields (`framesProduced` / `framesConsumed` /
+    /// `underrunCount` / `overrunCount`) are still "observably equal"
+    /// for `routes[i].status` purposes — those tick every poll while a
+    /// route is running and would otherwise re-fire the array-subscript
+    /// willSet at 4 Hz × N-running per second, killing in-flight
+    /// `List.onMove` drops while audio flows. Fresh counters live in
+    /// the separate `routeCounters` direct-setter dict.
+    @Test("statusFieldsAreObservablyEqual treats counter-only changes as no-ops")
+    func statusFieldsAreObservablyEqualIgnoresCounterTicks() {
+        let baseline = RouteStatus(
+            state: .running, lastError: JBOX_OK,
+            framesProduced: 1_000, framesConsumed: 1_000,
+            underrunCount: 0, overrunCount: 0,
+            estimatedLatencyUs: 5_000)
+        let later = RouteStatus(
+            state: .running, lastError: JBOX_OK,
+            framesProduced: 2_500, framesConsumed: 2_490,
+            underrunCount: 1, overrunCount: 0,
+            estimatedLatencyUs: 5_000)
+        #expect(EngineStore.statusFieldsAreObservablyEqual(baseline, later),
+                "ticking counters alone must NOT count as an observable change")
+        #expect(EngineStore.statusFieldsAreObservablyEqual(baseline, baseline),
+                "identical status values must compare observably equal")
+    }
+
+    /// Stable-field changes still invalidate. `state`, `lastError`,
+    /// `estimatedLatencyUs` are bound by `RouteRow` (status glyph,
+    /// error text, latency pill) and a change in any of them is the
+    /// real reason to re-fire `routes[i].status`. The fix split the
+    /// diff predicate so these survive while counter-only ticks are
+    /// silenced — both halves must hold.
+    @Test("statusFieldsAreObservablyEqual flags state changes")
+    func statusFieldsAreObservablyEqualFlagsStateChange() {
+        let stopped = RouteStatus(
+            state: .stopped, lastError: JBOX_OK,
+            framesProduced: 0, framesConsumed: 0,
+            underrunCount: 0, overrunCount: 0,
+            estimatedLatencyUs: 0)
+        let starting = RouteStatus(
+            state: .starting, lastError: JBOX_OK,
+            framesProduced: 0, framesConsumed: 0,
+            underrunCount: 0, overrunCount: 0,
+            estimatedLatencyUs: 0)
+        #expect(!EngineStore.statusFieldsAreObservablyEqual(stopped, starting),
+                "state transition must count as an observable change")
+    }
+
+    @Test("statusFieldsAreObservablyEqual flags lastError changes")
+    func statusFieldsAreObservablyEqualFlagsLastErrorChange() {
+        let ok = RouteStatus(
+            state: .stopped, lastError: JBOX_OK,
+            framesProduced: 0, framesConsumed: 0,
+            underrunCount: 0, overrunCount: 0,
+            estimatedLatencyUs: 0)
+        let errored = RouteStatus(
+            state: .stopped, lastError: JBOX_ERR_DEVICE_GONE,
+            framesProduced: 0, framesConsumed: 0,
+            underrunCount: 0, overrunCount: 0,
+            estimatedLatencyUs: 0)
+        #expect(!EngineStore.statusFieldsAreObservablyEqual(ok, errored),
+                "lastError change must count as an observable change")
+    }
+
+    @Test("statusFieldsAreObservablyEqual flags estimatedLatencyUs changes")
+    func statusFieldsAreObservablyEqualFlagsLatencyChange() {
+        let before = RouteStatus(
+            state: .running, lastError: JBOX_OK,
+            framesProduced: 1_000, framesConsumed: 1_000,
+            underrunCount: 0, overrunCount: 0,
+            estimatedLatencyUs: 5_000)
+        let after = RouteStatus(
+            state: .running, lastError: JBOX_OK,
+            framesProduced: 1_000, framesConsumed: 1_000,
+            underrunCount: 0, overrunCount: 0,
+            estimatedLatencyUs: 7_500)
+        #expect(!EngineStore.statusFieldsAreObservablyEqual(before, after),
+                "estimatedLatencyUs change must count as an observable change")
+    }
+
+    /// `pollStatuses` must publish fresh per-route counters into
+    /// `routeCounters` even when it skips the `routes[i].status` write
+    /// (i.e. when only counters changed). `RouteCounters(from:)` mirrors
+    /// the engine's poll, so a fresh poll on a stopped route lands a
+    /// zero entry; non-zero counters appear once a route has been
+    /// running. Keyed by route id; pruned on `removeRoute`.
+    @Test("pollStatuses publishes per-route counters into the routeCounters dict")
+    func pollStatusesPublishesRouteCounters() throws {
+        let (store, a, b, c) = try makeStoreWithThreeRoutes()
+        defer {
+            store.removeRoute(a)
+            store.removeRoute(b)
+            store.removeRoute(c)
+        }
+
+        // Stopped routes — counters are all zero.
+        store.pollStatuses()
+        #expect(store.routeCounters[a] == RouteCounters.zero)
+        #expect(store.routeCounters[b] == RouteCounters.zero)
+        #expect(store.routeCounters[c] == RouteCounters.zero)
+        #expect(store.routeCounters.count == 3)
+    }
+
+    /// `removeRoute` must drop the route's `routeCounters` entry along
+    /// with the existing `meters` / `latencyComponents` cleanup.
+    /// Without this, removed routes leave behind stale counter entries
+    /// that grow unbounded over the session.
+    @Test("removeRoute prunes the routeCounters dict entry for the removed id")
+    func removeRoutePrunesRouteCounters() throws {
+        let (store, a, b, c) = try makeStoreWithThreeRoutes()
+        // Settle so all three ids have counter entries.
+        store.pollStatuses()
+        #expect(store.routeCounters.count == 3)
+
+        store.removeRoute(b)
+        #expect(store.routeCounters[b] == nil)
+        #expect(store.routeCounters.count == 2)
+
+        store.removeRoute(a)
+        store.removeRoute(c)
+        #expect(store.routeCounters.isEmpty)
+    }
+
+    /// Live-Core-Audio regression for the user-visible drag-cancellation
+    /// bug: while a route is *running*, its counters tick on every
+    /// 4 Hz `pollStatuses` pass. The original guard
+    /// (`status != routes[i].status`) compared all of `RouteStatus`,
+    /// so ticking counters slipped past it and re-fired
+    /// `routes[i].status = …` every poll — which `NSTableView`
+    /// underneath `List` treats as "data source did change" and uses
+    /// to invalidate the in-flight `List.onMove` drop. The fix splits
+    /// the diff: stable fields drive the array write; counters publish
+    /// into `routeCounters` via a direct-setter dict that only
+    /// invalidates observers of `routeCounters` (which the `routes`
+    /// ForEach does not subscribe to).
+    ///
+    /// This test depends on the host actually being able to bring a
+    /// route to `.running` and on the IOProc actually advancing
+    /// `framesProduced` — true for `swift test` on a developer machine
+    /// (no Hardened Runtime, so the missing `audio-input` entitlement
+    /// doesn't silence the IOProc) but not guaranteed on every CI
+    /// runner. We skip via `Issue.record` rather than fail when those
+    /// preconditions aren't met. The pure-logic
+    /// `statusFieldsAreObservablyEqual…` tests above pin the predicate
+    /// itself deterministically; this test pins that `pollStatuses`
+    /// actually wires the predicate through to the `routes` write.
+    @Test("pollStatuses does not invalidate routes observers when only counters tick (live)")
+    func pollStatusesIsQuietOnRoutesWhenRunningCountersTick() throws {
+        let store = try makeStore()
+        store.refreshDevices()
+        guard let src = store.devices.first(where: { $0.inputChannelCount  >= 1 }),
+              let dst = store.devices.first(where: { $0.outputChannelCount >= 1 })
+        else {
+            Issue.record("CI runner expected to expose at least one input- and one output-capable device")
+            return
+        }
+        let route = try store.addRoute(RouteConfig(
+            source: DeviceReference(device: src),
+            destination: DeviceReference(device: dst),
+            mapping: [ChannelEdge(src: 0, dst: 0)],
+            name: "tick-regression"))
+        defer { store.removeRoute(route.id) }
+
+        store.startRoute(route.id)
+        // Wait up to 2 s for the route to bring devices up. Some
+        // hosts settle in `.waiting` (no usable hardware) — treat
+        // that as a skip rather than a failure.
+        let deadline = Date().addingTimeInterval(2.0)
+        while Date() < deadline {
+            store.pollStatuses()
+            if store.routes.first?.status.state == .running { break }
+            Thread.sleep(forTimeInterval: 0.05)
+        }
+        guard store.routes.first?.status.state == .running else {
+            Issue.record("route did not reach .running on this host; can't exercise counter-tick path")
+            return
+        }
+
+        // Settle once more so `routes[0].status` matches the engine's
+        // current view exactly, then capture counters as a baseline.
+        store.pollStatuses()
+        let baseline = store.routeCounters[route.id] ?? .zero
+
+        // Let the IOProc run a bit so counters definitely advance
+        // before the next poll.
+        Thread.sleep(forTimeInterval: 0.10)
+
+        let flag = FireFlag()
+        withObservationTracking {
+            for r in store.routes {
+                _ = r.status
+            }
+        } onChange: { [flag] in
+            flag.fired = true
+        }
+
+        store.pollStatuses()
+
+        let advanced = store.routeCounters[route.id] ?? .zero
+        // Sanity: counters DID advance — otherwise the test is vacuous
+        // (e.g., IOProc silently silenced because the runner sandbox
+        // blocked audio input). Skip rather than pass with no signal.
+        guard advanced.framesProduced > baseline.framesProduced else {
+            Issue.record("framesProduced did not advance (\(baseline.framesProduced) → \(advanced.framesProduced)); IOProc likely not running on this host")
+            return
+        }
+
+        #expect(flag.fired == false,
+                "pollStatuses() must not invalidate `routes` observers while a route's counters tick")
     }
 }

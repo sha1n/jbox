@@ -620,6 +620,7 @@ Single-pane layout — a route list under a standard macOS toolbar.
 ```
 
 - **Route list:** rows show name, source → destination summary, per-channel meters, start/stop button, `[⋯]` menu for edit / delete / duplicate.
+- **Route ordering:** the user controls the order of routes in the list by dragging strips (any non-button area is a drag handle). Order is persisted in `state.json` (`routes: [StoredRoute]` is already an ordered array — no schema change). Engine scheduling is per-device, so the visible order is purely a UI/persistence concern.
 - **Status glyph** per row:
   - `●` (filled circle) — running
   - `○` (open circle) — stopped

@@ -65,6 +65,7 @@ struct MeterPanel: View {
                 if showDiagnostics {
                     DiagnosticsBlock(
                         route: route,
+                        counters: store.routeCounters[route.id],
                         components: store.latencyComponents[route.id])
                 }
             }
@@ -428,9 +429,13 @@ struct ChannelBar: View {
 /// Advanced-only block shown at the bottom of the expanded meter panel
 /// when the "Show engine diagnostics" preference is on. Surfaces the
 /// engine-internal counters and the per-component latency breakdown
-/// cached in the store — the collapsed row stays uncluttered.
+/// cached in the store — the collapsed row stays uncluttered. Counters
+/// come from `EngineStore.routeCounters` rather than `route.status`
+/// because the in-array status carries stale counter values by design
+/// (see `RouteCounters` for the drag-cancellation reasoning).
 struct DiagnosticsBlock: View {
     let route: Route
+    let counters: RouteCounters?
     let components: LatencyComponents?
 
     var body: some View {
@@ -438,7 +443,7 @@ struct DiagnosticsBlock: View {
             Divider()
 
             HStack(alignment: .top, spacing: 24) {
-                CountersColumn(status: route.status)
+                CountersColumn(counters: counters ?? .zero)
                 if let components {
                     LatencyBreakdown(components: components)
                 } else {
@@ -453,7 +458,7 @@ struct DiagnosticsBlock: View {
 }
 
 private struct CountersColumn: View {
-    let status: RouteStatus
+    let counters: RouteCounters
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
@@ -464,19 +469,19 @@ private struct CountersColumn: View {
             Grid(alignment: .leading, horizontalSpacing: 10, verticalSpacing: 2) {
                 GridRow {
                     Text("Produced").foregroundStyle(.secondary)
-                    Text("\(status.framesProduced)").monospacedDigit()
+                    Text("\(counters.framesProduced)").monospacedDigit()
                 }
                 GridRow {
                     Text("Consumed").foregroundStyle(.secondary)
-                    Text("\(status.framesConsumed)").monospacedDigit()
+                    Text("\(counters.framesConsumed)").monospacedDigit()
                 }
                 GridRow {
                     Text("Underruns").foregroundStyle(.secondary)
-                    Text("\(status.underrunCount)").monospacedDigit()
+                    Text("\(counters.underrunCount)").monospacedDigit()
                 }
                 GridRow {
                     Text("Overruns").foregroundStyle(.secondary)
-                    Text("\(status.overrunCount)").monospacedDigit()
+                    Text("\(counters.overrunCount)").monospacedDigit()
                 }
             }
             .font(.caption2)
