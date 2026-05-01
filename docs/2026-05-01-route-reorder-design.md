@@ -105,9 +105,9 @@ No `currentSchemaVersion` bump. No `StoredAppState` field. No `StoredRoute` fiel
 
 Construction: build an `EngineStore` over a `SimulatedBackend` per existing test idiom; seed three routes via `addRoute`; install a counter closure on `onRoutesChanged`; exercise `moveRoute` and assert both `routes.map(\.id)` and the counter.
 
-### Persistence round-trip — `Tests/JboxEngineTests/PersistedStateTests.swift` (one new case)
+### Persistence round-trip — already covered
 
-`StoredAppState round-trip preserves routes array order` — encode then decode an `AppState` with three `StoredRoute`s in a non-default order, assert the decoded `routes` order matches by `id`. JSON array order is a Codable guarantee but pinning it explicitly catches a future encoder swap.
+`Tests/JboxEngineTests/PersistedStateTests.swift:365` (`multipleRoutesPreserveOrder`) already pins that `StoredAppState` round-trip preserves the `routes` array order across encode/decode. No new persistence test needed.
 
 ### Manual smoke
 
@@ -135,7 +135,7 @@ UI gestures are not covered by automated tests in this codebase (per `CLAUDE.md`
 ## Effort estimate
 
 - Production: ≈30 LOC (`EngineStore.moveRoute` + the `.onMove` modifier).
-- Tests: ≈80 LOC (6 EngineStore cases + 1 round-trip case).
+- Tests: ≈70 LOC (6 EngineStore cases; persistence round-trip already covered).
 - Docs: ≈15 LOC across `plan.md` and `spec.md`.
 
 Single commit. No ABI bump. No schema bump. No engine touch.
