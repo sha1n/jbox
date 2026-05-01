@@ -989,7 +989,7 @@ Phase 8 summary of deviations:
 **Tasks.**
 
 Real-hardware tests (documented and run):
-- [ ] **Soak test.** Run at least one representative route for ≥ 30 minutes on real hardware. Verify zero dropouts in logs, drift tracker in band, no clipping, meter values plausible. Document procedure in `docs/testing/soak.md`.
+- [ ] **Soak test.** Run at least one representative route for ≥ 30 minutes on real hardware. Verify zero dropouts in logs, drift tracker in band, no clipping, meter values plausible. *Procedure drafted in [`docs/testing/soak.md`](./testing/soak.md) on 2026-05-01 — CLI canonical, GUI variant, acceptance criteria, recording template, failure triage. Hardware run is the remaining half of this task.*
 - [ ] **Latency measurement.** Loopback test: patch a destination output back into a source input via cable; inject a test pulse; measure round-trip latency. Confirm within ±1 ms of theoretical expectation. Document procedure in `docs/testing/latency.md`.
 - [ ] **Stress / disconnect test.** Start and stop routes rapidly. Unplug and replug devices. Verify graceful recovery, no crashes, no stuck routes. Document procedure in `docs/testing/stress.md`.
 
