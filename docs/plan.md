@@ -39,7 +39,7 @@
 | 7     | Persistence + launch-at-login         | Relaunching the app restores configured routes; opt-in launch-at-login.                | ✅ Persistence + launch-at-login slices landed. Routes + preferences round-trip through `state.json`; the General Preferences "Launch at login" toggle is wired to `SMAppService.mainApp` via `LaunchAtLoginController` with one-time explanatory note (latched in `StoredPreferences.hasShownLaunchAtLoginNote`), `requiresApproval` callout + System Settings deep link, refresh-on-launch reconciliation. Scenes (and the sidebar shell that hosted them) **deferred to a future release** — see § 4.10 in `docs/spec.md` and the "After v1.0.0 — deferred work" entry below; v1 carries no schema reservation, the feature returns as a `v1 → v2` migration. |
 | 7.5   | Device sharing (hog-mode opt-out)     | ~~Per-route and global "share device with other apps" preference; lock-glyph indicator when hog mode is active.~~ | ⛔ **Superseded and reverted by Phase 7.6 simplification.** The hog-mode + buffer-shrink machinery this phase opted out of has been removed entirely from the engine. Share is now the only mode. |
 | 7.6   | Self-routing reliability              | Drop hog mode + HAL buffer-shrink. Users dial buffer in their interface software; Jbox respects it. Plus a per-route SD-style buffer preference (no hog), device hot-plug, sleep/wake, error-state UX. | 🚧 Big simplification landed (cuts ~2400 lines + Phase 7.5's ABI/UI surface). Re-added a no-hog `setBufferFrameSize` (ABI v10 → v11 additive) after Superior Drummer demonstrated the cascade was hog-eviction-side, not property-write-side. **7.6.3 robust teardown + 7.6.4 hot-plug listeners + 7.6.5 sleep/wake handling all landed engine-side (ABI v11 → v12 → v13 additive with `JBOX_ERR_DEVICE_GONE` + `JBOX_ERR_SYSTEM_SUSPENDED`).** 7.6.4's CoreAudioBackend HAL listener wiring + 7.6.5's MacosPowerEventSource both deferred to hardware-tested follow-ups. |
-| 8     | Packaging and installation            | `Jbox.app` runs from `/Applications` on a clean user account.                          | 🚧 Bundling lane (`bundle_app.sh` + `build_release.sh` + `package_unsigned_release.sh` + `run_app.sh`) shipped; rotating file sink (`os_log` + `~/Library/Logs/Jbox/<process>.log`, 5 MiB × 3 rotation, fail-silent on I/O errors) landed. Fresh-user smoke test on a clean macOS user account is the remaining item. |
+| 8     | Packaging and installation            | `Jbox.app` runs from `/Applications` on a clean user account.                          | ✅ Done. Bundling lane (`bundle_app.sh` + `build_release.sh` + `package_unsigned_release.sh` + `run_app.sh`) shipped; rotating file sink (`os_log` + `~/Library/Logs/Jbox/<process>.log`, 5 MiB × 3 rotation, fail-silent on I/O errors) landed; fresh-user smoke test on a clean macOS user account passed (2026-05-01). |
 | 9     | Release hardening                     | v1.0.0 tagged and published to GitHub Releases.                                        | ⏳ Pending |
 
 ---
@@ -921,9 +921,9 @@ Phase 7.7 summary of deviations:
 
 ---
 
-## Phase 8 — Packaging and installation
+## Phase 8 — Packaging and installation ✅
 
-**Status:** 🚧 Bundling lane + rotating file sink landed; fresh-user smoke test on a clean macOS user account is the only outstanding item.
+**Status:** ✅ Complete. Bundling lane + rotating file sink landed; fresh-user smoke test on a clean macOS user account passed (2026-05-01, project owner).
 
 **Goal.** Produce a real distributable `.app` bundle. Make the installation story clear.
 
@@ -948,7 +948,7 @@ Assets:
 - [x] `Info.plist` is rendered inline in `bundle_app.sh` via heredoc (no separate `Info.plist.in` template — single substitution site keeps version/build number/bundle id/microphone usage description discoverable in one file).
 
 Documentation:
-- [ ] Update `README.md` quick-start section if any install / build steps changed during implementation.
+- [x] Update `README.md` quick-start section if any install / build steps changed during implementation. *(Reviewed 2026-05-01: quick-start lines 57–150 still match the current scripts/Makefile — no drift to fix. Status section dating from before Phase 7.7 is a separate Phase 9 final-polish item.)*
 - [x] `READ-THIS-FIRST.txt` is rendered inline in `package_unsigned_release.sh` (no committed template under `Sources/JboxApp/Resources/`; the user-facing copy is auditable in the script that ships it).
 
 Logging — rotating file sink (completes [spec.md § 2.9](./spec.md#29-rt-safe-logging)):
@@ -960,7 +960,7 @@ Logging — rotating file sink (completes [spec.md § 2.9](./spec.md#29-rt-safe-
 - [x] **Per-process file with a shared directory.** `~/Library/Logs/Jbox/Jbox.log` from the .app, `~/Library/Logs/Jbox/JboxEngineCLI.log` from the CLI. The plan's hint was "likely yes (share)"; the deviation below explains why per-process won.
 
 Testing:
-- [ ] Fresh-user smoke test: create a new macOS user account, download the `.dmg`, follow the `READ-THIS-FIRST.txt`, verify the app runs and a test route works.
+- [x] Fresh-user smoke test: create a new macOS user account, download the `.dmg`, follow the `READ-THIS-FIRST.txt`, verify the app runs and a test route works. *(Project-owner pass on 2026-05-01.)*
 
 Phase 8 summary of deviations:
 
