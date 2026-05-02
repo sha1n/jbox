@@ -9,6 +9,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstring>
+#include <unordered_set>
 #include <utility>
 
 namespace jbox::control {
@@ -428,6 +429,7 @@ jbox_error_code_t RouteManager::removeRoute(jbox_route_id_t id) {
         }
     }
     routes_.erase(it);
+    publishWatchedUids();
     return JBOX_OK;
 }
 
@@ -481,7 +483,9 @@ jbox_error_code_t RouteManager::startRoute(jbox_route_id_t id) {
     if (it == routes_.end()) return JBOX_ERR_INVALID_ARGUMENT;
     RouteRecord& r = *it->second;
     if (r.state == JBOX_ROUTE_STATE_RUNNING) return JBOX_OK;
-    return attemptStart(r);
+    const auto rc = attemptStart(r);
+    publishWatchedUids();
+    return rc;
 }
 
 jbox_error_code_t RouteManager::stopRoute(jbox_route_id_t id) {
@@ -490,6 +494,7 @@ jbox_error_code_t RouteManager::stopRoute(jbox_route_id_t id) {
     RouteRecord& r = *it->second;
     if (r.state == JBOX_ROUTE_STATE_STOPPED) return JBOX_OK;
     teardown(r);
+    publishWatchedUids();
     return JBOX_OK;
 }
 
@@ -569,6 +574,14 @@ namespace {
 // mechanism for devices that come back later still.
 constexpr std::uint32_t kWakeBackoffBaseMs = 200;
 constexpr std::uint8_t  kWakeRetryBudget   = 3;
+
+// 7.6.6 stall watchdog: 5 consecutive frozen samples at 10 Hz = 500 ms.
+// The original 1.5 s tuning was conservative; real-hardware testing showed
+// users perceived "stuck on green" for longer than necessary. 500 ms still
+// dominates a typical 64-frame @ 48 kHz round-trip (~1.3 ms) by ~400×, and
+// the "either-side advance resets" rule keeps false-positive risk
+// negligible (both directions have to freeze together for 500 ms).
+constexpr std::uint8_t kStallTickThreshold = 5;
 }  // namespace
 
 void RouteManager::prepareForSleep() {
@@ -612,6 +625,17 @@ void RouteManager::tickWakeRetries(
         (void)id;
         auto& r = *rec;
         if (r.wake_retries_remaining == 0) continue;
+        // 7.6.6 post-acceptance: another path (retryWaitingRoutes,
+        // handleDeviceChanges, a manual stop+start) may have promoted
+        // the route to RUNNING / STOPPED / ERROR while the wake-retry
+        // schedule was still armed. Calling attemptStart on a non-
+        // WAITING route would corrupt its state — re-attach to muxes
+        // it's already attached to, reset peaks, etc. Deactivate the
+        // schedule and move on.
+        if (r.state != JBOX_ROUTE_STATE_WAITING) {
+            r.wake_retries_remaining = 0;
+            continue;
+        }
         if (now < r.wake_next_retry_at) continue;
 
         if (!refreshed) {
@@ -652,6 +676,11 @@ void RouteManager::tickWakeRetries(
                 fired_attempt * kWakeBackoffBaseMs);
         }
     }
+    // 7.6.7: routes here may have transitioned WAITING → RUNNING (set
+    // unchanged) or WAITING → ERROR (the converter-ctor-throw edge in
+    // attemptStart) — the latter shrinks the watched set. Republish so
+    // listener load doesn't bloat after a wake failure. Backend dedupes.
+    if (refreshed) publishWatchedUids();
 }
 
 void RouteManager::handleDeviceChanges(
@@ -682,6 +711,7 @@ void RouteManager::handleDeviceChanges(
     if (events.empty()) return;
 
     bool any_list_change = false;
+    std::unordered_set<std::string> aggregates_to_reexpand;
     for (const auto& ev : events) {
         switch (ev.kind) {
             case DeviceChangeEvent::kDeviceIsNotAlive: {
@@ -689,12 +719,16 @@ void RouteManager::handleDeviceChanges(
                 for (auto& [id, rec] : routes_) {
                     auto& r = *rec;
                     if (r.state != JBOX_ROUTE_STATE_RUNNING) continue;
-                    if (r.source_uid != ev.uid && r.dest_uid != ev.uid) continue;
-                    // Tear down — releases ring / converter / scratch /
-                    // mux attachments — then transition to WAITING with
-                    // the device-loss origin code. teardown() always
-                    // sets state = STOPPED + last_error = JBOX_OK; we
-                    // override both immediately afterward.
+                    // Phase 7.6.6: walk r.watched_uids — set populated
+                    // by attemptStart to include source_uid + dest_uid
+                    // plus any aggregate sub-device UIDs. Pre-7.6.6
+                    // this only checked source_uid / dest_uid; an
+                    // unplugged sub-device of an aggregate that backed
+                    // the route was missed entirely.
+                    const bool matched = std::find(r.watched_uids.begin(),
+                                                   r.watched_uids.end(),
+                                                   ev.uid) != r.watched_uids.end();
+                    if (!matched) continue;
                     teardown(r);
                     r.state      = JBOX_ROUTE_STATE_WAITING;
                     r.last_error = JBOX_ERR_DEVICE_GONE;
@@ -705,9 +739,15 @@ void RouteManager::handleDeviceChanges(
                 }
                 break;
             }
-            case DeviceChangeEvent::kDeviceListChanged:
+            case DeviceChangeEvent::kDeviceListChanged: {
+                any_list_change = true;
+                break;
+            }
             case DeviceChangeEvent::kAggregateMembersChanged: {
                 any_list_change = true;
+                if (!ev.uid.empty()) {
+                    aggregates_to_reexpand.insert(ev.uid);
+                }
                 break;
             }
         }
@@ -719,17 +759,88 @@ void RouteManager::handleDeviceChanges(
     // new topology.
     if (any_list_change) {
         dm_.refresh();
+
+        // Phase 7.6.6: for each running route whose watched_uids
+        // includes any of the aggregates whose membership just changed,
+        // rebuild watched_uids against the refreshed dm_ and check
+        // whether a previously-load-bearing UID is now absent. If so,
+        // tear down with DEVICE_GONE — covers the macOS edge where the
+        // HAL fires kAggregateMembersChanged without a per-member
+        // kDeviceIsNotAlive.
+        std::unordered_set<jbox_route_id_t> member_loss_torn_down;
+        if (!aggregates_to_reexpand.empty()) {
+            for (auto& [id, rec] : routes_) {
+                auto& r = *rec;
+                if (r.state != JBOX_ROUTE_STATE_RUNNING) continue;
+                bool route_uses_changed_aggregate = false;
+                for (const auto& agg_uid : aggregates_to_reexpand) {
+                    if (std::find(r.watched_uids.begin(),
+                                  r.watched_uids.end(),
+                                  agg_uid) != r.watched_uids.end()) {
+                        route_uses_changed_aggregate = true;
+                        break;
+                    }
+                }
+                if (!route_uses_changed_aggregate) continue;
+
+                // Snapshot the previous set, rebuild against current
+                // dm_, and see if anything we used to watch has gone
+                // missing.
+                const std::vector<std::string> previous = r.watched_uids;
+                rebuildWatchedUids(r);
+                bool member_missing = false;
+                for (const auto& uid : previous) {
+                    if (uid == r.source_uid || uid == r.dest_uid) continue;
+                    if (dm_.findByUid(uid) == nullptr) {
+                        member_missing = true;
+                        break;
+                    }
+                }
+                if (member_missing) {
+                    teardown(r);
+                    r.state      = JBOX_ROUTE_STATE_WAITING;
+                    r.last_error = JBOX_ERR_DEVICE_GONE;
+                    tryPushLog(log_queue_, jbox::rt::kLogRouteWaiting,
+                               id, 0u, 0u);
+                    member_loss_torn_down.insert(id);
+                }
+            }
+        }
+
+        // Existing path: retry every WAITING route in case the topology
+        // change brought devices back. Skip routes that were just torn
+        // down for member loss — they need the user to physically
+        // reconnect the sub-device; an immediate retry would succeed
+        // (the aggregate itself still exists) and hide the loss.
+        // attemptStart re-evaluates watched_uids on the RUNNING
+        // transition, so a re-expanded set covers the new aggregate
+        // composition.
         for (auto& [id, rec] : routes_) {
             auto& r = *rec;
             if (r.state != JBOX_ROUTE_STATE_WAITING) continue;
+            if (member_loss_torn_down.count(id)) continue;
             (void)attemptStart(r);
         }
     }
+
+    // 7.6.7: republish the watched-UID set. Aggregate composition may
+    // have just changed (kAggregateMembersChanged), routes may have
+    // moved between RUNNING / WAITING — both can affect the set the
+    // backend should listen on. Backend dedupes if nothing changed.
+    publishWatchedUids();
 }
 
 // -----------------------------------------------------------------------------
 // Internal helpers
 // -----------------------------------------------------------------------------
+
+jbox_error_code_t RouteManager::parkInWaitingTransient(
+    RouteRecord& r, jbox_error_code_t code) {
+    r.state      = JBOX_ROUTE_STATE_WAITING;
+    r.last_error = code;
+    tryPushLog(log_queue_, jbox::rt::kLogRouteWaiting, r.id, 0u, 0u);
+    return JBOX_OK;
+}
 
 jbox_error_code_t RouteManager::attemptStart(RouteRecord& r) {
     // Fresh (re)start — reset edge-triggered RT log flags so any
@@ -761,11 +872,23 @@ jbox_error_code_t RouteManager::attemptStart(RouteRecord& r) {
     r.source_total_channels = src->input_channel_count;
     r.dest_total_channels   = dst->output_channel_count;
 
-    // Validate channel indices against devices.
+    // Validate channel indices against the devices' current channel
+    // counts. If the route has run successfully before (ever_started)
+    // and the *current* counts have shrunk below what the mapping
+    // needs, the most likely cause is a sub-device of an aggregate
+    // having gone away while the aggregate parent persists at the
+    // HAL — a recoverable transient. Park in WAITING + DEVICE_GONE so
+    // the periodic retry / next list-changed event can promote us
+    // back. Routes that have never reached RUNNING get the strict
+    // ERROR + MAPPING_INVALID — those are config mistakes, and
+    // silently waiting forever would mask the typo.
     for (const auto& edge : r.mapping) {
         if (static_cast<std::uint32_t>(edge.src) >= r.source_total_channels ||
             static_cast<std::uint32_t>(edge.dst) >= r.dest_total_channels) {
-            r.state = JBOX_ROUTE_STATE_ERROR;
+            if (r.ever_started) {
+                return parkInWaitingTransient(r, JBOX_ERR_DEVICE_GONE);
+            }
+            r.state      = JBOX_ROUTE_STATE_ERROR;
             r.last_error = JBOX_ERR_MAPPING_INVALID;
             return JBOX_ERR_MAPPING_INVALID;
         }
@@ -787,30 +910,30 @@ jbox_error_code_t RouteManager::attemptStart(RouteRecord& r) {
         // in their interface software (UA Console, RME TotalMix,
         // Audio MIDI Setup, etc.) and Jbox respects it.
 
-        // Exclusivity: no other route on this device.
+        // Exclusivity: no other route on this device. 7.6.7: this is a
+        // device-side conflict — another route's teardown may still be
+        // in flight or a co-resident attach may free the slot soon.
+        // Park in WAITING + DEVICE_BUSY so periodic retry / events can
+        // re-attempt; route doesn't get permanently stuck in ERROR.
         if (muxes_.find(r.source_uid) != muxes_.end()) {
-            r.state = JBOX_ROUTE_STATE_ERROR;
-            r.last_error = JBOX_ERR_DEVICE_BUSY;
-            return JBOX_ERR_DEVICE_BUSY;
+            return parkInWaitingTransient(r, JBOX_ERR_DEVICE_BUSY);
         }
 
         // 7.6.3 retry hook: a previous teardown's destroy may have
         // refused, leaving r.duplex_ioproc_id populated. Retry the
         // close before opening fresh — otherwise openDuplexCallback
-        // would refuse on the device's still-registered slot and the
-        // route would be stuck in ERROR until the user removes and
-        // recreates it. Persistent refusal (the retry itself refuses)
-        // returns DEVICE_BUSY with a fresh failure log; the next start
-        // tries again.
+        // would refuse on the device's still-registered slot. 7.6.7:
+        // a refusal here is also transient (the HAL slot will free
+        // up); park in WAITING + DEVICE_BUSY for retry rather than
+        // pinning ERROR. The residual handle stays populated so the
+        // next attemptStart's retry-close path tries again.
         if (r.duplex_ioproc_id != kInvalidIOProcId) {
             if (dm_.backend().closeCallback(r.duplex_ioproc_id)) {
                 r.duplex_ioproc_id = kInvalidIOProcId;
             } else {
                 tryPushLog(log_queue_, jbox::rt::kLogTeardownFailure, r.id,
                            0, static_cast<std::uint64_t>(r.duplex_ioproc_id));
-                r.state = JBOX_ROUTE_STATE_ERROR;
-                r.last_error = JBOX_ERR_DEVICE_BUSY;
-                return JBOX_ERR_DEVICE_BUSY;
+                return parkInWaitingTransient(r, JBOX_ERR_DEVICE_BUSY);
             }
         }
 
@@ -879,9 +1002,10 @@ jbox_error_code_t RouteManager::attemptStart(RouteRecord& r) {
         const IOProcId id = dm_.backend().openDuplexCallback(
             r.source_uid, &duplexIOProcCallback, &r);
         if (id == kInvalidIOProcId) {
-            r.state = JBOX_ROUTE_STATE_ERROR;
-            r.last_error = JBOX_ERR_DEVICE_BUSY;
-            return JBOX_ERR_DEVICE_BUSY;
+            // 7.6.7: open refusal is device-side (HAL still settling
+            // after a sub-device returned, co-resident app holding a
+            // slot, etc.). WAITING + DEVICE_BUSY so retry can recover.
+            return parkInWaitingTransient(r, JBOX_ERR_DEVICE_BUSY);
         }
         if (!dm_.backend().startDevice(r.source_uid)) {
             // startDevice returns false if already started; that's
@@ -891,6 +1015,9 @@ jbox_error_code_t RouteManager::attemptStart(RouteRecord& r) {
         r.duplex_ioproc_id = id;
         r.duplex_mode      = true;
         r.state            = JBOX_ROUTE_STATE_RUNNING;
+        r.ever_started     = true;
+        rebuildWatchedUids(r);
+        resetStallWatchdog(r);
         r.last_error       = JBOX_OK;
         tryPushLog(log_queue_, jbox::rt::kLogRouteStarted, r.id,
                    static_cast<std::uint64_t>(r.source_total_channels),
@@ -1002,9 +1129,10 @@ jbox_error_code_t RouteManager::attemptStart(RouteRecord& r) {
     if (!src_mux.attachInput(&r, &inputIOProcCallback, &r)) {
         destroyMuxIfUnused(r.source_uid);
         releaseRouteResources(r);
-        r.state = JBOX_ROUTE_STATE_ERROR;
-        r.last_error = JBOX_ERR_DEVICE_BUSY;
-        return JBOX_ERR_DEVICE_BUSY;
+        // 7.6.7: device-side transient — WAITING + DEVICE_BUSY for
+        // retry rather than parking in ERROR. See the duplex-path
+        // notes above; same rationale.
+        return parkInWaitingTransient(r, JBOX_ERR_DEVICE_BUSY);
     }
     r.attached_src_mux = &src_mux;
 
@@ -1019,9 +1147,9 @@ jbox_error_code_t RouteManager::attemptStart(RouteRecord& r) {
         // releaseRouteResources detaches the already-attached input
         // side and cleans up any mux we created.
         releaseRouteResources(r);
-        r.state = JBOX_ROUTE_STATE_ERROR;
-        r.last_error = JBOX_ERR_DEVICE_BUSY;
-        return JBOX_ERR_DEVICE_BUSY;
+        // 7.6.7: device-side transient — WAITING + DEVICE_BUSY for
+        // retry. Same rationale as the source-side attach refusal.
+        return parkInWaitingTransient(r, JBOX_ERR_DEVICE_BUSY);
     }
     r.attached_dst_mux = &dst_mux;
 
@@ -1078,7 +1206,10 @@ jbox_error_code_t RouteManager::attemptStart(RouteRecord& r) {
         r.estimated_latency_us = estimateLatencyMicroseconds(lc);
     }
 
-    r.state      = JBOX_ROUTE_STATE_RUNNING;
+    r.state         = JBOX_ROUTE_STATE_RUNNING;
+    r.ever_started  = true;
+    rebuildWatchedUids(r);
+    resetStallWatchdog(r);
     r.last_error = JBOX_OK;
     tryPushLog(log_queue_, jbox::rt::kLogRouteStarted, r.id,
                static_cast<std::uint64_t>(r.source_total_channels),
@@ -1172,11 +1303,119 @@ void RouteManager::destroyMuxIfUnused(const std::string& uid) {
     }
 }
 
+void RouteManager::rebuildWatchedUids(RouteRecord& r) {
+    r.watched_uids.clear();
+    r.watched_uids.reserve(4);
+    r.watched_uids.push_back(r.source_uid);
+    if (r.dest_uid != r.source_uid) {
+        r.watched_uids.push_back(r.dest_uid);
+    }
+    dm_.appendAggregateMembers(r.watched_uids, r.source_uid);
+    if (r.dest_uid != r.source_uid) {
+        dm_.appendAggregateMembers(r.watched_uids, r.dest_uid);
+    }
+}
+
+std::vector<std::string> RouteManager::computeWatchedUidSet() const {
+    // 7.6.7: union of source/dest UIDs (and their aggregate members,
+    // when dm_ has them) over every route the user wants active.
+    // STOPPED routes are excluded — they aren't running, so the
+    // backend doesn't need listeners for them. ERROR routes are also
+    // excluded — they need user intervention before any auto-recovery
+    // is meaningful.
+    std::unordered_set<std::string> set;
+    for (const auto& [id, rec] : routes_) {
+        (void)id;
+        const auto& r = *rec;
+        if (r.state == JBOX_ROUTE_STATE_STOPPED) continue;
+        if (r.state == JBOX_ROUTE_STATE_ERROR)   continue;
+        set.insert(r.source_uid);
+        set.insert(r.dest_uid);
+        std::vector<std::string> agg_members;
+        dm_.appendAggregateMembers(agg_members, r.source_uid);
+        dm_.appendAggregateMembers(agg_members, r.dest_uid);
+        for (auto& m : agg_members) set.insert(std::move(m));
+    }
+    std::vector<std::string> out(std::make_move_iterator(set.begin()),
+                                 std::make_move_iterator(set.end()));
+    std::sort(out.begin(), out.end());
+    return out;
+}
+
+void RouteManager::publishWatchedUids() {
+    dm_.backend().setWatchedUids(computeWatchedUidSet());
+}
+
+void RouteManager::resetStallWatchdog(RouteRecord& r) {
+    r.last_seen_frames_produced = r.frames_produced.load(std::memory_order_relaxed);
+    r.last_seen_frames_consumed = r.frames_consumed.load(std::memory_order_relaxed);
+    r.stall_ticks = 0;
+}
+
+void RouteManager::tickStallWatchdog(
+    std::chrono::steady_clock::time_point now) {
+    (void)now;  // reserved for future per-route deadline arithmetic
+    for (auto& [id, rec] : routes_) {
+        auto& r = *rec;
+        if (r.state != JBOX_ROUTE_STATE_RUNNING) continue;
+        const auto fp = r.frames_produced.load(std::memory_order_relaxed);
+        const auto fc = r.frames_consumed.load(std::memory_order_relaxed);
+        if (fp != r.last_seen_frames_produced ||
+            fc != r.last_seen_frames_consumed) {
+            r.last_seen_frames_produced = fp;
+            r.last_seen_frames_consumed = fc;
+            r.stall_ticks = 0;
+            continue;
+        }
+        if (++r.stall_ticks < kStallTickThreshold) continue;
+
+        // Stall confirmed. Teardown sets state=STOPPED + last_error=
+        // JBOX_OK; we override to WAITING + DEVICE_STALLED so the UI
+        // can render the dedicated diagnostic. Recovery rides on the
+        // existing kDeviceListChanged retry path or a manual stop+
+        // start; the watchdog itself doesn't auto-retry.
+        teardown(r);
+        r.state      = JBOX_ROUTE_STATE_WAITING;
+        r.last_error = JBOX_ERR_DEVICE_STALLED;
+        tryPushLog(log_queue_, jbox::rt::kLogRouteWaiting, id, 0u, 0u);
+    }
+}
+
+void RouteManager::retryWaitingRoutes() {
+    // Periodic recovery sweep. Apple's HAL is unreliable for "device
+    // powered off and back on" — the audio object often persists at the
+    // HAL layer, so kAudioHardwarePropertyDevices and the per-aggregate
+    // listener never fire on the comeback. Without this sweep, a route
+    // torn down for DEVICE_STALLED (or DEVICE_GONE on a quirky bus)
+    // would sit in WAITING forever even after the device returns to
+    // producing audio.
+    //
+    // Refresh once per pass — many WAITING routes may share devices,
+    // so a single backend enumerate covers them all. attemptStart
+    // fast-fails on missing devices (just findByUid), so the cost when
+    // devices are still gone is trivial.
+    bool refreshed = false;
+    for (auto& [id, rec] : routes_) {
+        (void)id;
+        auto& r = *rec;
+        if (r.state != JBOX_ROUTE_STATE_WAITING) continue;
+        if (!refreshed) {
+            dm_.refresh();
+            refreshed = true;
+        }
+        (void)attemptStart(r);
+    }
+    // 7.6.7: refresh may have picked up a fresh aggregate composition;
+    // republish so backend listeners track current sub-device UIDs.
+    if (refreshed) publishWatchedUids();
+}
+
 void RouteManager::teardown(RouteRecord& r) {
     const bool was_active = (r.state == JBOX_ROUTE_STATE_RUNNING ||
                              r.state == JBOX_ROUTE_STATE_STARTING ||
                              r.state == JBOX_ROUTE_STATE_WAITING);
     releaseRouteResources(r);
+    r.watched_uids.clear();
     r.state      = JBOX_ROUTE_STATE_STOPPED;
     r.last_error = JBOX_OK;
     if (was_active) {

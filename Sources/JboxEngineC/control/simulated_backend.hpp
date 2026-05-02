@@ -122,6 +122,13 @@ public:
     std::uint32_t currentBufferFrameSize(const std::string& uid) override;
     void setBufferFrameSize(const std::string& uid,
                             std::uint32_t frames) override;
+    void setWatchedUids(std::vector<std::string> uids) override;
+
+    // 7.6.7 test introspection: the most recent set published via
+    // `setWatchedUids`. Returned sorted (lexicographic) so tests can
+    // assert against a stable order. Empty until the host (or a
+    // direct test call) publishes a set.
+    std::vector<std::string> watchedUids() const;
     void setDeviceChangeListener(DeviceChangeListener cb,
                                  void* user_data) override;
 
@@ -246,6 +253,11 @@ private:
     // a watcher's static thunk here.
     DeviceChangeListener device_change_cb_      = nullptr;
     void*                device_change_user_    = nullptr;
+
+    // 7.6.7: most recent set published via setWatchedUids. Stored as
+    // a sorted vector for stable test introspection; conversion from
+    // the input happens in the override.
+    std::vector<std::string> watched_uids_;
 };
 
 }  // namespace jbox::control

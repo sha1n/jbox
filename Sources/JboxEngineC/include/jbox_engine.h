@@ -85,8 +85,14 @@ extern "C" {
  *              jbox_engine_set_route_mute) for runtime fader control.
  *              Zero-initialised callers stay at unity gain, no trim,
  *              unmuted.
+ *  15  MINOR — added JBOX_ERR_DEVICE_STALLED so callers can show a
+ *              dedicated "no audio flowing" status when the engine's
+ *              stall watchdog catches a RUNNING route whose IOProc
+ *              has stopped advancing for ≥ 500 ms. Distinct from
+ *              DEVICE_GONE (HAL signalled the loss explicitly) and
+ *              SYSTEM_SUSPENDED (sleep/wake recovery in flight).
  */
-#define JBOX_ENGINE_ABI_VERSION 14u
+#define JBOX_ENGINE_ABI_VERSION 15u
 
 uint32_t jbox_engine_abi_version(void);
 
@@ -118,7 +124,16 @@ typedef enum {
      * (becomes RUNNING) or, if all bounded retries fail, left in
      * place so the UI can render "auto-recovery exhausted" rather
      * than "device unplugged". */
-    JBOX_ERR_SYSTEM_SUSPENDED    = 9
+    JBOX_ERR_SYSTEM_SUSPENDED    = 9,
+    /* ABI v15 (Phase 7.6.6): a route in WAITING because the engine's
+     * stall watchdog observed both frames_produced and frames_consumed
+     * frozen for ≥ 500 ms while the route was RUNNING. Set by
+     * RouteManager::tickStallWatchdog(now) on any "silent death"
+     * failure mode the HAL listeners didn't surface (another app
+     * hogged the device, an aggregate's IOProc froze without an
+     * IsAlive=0, etc.). Recovery rides on the existing
+     * kDeviceListChanged retry path or a manual stop+start. */
+    JBOX_ERR_DEVICE_STALLED      = 10
 } jbox_error_code_t;
 
 /*

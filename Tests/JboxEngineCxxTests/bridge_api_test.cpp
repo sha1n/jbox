@@ -845,7 +845,7 @@ TEST_CASE("[bridge_api] new gain setters return JBOX_OK on a valid route",
         REQUIRE(jbox_engine_stop_route(e, id) == JBOX_OK);
     }
 
-    REQUIRE(jbox_engine_abi_version() == 14u);
+    REQUIRE(jbox_engine_abi_version() == 15u);
 
     jbox_engine_destroy(e);
 }

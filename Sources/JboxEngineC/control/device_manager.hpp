@@ -59,6 +59,14 @@ public:
         return findByUid(uid) != nullptr;
     }
 
+    // Phase 7.6.6 helper: when `uid` belongs to an aggregate device in
+    // the cached snapshot, push each of its active sub-device UIDs
+    // onto `out`. Pure read; no-op for non-aggregate / unknown UIDs.
+    // Used by RouteManager::attemptStart to expand a route's watched-
+    // UID set to include sub-devices whose loss must fail the route.
+    void appendAggregateMembers(std::vector<std::string>& out,
+                                const std::string&        uid) const;
+
     // Backend access for RouteManager / other engine components that
     // need to register IOProcs or drive start/stop directly.
     IDeviceBackend& backend() { return *backend_; }

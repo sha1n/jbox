@@ -25,4 +25,13 @@ const BackendDeviceInfo* DeviceManager::findByUid(const std::string& uid) const 
     return &devices_[it->second];
 }
 
+void DeviceManager::appendAggregateMembers(std::vector<std::string>& out,
+                                            const std::string&        uid) const {
+    const BackendDeviceInfo* info = findByUid(uid);
+    if (info == nullptr || !info->is_aggregate) return;
+    for (const auto& member_uid : info->aggregate_member_uids) {
+        out.push_back(member_uid);
+    }
+}
+
 }  // namespace jbox::control

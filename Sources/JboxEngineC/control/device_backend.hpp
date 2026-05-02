@@ -64,6 +64,16 @@ struct BackendDeviceInfo {
     std::uint32_t input_safety_offset_frames  = 0;
     std::uint32_t output_device_latency_frames = 0;
     std::uint32_t output_safety_offset_frames = 0;
+
+    // Phase 7.6.6 (aggregate-loss detection): set to true on aggregate
+    // devices; `aggregate_member_uids` then carries the active sub-
+    // device list reported by macOS (kAudioAggregateDevicePropertyActive
+    // SubDeviceList). Empty / false on non-aggregate devices. Populated
+    // during enumerate(); used by RouteManager to expand the per-route
+    // watched-UID set so a sub-device IsAlive=0 event matches a route
+    // that was started against the aggregate.
+    bool                       is_aggregate = false;
+    std::vector<std::string>   aggregate_member_uids;
 };
 
 // Opaque handle for a registered IOProc. 0 is reserved as invalid.
@@ -254,6 +264,23 @@ public:
     // Non-RT; control thread only.
     virtual void setBufferFrameSize(const std::string& uid,
                                     std::uint32_t frames) = 0;
+
+    // 7.6.7: tell the backend which device UIDs the host actually
+    // cares about — typically the union of {source_uid, dest_uid} +
+    // any aggregate sub-device UIDs across every non-STOPPED route.
+    // Production backends use this to filter per-device HAL property
+    // listeners (kAudioDevicePropertyDeviceIsAlive,
+    // kAudioAggregateDevicePropertyActiveSubDeviceList) so we don't
+    // pay the listener-install / wake / dispatch cost for devices
+    // nobody is routing through. Always-on (kAudioHardwareProperty
+    // Devices) listener stays installed regardless — it is what
+    // surfaces "a previously unwatched UID just appeared". Default
+    // is a no-op (test backends, and a safe fallback if a future
+    // host forgets to publish a set).
+    //
+    // Non-RT; control thread only. Idempotent — calling with the
+    // same set is a no-op.
+    virtual void setWatchedUids(std::vector<std::string> /*uids*/) {}
 };
 
 }  // namespace jbox::control

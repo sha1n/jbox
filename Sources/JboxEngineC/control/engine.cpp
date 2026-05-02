@@ -98,7 +98,10 @@ void Engine::tickPower() {
 void Engine::hotPlugThreadLoop() {
     using namespace std::chrono;
     auto next = steady_clock::now();
-    constexpr auto period = milliseconds(100);  // 10 Hz
+    constexpr auto period = milliseconds(100);   // 10 Hz
+    constexpr int  kRetryEveryNTicks = 10;       // 1 Hz periodic
+                                                 // WAITING-route retry
+    int tick_count = 0;
     while (hotplug_running_.load(std::memory_order_relaxed)) {
         next += period;
         const auto now = steady_clock::now();
@@ -106,6 +109,22 @@ void Engine::hotPlugThreadLoop() {
         std::this_thread::sleep_until(next);
         tickHotPlug();
         tickPower();
+        // Phase 7.6.6: stall watchdog rides on the same 10 Hz cadence;
+        // tickStallWatchdog is cheap (one atomic load per running
+        // route) so a separate thread is unnecessary.
+        rm_.tickStallWatchdog(steady_clock::now());
+        // Phase 7.6.6 (post-acceptance): periodic WAITING-route retry
+        // at 1 Hz. Generalises recovery so a route comes back
+        // automatically when its devices return, regardless of whether
+        // the HAL fires a kDeviceListChanged event (Apple is unreliable
+        // for "device powered off and back on" — the audio object
+        // often persists at the HAL layer). attemptStart fast-fails on
+        // genuinely-still-missing devices, so the cost in steady state
+        // is one dm_.refresh() per second when at least one route is
+        // WAITING.
+        if (++tick_count % kRetryEveryNTicks == 0) {
+            rm_.retryWaitingRoutes();
+        }
     }
 }
 

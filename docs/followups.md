@@ -207,6 +207,8 @@ Manual hardware tests, since CI can't exercise this path:
    property-list-changed events. (If this thrashes, F3 debounce
    becomes blocking, not optional.)
 
+**2026-05-02 update.** F1's acceptance test #1 (yank a sub-device of a running aggregate) now has simulator-path regression coverage under the `[route_manager][aggregate_loss]` Catch2 tag (6 cases total — direct sub-device IsNotAlive, kAggregateMembersChanged with member loss / without member loss, idempotency on repeats, unrelated-aggregate non-effect, plus the skip-set mechanism that keeps a torn-down route from being silently re-promoted by the same-drain WAITING-retry pass). Landed under sub-phase 7.6.6 (`docs/2026-05-02-device-monitoring-{design,plan}.md`). Production HAL pass remains the user's gate; F1's status stays "🚧 Engine landed; awaiting manual hardware acceptance."
+
 ### References
 
 - Existing simulator path: `[device_change_watcher]` (3 cases) +

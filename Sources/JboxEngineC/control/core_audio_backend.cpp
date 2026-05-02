@@ -285,6 +285,29 @@ OSStatus ioProcTrampoline(AudioObjectID /*inDevice*/,
     return noErr;
 }
 
+// Active sub-devices of an aggregate device, queried via the
+// HAL property. Returns an empty list for non-aggregate devices.
+// Defined here (before enumerate()) so it can be called from both
+// enumerate() and setBufferFrameSize().
+std::vector<AudioObjectID> getActiveSubDevices(AudioObjectID aggregate) {
+    AudioObjectPropertyAddress addr{
+        kAudioAggregateDevicePropertyActiveSubDeviceList,
+        kAudioObjectPropertyScopeGlobal,
+        kAudioObjectPropertyElementMain};
+    UInt32 size = 0;
+    if (AudioObjectGetPropertyDataSize(aggregate, &addr, 0, nullptr,
+                                       &size) != noErr || size == 0) {
+        return {};
+    }
+    const std::size_t count = size / sizeof(AudioObjectID);
+    std::vector<AudioObjectID> ids(count);
+    if (AudioObjectGetPropertyData(aggregate, &addr, 0, nullptr,
+                                   &size, ids.data()) != noErr) {
+        return {};
+    }
+    return ids;
+}
+
 }  // namespace
 
 // -----------------------------------------------------------------------------
@@ -389,6 +412,33 @@ std::vector<BackendDeviceInfo> CoreAudioBackend::enumerate() {
 
         device_ids_[info.uid] = id;
         result.push_back(std::move(info));
+    }
+
+    // Phase 7.6.6: surface aggregate composition. For each device whose
+    // active-sub-device list is non-empty (= aggregate per HAL
+    // semantics), set is_aggregate = true and translate each sub-
+    // AudioObjectID to its UID via the device_ids_ reverse map we just
+    // built. Cheap: getActiveSubDevices is one HAL call per device,
+    // and returns an empty list immediately for non-aggregates.
+    std::unordered_map<AudioDeviceID, std::string> id_to_uid;
+    id_to_uid.reserve(device_ids_.size());
+    for (const auto& [uid, id] : device_ids_) {
+        id_to_uid[id] = uid;
+    }
+    for (auto& info : result) {
+        auto it = device_ids_.find(info.uid);
+        if (it == device_ids_.end()) continue;
+        const AudioDeviceID id = it->second;
+        const auto subs = getActiveSubDevices(id);
+        if (subs.empty()) continue;
+        info.is_aggregate = true;
+        info.aggregate_member_uids.reserve(subs.size());
+        for (AudioObjectID sub : subs) {
+            auto jt = id_to_uid.find(sub);
+            if (jt != id_to_uid.end()) {
+                info.aggregate_member_uids.push_back(jt->second);
+            }
+        }
     }
 
     // F1: publish the AudioObjectID → UID reverse map under the
@@ -619,6 +669,21 @@ void CoreAudioBackend::setDeviceChangeListener(DeviceChangeListener cb,
     }
 }
 
+void CoreAudioBackend::setWatchedUids(std::vector<std::string> uids) {
+    // 7.6.7: idempotent rebuild of the watched set + immediate
+    // reconcile so listener installation tracks the new set even
+    // without a fresh enumerate(). reconcile is a no-op when no
+    // change-listener has been installed yet (host hasn't called
+    // setDeviceChangeListener), so calling this before listener
+    // registration is safe.
+    std::unordered_set<std::string> next(
+        std::make_move_iterator(uids.begin()),
+        std::make_move_iterator(uids.end()));
+    if (next == watched_uids_) return;
+    watched_uids_ = std::move(next);
+    reconcilePerDeviceListeners();
+}
+
 OSStatus CoreAudioBackend::halPropertyListenerCallback(
     AudioObjectID inObjectID,
     UInt32 inNumberAddresses,
@@ -734,12 +799,26 @@ void CoreAudioBackend::reconcilePerDeviceListeners() {
         snapshot = id_to_uid_;
     }
 
+    // 7.6.7 watched-UID filter: a device is "watched" iff some non-
+    // STOPPED route depends on it (host publishes the set via
+    // setWatchedUids). Reconcile only installs listeners on watched
+    // devices and removes listeners on devices that fall out of the
+    // set, so the per-device HAL listener count tracks the active
+    // routing set rather than the entire system inventory.
+    auto isWatched = [this](const std::string& uid) {
+        return watched_uids_.find(uid) != watched_uids_.end();
+    };
+
     // Pass 1: remove entries whose AudioObjectID is no longer
-    // enumerated.
+    // enumerated, OR whose UID is no longer in the watched set.
     std::vector<HalListenerEntry> kept;
     kept.reserve(per_device_listeners_.size());
     for (const auto& entry : per_device_listeners_) {
-        if (snapshot.find(entry.object) == snapshot.end()) {
+        auto it = snapshot.find(entry.object);
+        const bool still_enumerated = (it != snapshot.end());
+        const bool still_watched =
+            still_enumerated && isWatched(it->second);
+        if (!still_enumerated || !still_watched) {
             (void)AudioObjectRemovePropertyListener(
                 entry.object, &entry.address,
                 &CoreAudioBackend::halPropertyListenerCallback, this);
@@ -758,8 +837,9 @@ void CoreAudioBackend::reconcilePerDeviceListeners() {
     };
 
     // Pass 2: install IsAlive + (per-aggregate) ActiveSubDeviceList
-    // listeners on any device that does not yet carry them.
+    // listeners on any *watched* device that does not yet carry them.
     for (const auto& [id, uid] : snapshot) {
+        if (!isWatched(uid)) continue;
         if (!alreadyHas(id, kAudioDevicePropertyDeviceIsAlive)) {
             HalListenerEntry entry;
             entry.object  = id;
@@ -880,27 +960,6 @@ std::uint32_t CoreAudioBackend::currentBufferFrameSize(const std::string& uid) {
 }
 
 namespace {
-
-// Active sub-devices of an aggregate device, queried via the
-// HAL property. Returns an empty list for non-aggregate devices.
-std::vector<AudioObjectID> getActiveSubDevices(AudioObjectID aggregate) {
-    AudioObjectPropertyAddress addr{
-        kAudioAggregateDevicePropertyActiveSubDeviceList,
-        kAudioObjectPropertyScopeGlobal,
-        kAudioObjectPropertyElementMain};
-    UInt32 size = 0;
-    if (AudioObjectGetPropertyDataSize(aggregate, &addr, 0, nullptr,
-                                       &size) != noErr || size == 0) {
-        return {};
-    }
-    const std::size_t count = size / sizeof(AudioObjectID);
-    std::vector<AudioObjectID> ids(count);
-    if (AudioObjectGetPropertyData(aggregate, &addr, 0, nullptr,
-                                   &size, ids.data()) != noErr) {
-        return {};
-    }
-    return ids;
-}
 
 // Single Core Audio property write. Returns the post-write
 // readback so callers can log discrepancies (the HAL may clamp

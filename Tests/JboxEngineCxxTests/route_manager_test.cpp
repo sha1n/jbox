@@ -1944,3 +1944,818 @@ TEST_CASE("RouteManager: tickWakeRetries does not touch routes that did not part
     REQUIRE(rm.pollStatus(id_stopped, &status) == JBOX_OK);
     REQUIRE(status.state == JBOX_ROUTE_STATE_STOPPED);
 }
+
+TEST_CASE("RouteManager: tickWakeRetries deactivates the schedule when another path "
+          "promoted the route to RUNNING",
+          "[route_manager][sleep_wake]") {
+    // Latent race surfaced by 7.6.6's periodic retryWaitingRoutes.
+    // recoverFromWake primes a 3-attempt budget at +0 / +200 / +600 ms;
+    // retryWaitingRoutes (1 Hz) can land inside that window and succeed,
+    // promoting the route to RUNNING. Without a state-gate in
+    // tickWakeRetries, the next due wake-retry would call attemptStart
+    // on a RUNNING route — which already has muxes / ring / converter
+    // attached, so re-running the start sequence would corrupt that
+    // state. The fix: when state != WAITING, zero the budget and skip.
+    using std::chrono::milliseconds;
+    using std::chrono::steady_clock;
+
+    Fixture f(2, 2);
+    std::vector<ChannelEdge> m{{0, 0}};
+    RouteManager::RouteConfig cfg{"src", "dst", m, "wake-retry-deactivate"};
+    jbox_error_t err{};
+    const auto id = f.rm->addRoute(cfg, &err);
+    REQUIRE(f.rm->startRoute(id) == JBOX_OK);
+
+    // Sleep: route → WAITING + SYSTEM_SUSPENDED.
+    f.rm->prepareForSleep();
+    jbox_route_status_t status{};
+    REQUIRE(f.rm->pollStatus(id, &status) == JBOX_OK);
+    REQUIRE(status.state      == JBOX_ROUTE_STATE_WAITING);
+    REQUIRE(status.last_error == JBOX_ERR_SYSTEM_SUSPENDED);
+
+    // Wake: prime the bounded retry budget.
+    const auto t0 = steady_clock::now();
+    f.rm->recoverFromWake();
+
+    // Another path (the new 7.6.6 periodic retry) promotes the route
+    // to RUNNING before any wake-retry attempt has fired. Devices are
+    // still present, so attemptStart succeeds.
+    f.rm->retryWaitingRoutes();
+    REQUIRE(f.rm->pollStatus(id, &status) == JBOX_OK);
+    REQUIRE(status.state == JBOX_ROUTE_STATE_RUNNING);
+
+    // tickWakeRetries at +200 ms (when attempt #2 would fire) and at
+    // +600 ms (attempt #3) must deactivate the schedule and leave the
+    // RUNNING route alone. Without the state-gate, attemptStart would
+    // fire on a RUNNING route and corrupt its mux / ring state.
+    f.rm->tickWakeRetries(t0 + milliseconds(200));
+    REQUIRE(f.rm->pollStatus(id, &status) == JBOX_OK);
+    REQUIRE(status.state == JBOX_ROUTE_STATE_RUNNING);
+
+    f.rm->tickWakeRetries(t0 + milliseconds(600));
+    REQUIRE(f.rm->pollStatus(id, &status) == JBOX_OK);
+    REQUIRE(status.state == JBOX_ROUTE_STATE_RUNNING);
+}
+
+TEST_CASE("RouteManager: aggregate sub-device IsNotAlive transitions running route to WAITING + DEVICE_GONE",
+          "[route_manager][aggregate_loss]") {
+    using std::vector;
+    auto backend_ptr = std::make_unique<SimulatedBackend>();
+    SimulatedBackend* backend = backend_ptr.get();
+    // Two physical devices ...
+    backend->addDevice(makeInputDevice("phys-a", 2));
+    backend->addDevice(makeInputDevice("phys-b", 2));
+    // ... wrapped in an aggregate that the route binds to.
+    BackendDeviceInfo agg = makeInputDevice("agg", 4);
+    backend->addAggregateDevice(agg, {"phys-a", "phys-b"});
+    backend->addDevice(makeOutputDevice("dst", 4));
+    auto dm = std::make_unique<DeviceManager>(std::move(backend_ptr));
+    dm->refresh();
+    RouteManager rm(*dm);
+
+    vector<ChannelEdge> m{{0, 0}, {1, 1}};
+    RouteManager::RouteConfig cfg{"agg", "dst", m, "agg-route"};
+    jbox_error_t err{};
+    const auto id = rm.addRoute(cfg, &err);
+    REQUIRE(rm.startRoute(id) == JBOX_OK);
+
+    jbox_route_status_t status{};
+    REQUIRE(rm.pollStatus(id, &status) == JBOX_OK);
+    REQUIRE(status.state == JBOX_ROUTE_STATE_RUNNING);
+
+    // Sub-device of the aggregate vanishes. macOS fires
+    // kDeviceIsNotAlive on the SUB-device's UID, not the aggregate's.
+    // Today (pre-fix) this misses the matcher and the route stays
+    // RUNNING even though audio has stopped.
+    backend->removeDevice("phys-a");
+    rm.handleDeviceChanges({
+        {DeviceChangeEvent::kDeviceIsNotAlive,  "phys-a"},
+    });
+
+    REQUIRE(rm.pollStatus(id, &status) == JBOX_OK);
+    REQUIRE(status.state      == JBOX_ROUTE_STATE_WAITING);
+    REQUIRE(status.last_error == JBOX_ERR_DEVICE_GONE);
+}
+
+TEST_CASE("RouteManager: aggregate members changed — load-bearing member missing tears down running route",
+          "[route_manager][aggregate_loss]") {
+    using std::vector;
+    auto backend_ptr = std::make_unique<SimulatedBackend>();
+    SimulatedBackend* backend = backend_ptr.get();
+    backend->addDevice(makeInputDevice("phys-a", 2));
+    backend->addDevice(makeInputDevice("phys-b", 2));
+    BackendDeviceInfo agg = makeInputDevice("agg", 4);
+    backend->addAggregateDevice(agg, {"phys-a", "phys-b"});
+    backend->addDevice(makeOutputDevice("dst", 4));
+    auto dm = std::make_unique<DeviceManager>(std::move(backend_ptr));
+    dm->refresh();
+    RouteManager rm(*dm);
+
+    vector<ChannelEdge> m{{0, 0}};
+    RouteManager::RouteConfig cfg{"agg", "dst", m, "agg-shrink"};
+    jbox_error_t err{};
+    const auto id = rm.addRoute(cfg, &err);
+    REQUIRE(rm.startRoute(id) == JBOX_OK);
+    jbox_route_status_t status{};
+    REQUIRE(rm.pollStatus(id, &status) == JBOX_OK);
+    REQUIRE(status.state == JBOX_ROUTE_STATE_RUNNING);
+
+    // The aggregate now reports only one of its two original members.
+    // No kDeviceIsNotAlive event fires for phys-a (some macOS paths
+    // only emit the aggregate-level signal). Re-expanding watched_uids
+    // and re-checking against the freshly refreshed dm_ must surface
+    // the loss anyway.
+    backend->removeDevice("phys-a");
+    BackendDeviceInfo agg_smaller = makeInputDevice("agg", 2);
+    backend->addAggregateDevice(agg_smaller, {"phys-b"});
+    rm.handleDeviceChanges({
+        {DeviceChangeEvent::kAggregateMembersChanged, "agg"},
+    });
+
+    REQUIRE(rm.pollStatus(id, &status) == JBOX_OK);
+    REQUIRE(status.state      == JBOX_ROUTE_STATE_WAITING);
+    REQUIRE(status.last_error == JBOX_ERR_DEVICE_GONE);
+}
+
+TEST_CASE("RouteManager: aggregate members changed without loss leaves running route alone",
+          "[route_manager][aggregate_loss]") {
+    using std::vector;
+    auto backend_ptr = std::make_unique<SimulatedBackend>();
+    SimulatedBackend* backend = backend_ptr.get();
+    backend->addDevice(makeInputDevice("phys-a", 2));
+    backend->addDevice(makeInputDevice("phys-b", 2));
+    BackendDeviceInfo agg = makeInputDevice("agg", 4);
+    backend->addAggregateDevice(agg, {"phys-a", "phys-b"});
+    backend->addDevice(makeOutputDevice("dst", 4));
+    auto dm = std::make_unique<DeviceManager>(std::move(backend_ptr));
+    dm->refresh();
+    RouteManager rm(*dm);
+
+    vector<ChannelEdge> m{{0, 0}};
+    RouteManager::RouteConfig cfg{"agg", "dst", m, "agg-grow"};
+    jbox_error_t err{};
+    const auto id = rm.addRoute(cfg, &err);
+    REQUIRE(rm.startRoute(id) == JBOX_OK);
+
+    // Aggregate gains a member. No member of the original set is lost,
+    // so the route stays RUNNING.
+    backend->addDevice(makeInputDevice("phys-c", 2));
+    BackendDeviceInfo agg_bigger = makeInputDevice("agg", 6);
+    backend->addAggregateDevice(agg_bigger, {"phys-a", "phys-b", "phys-c"});
+    rm.handleDeviceChanges({
+        {DeviceChangeEvent::kAggregateMembersChanged, "agg"},
+    });
+
+    jbox_route_status_t status{};
+    REQUIRE(rm.pollStatus(id, &status) == JBOX_OK);
+    REQUIRE(status.state == JBOX_ROUTE_STATE_RUNNING);
+}
+
+TEST_CASE("RouteManager: aggregate sub-device loss is idempotent on repeats",
+          "[route_manager][aggregate_loss]") {
+    using std::vector;
+    auto backend_ptr = std::make_unique<SimulatedBackend>();
+    SimulatedBackend* backend = backend_ptr.get();
+    backend->addDevice(makeInputDevice("phys-a", 2));
+    backend->addDevice(makeInputDevice("phys-b", 2));
+    BackendDeviceInfo agg = makeInputDevice("agg", 4);
+    backend->addAggregateDevice(agg, {"phys-a", "phys-b"});
+    backend->addDevice(makeOutputDevice("dst", 4));
+    auto dm = std::make_unique<DeviceManager>(std::move(backend_ptr));
+    dm->refresh();
+    RouteManager rm(*dm);
+
+    vector<ChannelEdge> m{{0, 0}};
+    RouteManager::RouteConfig cfg{"agg", "dst", m, "idempotent-agg"};
+    jbox_error_t err{};
+    const auto id = rm.addRoute(cfg, &err);
+    REQUIRE(rm.startRoute(id) == JBOX_OK);
+
+    backend->removeDevice("phys-a");
+    rm.handleDeviceChanges({
+        {DeviceChangeEvent::kDeviceIsNotAlive, "phys-a"},
+    });
+    jbox_route_status_t status{};
+    REQUIRE(rm.pollStatus(id, &status) == JBOX_OK);
+    REQUIRE(status.state == JBOX_ROUTE_STATE_WAITING);
+    REQUIRE(status.last_error == JBOX_ERR_DEVICE_GONE);
+
+    // Replay the same event — the route is already WAITING; no state churn.
+    rm.handleDeviceChanges({
+        {DeviceChangeEvent::kDeviceIsNotAlive, "phys-a"},
+        {DeviceChangeEvent::kDeviceIsNotAlive, "phys-a"},
+    });
+    REQUIRE(rm.pollStatus(id, &status) == JBOX_OK);
+    REQUIRE(status.state      == JBOX_ROUTE_STATE_WAITING);
+    REQUIRE(status.last_error == JBOX_ERR_DEVICE_GONE);
+}
+
+TEST_CASE("RouteManager: route on non-aggregate device is unaffected by unrelated kAggregateMembersChanged",
+          "[route_manager][aggregate_loss]") {
+    using std::vector;
+    auto backend_ptr = std::make_unique<SimulatedBackend>();
+    SimulatedBackend* backend = backend_ptr.get();
+    backend->addDevice(makeInputDevice("src", 2));
+    backend->addDevice(makeOutputDevice("dst", 2));
+    // An aggregate exists in the system but no route uses it.
+    backend->addDevice(makeInputDevice("phys-a", 2));
+    BackendDeviceInfo agg = makeInputDevice("unused-agg", 2);
+    backend->addAggregateDevice(agg, {"phys-a"});
+    auto dm = std::make_unique<DeviceManager>(std::move(backend_ptr));
+    dm->refresh();
+    RouteManager rm(*dm);
+
+    vector<ChannelEdge> m{{0, 0}};
+    RouteManager::RouteConfig cfg{"src", "dst", m, "non-agg-route"};
+    jbox_error_t err{};
+    const auto id = rm.addRoute(cfg, &err);
+    REQUIRE(rm.startRoute(id) == JBOX_OK);
+
+    rm.handleDeviceChanges({
+        {DeviceChangeEvent::kAggregateMembersChanged, "unused-agg"},
+    });
+
+    jbox_route_status_t status{};
+    REQUIRE(rm.pollStatus(id, &status) == JBOX_OK);
+    REQUIRE(status.state == JBOX_ROUTE_STATE_RUNNING);
+}
+
+TEST_CASE("RouteManager: tickStallWatchdog transitions running route to WAITING + DEVICE_STALLED after 5 frozen ticks",
+          "[route_manager][stall]") {
+    using std::chrono::steady_clock;
+    Fixture f(2, 2);
+    std::vector<ChannelEdge> m{{0, 0}};
+    RouteManager::RouteConfig cfg{"src", "dst", m, "stall"};
+    jbox_error_t err{};
+    const auto id = f.rm->addRoute(cfg, &err);
+    REQUIRE(f.rm->startRoute(id) == JBOX_OK);
+
+    jbox_route_status_t status{};
+    REQUIRE(f.rm->pollStatus(id, &status) == JBOX_OK);
+    REQUIRE(status.state == JBOX_ROUTE_STATE_RUNNING);
+
+    // No deliverBuffer between ticks — frames_produced / frames_consumed
+    // never advance. After kStallTickThreshold (5 = 500 ms at 10 Hz)
+    // the watchdog must fire.
+    auto now = steady_clock::now();
+    for (int i = 0; i < 4; ++i) {
+        f.rm->tickStallWatchdog(now);
+        REQUIRE(f.rm->pollStatus(id, &status) == JBOX_OK);
+        REQUIRE(status.state == JBOX_ROUTE_STATE_RUNNING);
+    }
+    f.rm->tickStallWatchdog(now);  // 5th tick — fires.
+    REQUIRE(f.rm->pollStatus(id, &status) == JBOX_OK);
+    REQUIRE(status.state      == JBOX_ROUTE_STATE_WAITING);
+    REQUIRE(status.last_error == JBOX_ERR_DEVICE_STALLED);
+}
+
+TEST_CASE("RouteManager: tickStallWatchdog resets when frames advance on either side",
+          "[route_manager][stall]") {
+    using std::chrono::steady_clock;
+    Fixture f(2, 2);
+    std::vector<ChannelEdge> m{{0, 0}};
+    RouteManager::RouteConfig cfg{"src", "dst", m, "stall-reset"};
+    jbox_error_t err{};
+    const auto id = f.rm->addRoute(cfg, &err);
+    REQUIRE(f.rm->startRoute(id) == JBOX_OK);
+
+    auto now = steady_clock::now();
+    constexpr std::uint32_t kFrames = 32;
+    std::vector<float> input(kFrames * 2, 0.5f);
+    std::vector<float> output(kFrames * 2, 0.0f);
+
+    // 4 frozen ticks bring stall_ticks to 4 (one short of threshold).
+    for (int i = 0; i < 4; ++i) {
+        f.rm->tickStallWatchdog(now);
+    }
+    // One delivery advances frames_produced + frames_consumed; the
+    // next tick observes the change and resets stall_ticks.
+    f.backend->deliverBuffer("src", kFrames, input.data(), nullptr);
+    f.backend->deliverBuffer("dst", kFrames, nullptr, output.data());
+    f.rm->tickStallWatchdog(now);
+
+    jbox_route_status_t status{};
+    REQUIRE(f.rm->pollStatus(id, &status) == JBOX_OK);
+    REQUIRE(status.state == JBOX_ROUTE_STATE_RUNNING);
+
+    // From here, another full kStallTickThreshold frozen ticks are
+    // required to fire.
+    for (int i = 0; i < 4; ++i) {
+        f.rm->tickStallWatchdog(now);
+        REQUIRE(f.rm->pollStatus(id, &status) == JBOX_OK);
+        REQUIRE(status.state == JBOX_ROUTE_STATE_RUNNING);
+    }
+    f.rm->tickStallWatchdog(now);
+    REQUIRE(f.rm->pollStatus(id, &status) == JBOX_OK);
+    REQUIRE(status.state      == JBOX_ROUTE_STATE_WAITING);
+    REQUIRE(status.last_error == JBOX_ERR_DEVICE_STALLED);
+}
+
+TEST_CASE("RouteManager: tickStallWatchdog ignores non-RUNNING routes",
+          "[route_manager][stall]") {
+    using std::chrono::steady_clock;
+    // Build manager with only a destination — startRoute lands in WAITING.
+    auto backend = std::make_unique<SimulatedBackend>();
+    backend->addDevice(makeOutputDevice("dst", 2));
+    auto dm = std::make_unique<DeviceManager>(std::move(backend));
+    dm->refresh();
+    RouteManager rm(*dm);
+
+    std::vector<ChannelEdge> m{{0, 0}};
+    RouteManager::RouteConfig cfg{"missing-src", "dst", m, "stall-ignores-waiting"};
+    jbox_error_t err{};
+    const auto id = rm.addRoute(cfg, &err);
+    REQUIRE(rm.startRoute(id) == JBOX_OK);
+
+    jbox_route_status_t status{};
+    REQUIRE(rm.pollStatus(id, &status) == JBOX_OK);
+    REQUIRE(status.state == JBOX_ROUTE_STATE_WAITING);
+
+    auto now = steady_clock::now();
+    for (int i = 0; i < 50; ++i) rm.tickStallWatchdog(now);
+
+    REQUIRE(rm.pollStatus(id, &status) == JBOX_OK);
+    REQUIRE(status.state == JBOX_ROUTE_STATE_WAITING);
+    // Crucially: last_error stays as it was (JBOX_OK for initial
+    // WAITING) — watchdog did not stomp it.
+    REQUIRE(status.last_error == JBOX_OK);
+}
+
+TEST_CASE("RouteManager: aggregate member-loss tear-down is not silently re-promoted "
+          "by the same-drain WAITING-retry pass",
+          "[route_manager][aggregate_loss]") {
+    // Regression for the skip-set in handleDeviceChanges (Phase 7.6.6 deviation).
+    //
+    // After tearing a route down for aggregate-member loss, the same drained
+    // batch runs the WAITING-retry pass. The aggregate UID itself is still
+    // resolvable through dm_ (only a sub-device is gone), so attemptStart's
+    // findByUid would succeed and silently re-promote the route to RUNNING —
+    // hiding the loss from the user.
+    //
+    // The shipped code prevents this with a per-call `member_loss_torn_down`
+    // skip set. This test pins the mechanism: after the handle, the route is
+    // WAITING+DEVICE_GONE AND the aggregate is still findable. Without the
+    // skip set, the second invariant would let attemptStart succeed.
+    using std::vector;
+    auto backend_ptr = std::make_unique<SimulatedBackend>();
+    SimulatedBackend* backend = backend_ptr.get();
+    backend->addDevice(makeInputDevice("phys-a", 2));
+    backend->addDevice(makeInputDevice("phys-b", 2));
+    BackendDeviceInfo agg = makeInputDevice("agg", 4);
+    backend->addAggregateDevice(agg, {"phys-a", "phys-b"});
+    backend->addDevice(makeOutputDevice("dst", 4));
+    auto dm = std::make_unique<DeviceManager>(std::move(backend_ptr));
+    dm->refresh();
+    RouteManager rm(*dm);
+
+    vector<ChannelEdge> m{{0, 0}};
+    RouteManager::RouteConfig cfg{"agg", "dst", m, "skip-set-regression"};
+    jbox_error_t err{};
+    const auto id = rm.addRoute(cfg, &err);
+    REQUIRE(rm.startRoute(id) == JBOX_OK);
+    jbox_route_status_t status{};
+    REQUIRE(rm.pollStatus(id, &status) == JBOX_OK);
+    REQUIRE(status.state == JBOX_ROUTE_STATE_RUNNING);
+
+    // Aggregate drops phys-a; the aggregate itself stays. macOS only fires
+    // the aggregate-level signal here (no per-member kDeviceIsNotAlive).
+    backend->removeDevice("phys-a");
+    BackendDeviceInfo agg_smaller = makeInputDevice("agg", 2);
+    backend->addAggregateDevice(agg_smaller, {"phys-b"});
+    rm.handleDeviceChanges({
+        {DeviceChangeEvent::kAggregateMembersChanged, "agg"},
+    });
+
+    REQUIRE(rm.pollStatus(id, &status) == JBOX_OK);
+    REQUIRE(status.state      == JBOX_ROUTE_STATE_WAITING);
+    REQUIRE(status.last_error == JBOX_ERR_DEVICE_GONE);
+
+    // Skip-set proof: the aggregate is still resolvable in dm_. Without the
+    // skip set, the WAITING-retry loop in the same handleDeviceChanges call
+    // would have called attemptStart, found the aggregate, and re-promoted
+    // the route to RUNNING — silently hiding the member loss.
+    REQUIRE(dm->findByUid("agg") != nullptr);
+}
+
+TEST_CASE("RouteManager: tickStallWatchdog state is reset across stop+start so a "
+          "previous stall does not fire on the new run",
+          "[route_manager][stall]") {
+    using std::chrono::steady_clock;
+    // Pins resetStallWatchdog at attemptStart's RUNNING transition.
+    //
+    // A stop+start without the reset would carry stall_ticks across the
+    // restart: a second-run frozen tick would push stall_ticks past the
+    // threshold and fire DEVICE_STALLED on the FIRST tick after restart,
+    // even though the new run has barely begun. With the reset, the
+    // second run starts at stall_ticks=0 and tolerates a fresh
+    // kStallTickThreshold-tick freeze before firing.
+    Fixture f(2, 2);
+    std::vector<ChannelEdge> m{{0, 0}};
+    RouteManager::RouteConfig cfg{"src", "dst", m, "stall-reset-on-restart"};
+    jbox_error_t err{};
+    const auto id = f.rm->addRoute(cfg, &err);
+    REQUIRE(f.rm->startRoute(id) == JBOX_OK);
+
+    auto now = steady_clock::now();
+    // First run: 4 frozen ticks bring stall_ticks to threshold-1.
+    for (int i = 0; i < 4; ++i) f.rm->tickStallWatchdog(now);
+    jbox_route_status_t status{};
+    REQUIRE(f.rm->pollStatus(id, &status) == JBOX_OK);
+    REQUIRE(status.state == JBOX_ROUTE_STATE_RUNNING);
+
+    REQUIRE(f.rm->stopRoute(id) == JBOX_OK);
+    REQUIRE(f.rm->pollStatus(id, &status) == JBOX_OK);
+    REQUIRE(status.state == JBOX_ROUTE_STATE_STOPPED);
+
+    REQUIRE(f.rm->startRoute(id) == JBOX_OK);
+    REQUIRE(f.rm->pollStatus(id, &status) == JBOX_OK);
+    REQUIRE(status.state == JBOX_ROUTE_STATE_RUNNING);
+
+    // First post-restart tick. Without the reset, stall_ticks would still
+    // be 4 — incrementing to 5 fires DEVICE_STALLED here. With the reset,
+    // stall_ticks is back to 0, this tick takes it to 1, and the route
+    // stays RUNNING.
+    f.rm->tickStallWatchdog(now);
+    REQUIRE(f.rm->pollStatus(id, &status) == JBOX_OK);
+    REQUIRE(status.state      == JBOX_ROUTE_STATE_RUNNING);
+    REQUIRE(status.last_error == JBOX_OK);
+}
+
+TEST_CASE("RouteManager: retryWaitingRoutes promotes a WAITING route once devices "
+          "reappear silently (no HAL event needed)",
+          "[route_manager][waiting_retry]") {
+    // Generalises recovery beyond what handleDeviceChanges covers.
+    // Apple's HAL is unreliable for "device powered off and back on"
+    // because the audio object often persists at the HAL layer; only
+    // the sample flow stops and resumes. Without a periodic retry,
+    // a WAITING route would never recover from that case.
+    auto backend_holder = std::make_unique<SimulatedBackend>();
+    auto* backend = backend_holder.get();
+    backend->addDevice(makeOutputDevice("dst", 2));
+    auto dm = std::make_unique<DeviceManager>(std::move(backend_holder));
+    dm->refresh();
+    RouteManager rm(*dm);
+
+    std::vector<ChannelEdge> m{{0, 0}};
+    RouteManager::RouteConfig cfg{"src", "dst", m, "waiting-retry-recovery"};
+    jbox_error_t err{};
+    const auto id = rm.addRoute(cfg, &err);
+    REQUIRE(rm.startRoute(id) == JBOX_OK);
+    jbox_route_status_t status{};
+    REQUIRE(rm.pollStatus(id, &status) == JBOX_OK);
+    REQUIRE(status.state == JBOX_ROUTE_STATE_WAITING);
+
+    // Source device appears silently — addDevice does NOT fire any
+    // DeviceChangeEvent (unlike simulateDeviceReappearance). This
+    // models the Apple-HAL no-event recovery case.
+    backend->addDevice(makeInputDevice("src", 2));
+
+    rm.retryWaitingRoutes();
+
+    REQUIRE(rm.pollStatus(id, &status) == JBOX_OK);
+    REQUIRE(status.state == JBOX_ROUTE_STATE_RUNNING);
+}
+
+TEST_CASE("RouteManager: retryWaitingRoutes leaves WAITING route untouched when "
+          "devices are still missing",
+          "[route_manager][waiting_retry]") {
+    // attemptStart fast-fails on missing devices and leaves the route
+    // in WAITING. Unbounded periodic retries are safe.
+    auto backend_holder = std::make_unique<SimulatedBackend>();
+    backend_holder->addDevice(makeOutputDevice("dst", 2));
+    auto dm = std::make_unique<DeviceManager>(std::move(backend_holder));
+    dm->refresh();
+    RouteManager rm(*dm);
+
+    std::vector<ChannelEdge> m{{0, 0}};
+    RouteManager::RouteConfig cfg{"missing-src", "dst", m, "still-missing"};
+    jbox_error_t err{};
+    const auto id = rm.addRoute(cfg, &err);
+    REQUIRE(rm.startRoute(id) == JBOX_OK);
+
+    for (int i = 0; i < 5; ++i) rm.retryWaitingRoutes();
+
+    jbox_route_status_t status{};
+    REQUIRE(rm.pollStatus(id, &status) == JBOX_OK);
+    REQUIRE(status.state == JBOX_ROUTE_STATE_WAITING);
+    REQUIRE(status.last_error == JBOX_OK);  // initial-WAITING — no error promotion.
+}
+
+TEST_CASE("RouteManager: retryWaitingRoutes recovers a route torn down for stall once "
+          "frame counters resume",
+          "[route_manager][waiting_retry]") {
+    // Closes the user-reported gap from the 7.6.6 acceptance pass:
+    // device powered off, stall watchdog fires DEVICE_STALLED, device
+    // powered back on without any HAL event, route stays WAITING. With
+    // periodic retry, the route recovers automatically once devices
+    // are available again (the simulator surrogate for "audio is
+    // flowing again").
+    using std::chrono::steady_clock;
+    Fixture f(2, 2);
+    std::vector<ChannelEdge> m{{0, 0}};
+    RouteManager::RouteConfig cfg{"src", "dst", m, "stall-then-retry"};
+    jbox_error_t err{};
+    const auto id = f.rm->addRoute(cfg, &err);
+    REQUIRE(f.rm->startRoute(id) == JBOX_OK);
+
+    // Drive the stall watchdog past its threshold without delivery.
+    auto now = steady_clock::now();
+    for (int i = 0; i < 5; ++i) f.rm->tickStallWatchdog(now);
+    jbox_route_status_t status{};
+    REQUIRE(f.rm->pollStatus(id, &status) == JBOX_OK);
+    REQUIRE(status.state      == JBOX_ROUTE_STATE_WAITING);
+    REQUIRE(status.last_error == JBOX_ERR_DEVICE_STALLED);
+
+    // No HAL event fires — devices are still in dm_ from before, so
+    // attemptStart will succeed on the next retry pass.
+    f.rm->retryWaitingRoutes();
+
+    REQUIRE(f.rm->pollStatus(id, &status) == JBOX_OK);
+    REQUIRE(status.state == JBOX_ROUTE_STATE_RUNNING);
+}
+
+TEST_CASE("RouteManager: previously-running route whose device returns with too few "
+          "channels stays WAITING (not ERROR) so periodic retry can recover",
+          "[route_manager][waiting_retry][error_trap]") {
+    // Pre-7.6.7 bug: when a sub-device of an aggregate is unplugged,
+    // the aggregate parent persists at the HAL but its
+    // input_channel_count drops below the route's mapping. The next
+    // attemptStart hit the channel-mismatch guard and parked the
+    // route in ERROR with MAPPING_INVALID. retryWaitingRoutes only
+    // retries WAITING, so the route never recovered when the device
+    // returned. Routes that were RUNNING before stay WAITING through
+    // a transient channel shortfall; genuine config errors (route
+    // never started) still go to ERROR (covered by another test).
+    Fixture f(4, 4);
+    std::vector<ChannelEdge> m{{2, 0}};  // mapping uses src ch 2.
+    RouteManager::RouteConfig cfg{"src", "dst", m, "ever-started"};
+    jbox_error_t err{};
+    const auto id = f.rm->addRoute(cfg, &err);
+    REQUIRE(f.rm->startRoute(id) == JBOX_OK);
+    jbox_route_status_t status{};
+    REQUIRE(f.rm->pollStatus(id, &status) == JBOX_OK);
+    REQUIRE(status.state == JBOX_ROUTE_STATE_RUNNING);
+
+    // Tear the route down (simulate stall) then shrink the source to
+    // 2 channels — mapping ch 2 is now out of bounds.
+    REQUIRE(f.rm->stopRoute(id) == JBOX_OK);
+    f.backend->removeDevice("src");
+    f.backend->addDevice(makeInputDevice("src", 2));
+    f.dm->refresh();
+
+    REQUIRE(f.rm->startRoute(id) == JBOX_OK);
+    REQUIRE(f.rm->pollStatus(id, &status) == JBOX_OK);
+    REQUIRE(status.state      == JBOX_ROUTE_STATE_WAITING);
+    REQUIRE(status.last_error == JBOX_ERR_DEVICE_GONE);
+
+    // Restore full channel count — periodic retry promotes the route
+    // back to RUNNING. Pre-fix this never happened because state was
+    // ERROR.
+    f.backend->removeDevice("src");
+    f.backend->addDevice(makeInputDevice("src", 4));
+    f.rm->retryWaitingRoutes();
+    REQUIRE(f.rm->pollStatus(id, &status) == JBOX_OK);
+    REQUIRE(status.state == JBOX_ROUTE_STATE_RUNNING);
+}
+
+TEST_CASE("RouteManager: never-started route with out-of-bounds mapping still goes to "
+          "ERROR (genuine config error)",
+          "[route_manager][error_trap]") {
+    // Counter-test for the WAITING reclassification: a route that
+    // never reached RUNNING gets the strict ERROR + MAPPING_INVALID
+    // because the only plausible explanation is a configuration
+    // mistake — the user picked a channel that doesn't exist on the
+    // chosen device. Without this distinction the UI would silently
+    // wait forever on a typo.
+    Fixture f(2, 2);
+    std::vector<ChannelEdge> m{{0, 5}};  // dst has only 2 channels.
+    RouteManager::RouteConfig cfg{"src", "dst", m, "never-started"};
+    jbox_error_t err{};
+    const auto id = f.rm->addRoute(cfg, &err);
+
+    REQUIRE(f.rm->startRoute(id) == JBOX_ERR_MAPPING_INVALID);
+    jbox_route_status_t status{};
+    REQUIRE(f.rm->pollStatus(id, &status) == JBOX_OK);
+    REQUIRE(status.state      == JBOX_ROUTE_STATE_ERROR);
+    REQUIRE(status.last_error == JBOX_ERR_MAPPING_INVALID);
+}
+
+TEST_CASE("RouteManager: publishes watched UID set tracking non-STOPPED routes",
+          "[route_manager][watched_uids]") {
+    // 7.6.7: backend gets a filtered listener-install set so it
+    // doesn't pay the per-device-listener cost for the entire system
+    // inventory. Set is empty before any route runs (STOPPED routes
+    // don't need monitoring), populates on startRoute, and shrinks
+    // back when the route stops or is removed.
+    Fixture f(2, 2);
+    REQUIRE(f.backend->watchedUids().empty());
+
+    std::vector<ChannelEdge> m{{0, 0}};
+    RouteManager::RouteConfig cfg{"src", "dst", m, "watched"};
+    jbox_error_t err{};
+    const auto id = f.rm->addRoute(cfg, &err);
+    // addRoute leaves the route STOPPED — set still empty.
+    REQUIRE(f.backend->watchedUids().empty());
+
+    REQUIRE(f.rm->startRoute(id) == JBOX_OK);
+    auto watched = f.backend->watchedUids();
+    REQUIRE(watched == std::vector<std::string>{"dst", "src"});
+
+    REQUIRE(f.rm->stopRoute(id) == JBOX_OK);
+    REQUIRE(f.backend->watchedUids().empty());
+
+    REQUIRE(f.rm->startRoute(id) == JBOX_OK);
+    REQUIRE(f.rm->removeRoute(id) == JBOX_OK);
+    REQUIRE(f.backend->watchedUids().empty());
+}
+
+TEST_CASE("RouteManager: watched UID set includes aggregate members",
+          "[route_manager][watched_uids][aggregate]") {
+    // For aggregate-backed routes the monitored set must include each
+    // sub-device UID so the backend can install listeners that fire
+    // when a member disappears (kAudioDevicePropertyDeviceIsAlive on
+    // the sub-device's AudioObjectID). Without this the listener
+    // would be installed on the aggregate parent only and macOS often
+    // does NOT propagate sub-device alive transitions to the parent.
+    auto backend_holder = std::make_unique<SimulatedBackend>();
+    auto* backend = backend_holder.get();
+    backend->addDevice(makeInputDevice("memberA", 2));
+    backend->addDevice(makeOutputDevice("memberB", 2));
+    BackendDeviceInfo agg = makeInputDevice("agg", 2);
+    agg.output_channel_count = 2;
+    agg.direction = kBackendDirectionInput | kBackendDirectionOutput;
+    backend->addAggregateDevice(agg, {"memberA", "memberB"});
+    auto dm = std::make_unique<DeviceManager>(std::move(backend_holder));
+    dm->refresh();
+    RouteManager rm(*dm);
+
+    std::vector<ChannelEdge> m{{0, 0}};
+    RouteManager::RouteConfig cfg{"agg", "agg", m, "agg-self"};
+    cfg.latency_mode = 2;
+    jbox_error_t err{};
+    const auto id = rm.addRoute(cfg, &err);
+    REQUIRE(rm.startRoute(id) == JBOX_OK);
+
+    // Sorted: agg, memberA, memberB.
+    REQUIRE(backend->watchedUids() ==
+            std::vector<std::string>{"agg", "memberA", "memberB"});
+
+    REQUIRE(rm.stopRoute(id) == JBOX_OK);
+    REQUIRE(backend->watchedUids().empty());
+}
+
+TEST_CASE("RouteManager: routes parked in ERROR are excluded from watched set",
+          "[route_manager][watched_uids][error_trap]") {
+    // Counter to the previous tests: a route in ERROR is NOT going to
+    // recover via auto-monitoring (the user has misconfigured), so
+    // the backend should not pay listener cost for its UIDs.
+    Fixture f(2, 2);
+    std::vector<ChannelEdge> m{{0, 5}};  // dst has only 2 channels.
+    RouteManager::RouteConfig cfg{"src", "dst", m, "bad-config"};
+    jbox_error_t err{};
+    const auto id = f.rm->addRoute(cfg, &err);
+
+    REQUIRE(f.rm->startRoute(id) == JBOX_ERR_MAPPING_INVALID);
+    jbox_route_status_t status{};
+    REQUIRE(f.rm->pollStatus(id, &status) == JBOX_OK);
+    REQUIRE(status.state == JBOX_ROUTE_STATE_ERROR);
+    REQUIRE(f.backend->watchedUids().empty());
+}
+
+TEST_CASE("RouteManager: duplex fast path stays WAITING on a transient duplex-close "
+          "refusal so it can recover on a later retry",
+          "[route_manager][error_trap][duplex]") {
+    // The duplex direct-monitor path used to slot any DEVICE_BUSY
+    // outcome into ERROR — including the 7.6.3 contract case where a
+    // residual duplex IOProc handle from a previous teardown must be
+    // closed before opening fresh, and the close itself refused.
+    // Pre-7.6.7 the route was stuck in ERROR until the user
+    // intervened; the next attemptStart could close cleanly but never
+    // ran because retryWaitingRoutes ignores ERROR. Now: WAITING +
+    // DEVICE_BUSY, periodic retry brings it back when the residual
+    // close finally succeeds.
+    auto backend_holder = std::make_unique<SimulatedBackend>();
+    auto* backend = backend_holder.get();
+    BackendDeviceInfo agg = makeInputDevice("agg", 2);
+    agg.output_channel_count = 2;
+    agg.direction = kBackendDirectionInput | kBackendDirectionOutput;
+    backend->addDevice(agg);
+    auto dm = std::make_unique<DeviceManager>(std::move(backend_holder));
+    dm->refresh();
+    RouteManager rm(*dm);
+
+    std::vector<ChannelEdge> m{{0, 0}};
+    RouteManager::RouteConfig cfg{"agg", "agg", m, "self-route"};
+    cfg.latency_mode = 2;  // Performance → duplex fast path.
+    jbox_error_t err{};
+    const auto id = rm.addRoute(cfg, &err);
+    REQUIRE(rm.startRoute(id) == JBOX_OK);
+    jbox_route_status_t status{};
+    REQUIRE(rm.pollStatus(id, &status) == JBOX_OK);
+    REQUIRE(status.state == JBOX_ROUTE_STATE_RUNNING);
+
+    // Arm a one-shot close refusal. The next stopRoute leaves the
+    // duplex_ioproc_id populated; the next startRoute hits the
+    // retry-close path which also refuses and used to map to ERROR.
+    backend->setNextCloseCallbacksFailing(2);
+    REQUIRE(rm.stopRoute(id) == JBOX_OK);
+    REQUIRE(rm.startRoute(id) == JBOX_OK);  // retryable → JBOX_OK
+    REQUIRE(rm.pollStatus(id, &status) == JBOX_OK);
+    REQUIRE(status.state      == JBOX_ROUTE_STATE_WAITING);
+    REQUIRE(status.last_error == JBOX_ERR_DEVICE_BUSY);
+
+    // Refusal cleared — next retry recovers.
+    rm.retryWaitingRoutes();
+    REQUIRE(rm.pollStatus(id, &status) == JBOX_OK);
+    REQUIRE(status.state == JBOX_ROUTE_STATE_RUNNING);
+}
+
+TEST_CASE("RouteManager: duplex fast path stays WAITING when the device is already "
+          "claimed by a non-duplex mux",
+          "[route_manager][error_trap][duplex]") {
+    // The duplex path requires exclusive ownership of the device's
+    // IOProc slot. A pre-existing mux (created by another route on
+    // the same device) used to map straight to ERROR. Now: WAITING +
+    // DEVICE_BUSY so when the conflicting route stops and the mux is
+    // destroyed, periodic retry promotes the duplex route to RUNNING.
+    auto backend_holder = std::make_unique<SimulatedBackend>();
+    auto* backend = backend_holder.get();
+    BackendDeviceInfo agg = makeInputDevice("agg", 2);
+    agg.output_channel_count = 2;
+    agg.direction = kBackendDirectionInput | kBackendDirectionOutput;
+    backend->addDevice(agg);
+    backend->addDevice(makeOutputDevice("other", 2));
+    auto dm = std::make_unique<DeviceManager>(std::move(backend_holder));
+    dm->refresh();
+    RouteManager rm(*dm);
+
+    // Route 1: regular (non-duplex) route on agg → other. Creates a
+    // mux on `agg` for the input side.
+    std::vector<ChannelEdge> m{{0, 0}};
+    RouteManager::RouteConfig cfg1{"agg", "other", m, "regular"};
+    jbox_error_t err{};
+    const auto id1 = rm.addRoute(cfg1, &err);
+    REQUIRE(rm.startRoute(id1) == JBOX_OK);
+
+    // Route 2: duplex self-route on agg. Exclusivity check trips on
+    // route 1's mux → WAITING + DEVICE_BUSY.
+    RouteManager::RouteConfig cfg2{"agg", "agg", m, "duplex-self"};
+    cfg2.latency_mode = 2;
+    const auto id2 = rm.addRoute(cfg2, &err);
+    REQUIRE(rm.startRoute(id2) == JBOX_OK);  // retryable → JBOX_OK
+    jbox_route_status_t status{};
+    REQUIRE(rm.pollStatus(id2, &status) == JBOX_OK);
+    REQUIRE(status.state      == JBOX_ROUTE_STATE_WAITING);
+    REQUIRE(status.last_error == JBOX_ERR_DEVICE_BUSY);
+
+    // Stop route 1 → mux destroyed. Retry → route 2 promotes.
+    REQUIRE(rm.stopRoute(id1) == JBOX_OK);
+    rm.retryWaitingRoutes();
+    REQUIRE(rm.pollStatus(id2, &status) == JBOX_OK);
+    REQUIRE(status.state == JBOX_ROUTE_STATE_RUNNING);
+}
+
+TEST_CASE("RouteManager: handleDeviceChanges republishes the watched UID set after "
+          "an aggregate's members are reconfigured",
+          "[route_manager][watched_uids][aggregate]") {
+    // 7.6.7 design: aggregate composition changes have to flow through
+    // to the backend's listener filter, otherwise a returning member
+    // wouldn't get a per-device kAudioDevicePropertyDeviceIsAlive
+    // listener installed on it (the system-wide listener does fire
+    // for new devices, but the per-device alive transition is what
+    // catches the next "yank" cycle). handleDeviceChanges runs the
+    // refresh + republish sequence on every list-changed /
+    // aggregate-members-changed event.
+    auto backend_holder = std::make_unique<SimulatedBackend>();
+    auto* backend = backend_holder.get();
+    backend->addDevice(makeInputDevice("memberA", 2));
+    BackendDeviceInfo agg = makeInputDevice("agg", 2);
+    agg.output_channel_count = 2;
+    agg.direction = kBackendDirectionInput | kBackendDirectionOutput;
+    backend->addAggregateDevice(agg, {"memberA"});
+    auto dm = std::make_unique<DeviceManager>(std::move(backend_holder));
+    dm->refresh();
+    RouteManager rm(*dm);
+
+    std::vector<ChannelEdge> m{{0, 0}};
+    RouteManager::RouteConfig cfg{"agg", "agg", m, "agg-self"};
+    cfg.latency_mode = 2;
+    jbox_error_t err{};
+    const auto id = rm.addRoute(cfg, &err);
+    REQUIRE(rm.startRoute(id) == JBOX_OK);
+    REQUIRE(backend->watchedUids() ==
+            std::vector<std::string>{"agg", "memberA"});
+
+    // Reconfigure the aggregate's composition: add memberB, swap the
+    // aggregate's sub-device list to {memberA, memberB}. simulateAggregate
+    // MembersChanged fires the HAL-equivalent event; handleDeviceChanges
+    // refreshes dm_ and republishes the watched set.
+    backend->addDevice(makeInputDevice("memberB", 2));
+    backend->removeDevice("agg");
+    backend->addAggregateDevice(agg, {"memberA", "memberB"});
+    rm.handleDeviceChanges({DeviceChangeEvent{
+        DeviceChangeEvent::kAggregateMembersChanged, "agg"}});
+
+    REQUIRE(backend->watchedUids() ==
+            std::vector<std::string>{"agg", "memberA", "memberB"});
+}

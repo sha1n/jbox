@@ -153,7 +153,16 @@ struct RouteRow: View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(alignment: .center, spacing: 12) {
                 Button(action: onToggleExpanded) {
-                    Image(systemName: expanded ? "chevron.down" : "chevron.right")
+                    // "Down" only when the row is BOTH expanded AND
+                    // currently expandable. When the route flips to a
+                    // non-RUNNING state the meter view disappears, so
+                    // a down-pointing chevron would lie about the row's
+                    // visual state. The user's `expanded` intent is
+                    // preserved underneath: when the route returns to
+                    // RUNNING the chevron flips back to down + meters
+                    // reappear without an extra click.
+                    let showOpenChevron = expanded && canExpand
+                    Image(systemName: showOpenChevron ? "chevron.down" : "chevron.right")
                         .font(.system(size: 13, weight: .semibold))
                         .foregroundStyle(canExpand ? .secondary : .tertiary)
                         .frame(width: 28, height: 28)
@@ -242,8 +251,8 @@ struct RouteRow: View {
     }
 
     private var errorText: String? {
-        guard route.status.state == .error else { return nil }
-        return String(cString: jbox_error_code_name(route.status.lastError))
+        routeRowErrorText(state: route.status.state,
+                          lastError: route.status.lastError)
     }
 
     @ViewBuilder

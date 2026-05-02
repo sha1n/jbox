@@ -123,3 +123,107 @@ TEST_CASE("DeviceManager: backend() returns the owned backend",
     DeviceManager dm(std::move(backend_holder));
     REQUIRE(&dm.backend() == backend_raw);
 }
+
+TEST_CASE("DeviceManager: aggregate device exposes its active sub-device UIDs",
+          "[device_manager][aggregate_members]") {
+    using jbox::control::BackendDeviceInfo;
+    using jbox::control::DeviceManager;
+    using jbox::control::SimulatedBackend;
+    using jbox::control::kBackendDirectionInput;
+
+    auto b = std::make_unique<SimulatedBackend>();
+
+    BackendDeviceInfo member_a;
+    member_a.uid = "member-a";
+    member_a.name = "member-a";
+    member_a.direction = kBackendDirectionInput;
+    member_a.input_channel_count = 2;
+    member_a.nominal_sample_rate = 48000.0;
+    member_a.buffer_frame_size = 64;
+    b->addDevice(member_a);
+
+    BackendDeviceInfo member_b = member_a;
+    member_b.uid = "member-b";
+    member_b.name = "member-b";
+    b->addDevice(member_b);
+
+    BackendDeviceInfo agg;
+    agg.uid = "agg";
+    agg.name = "agg";
+    agg.direction = kBackendDirectionInput;
+    agg.input_channel_count = 4;
+    agg.nominal_sample_rate = 48000.0;
+    agg.buffer_frame_size = 64;
+    b->addAggregateDevice(agg, {"member-a", "member-b"});
+
+    DeviceManager dm(std::move(b));
+    dm.refresh();
+
+    const auto* info = dm.findByUid("agg");
+    REQUIRE(info != nullptr);
+    REQUIRE(info->is_aggregate);
+    REQUIRE(info->aggregate_member_uids ==
+            std::vector<std::string>{"member-a", "member-b"});
+
+    const auto* member_info = dm.findByUid("member-a");
+    REQUIRE(member_info != nullptr);
+    REQUIRE_FALSE(member_info->is_aggregate);
+    REQUIRE(member_info->aggregate_member_uids.empty());
+}
+
+TEST_CASE("DeviceManager: appendAggregateMembers is a no-op for non-aggregate UIDs",
+          "[device_manager][aggregate_members]") {
+    using jbox::control::BackendDeviceInfo;
+    using jbox::control::DeviceManager;
+    using jbox::control::SimulatedBackend;
+    using jbox::control::kBackendDirectionInput;
+
+    auto b = std::make_unique<SimulatedBackend>();
+    BackendDeviceInfo info;
+    info.uid = "plain";
+    info.name = "plain";
+    info.direction = kBackendDirectionInput;
+    info.input_channel_count = 2;
+    info.nominal_sample_rate = 48000.0;
+    info.buffer_frame_size = 64;
+    b->addDevice(info);
+    DeviceManager dm(std::move(b));
+    dm.refresh();
+
+    std::vector<std::string> out{"pre-existing"};
+    dm.appendAggregateMembers(out, "plain");
+    REQUIRE(out == std::vector<std::string>{"pre-existing"});
+
+    dm.appendAggregateMembers(out, "unknown-uid");
+    REQUIRE(out == std::vector<std::string>{"pre-existing"});
+}
+
+TEST_CASE("DeviceManager: appendAggregateMembers appends each active sub-device UID",
+          "[device_manager][aggregate_members]") {
+    using jbox::control::BackendDeviceInfo;
+    using jbox::control::DeviceManager;
+    using jbox::control::SimulatedBackend;
+    using jbox::control::kBackendDirectionInput;
+
+    auto b = std::make_unique<SimulatedBackend>();
+    BackendDeviceInfo m;
+    m.direction = kBackendDirectionInput;
+    m.input_channel_count = 2;
+    m.nominal_sample_rate = 48000.0;
+    m.buffer_frame_size = 64;
+    m.uid = "a"; m.name = "a"; b->addDevice(m);
+    m.uid = "b"; m.name = "b"; b->addDevice(m);
+    BackendDeviceInfo agg = m;
+    agg.uid = "agg"; agg.name = "agg"; agg.input_channel_count = 4;
+    b->addAggregateDevice(agg, {"a", "b"});
+    DeviceManager dm(std::move(b));
+    dm.refresh();
+
+    std::vector<std::string> out;
+    dm.appendAggregateMembers(out, "agg");
+    REQUIRE(out == std::vector<std::string>{"a", "b"});
+
+    // Idempotent on repeat — appends the same set again.
+    dm.appendAggregateMembers(out, "agg");
+    REQUIRE(out.size() == 4);
+}

@@ -57,6 +57,13 @@ struct RouteRecord {
     std::string              name;
     std::string              source_uid;
     std::string              dest_uid;
+    // Phase 7.6.6: every UID whose loss should fail this route. Always
+    // contains source_uid + dest_uid; for routes built on an aggregate,
+    // also contains each of the aggregate's active sub-device UIDs at
+    // start time. Re-computed at attemptStart and on each
+    // kAggregateMembersChanged event for any aggregate this route
+    // depends on. Cleared on teardown.
+    std::vector<std::string> watched_uids;
     std::vector<ChannelEdge> mapping;
 
     // Borrowed pointer to the engine's RT log queue (may be null when
@@ -76,6 +83,13 @@ struct RouteRecord {
     // Lifecycle.
     jbox_route_state_t state      = JBOX_ROUTE_STATE_STOPPED;
     jbox_error_code_t  last_error = JBOX_OK;
+
+    // 7.6.7: latched true on the first successful transition to
+    // RUNNING. Tells attemptStart whether a current device-side
+    // failure is plausibly transient (the route was once happy →
+    // park in WAITING for periodic retry) versus a config error
+    // (route never reached RUNNING → fail loud with ERROR).
+    bool ever_started = false;
 
     // Runtime resources (populated on successful startRoute, cleared on stop).
     std::vector<float>                               ring_storage;
@@ -149,6 +163,17 @@ struct RouteRecord {
     std::atomic<std::uint64_t> frames_consumed{0};
     std::atomic<std::uint64_t> underrun_count{0};
     std::atomic<std::uint64_t> overrun_count{0};
+
+    // Phase 7.6.6 stall watchdog. tickStallWatchdog samples the two
+    // frame counters every 100 ms; when neither has advanced since the
+    // previous tick AND the route is RUNNING, stall_ticks increments.
+    // At kStallTickThreshold (5 = 500 ms) the watchdog tears the route
+    // down and transitions to WAITING + JBOX_ERR_DEVICE_STALLED. State
+    // is re-primed on every entry into RUNNING so a fresh start clears
+    // the counter.
+    std::uint64_t last_seen_frames_produced = 0;
+    std::uint64_t last_seen_frames_consumed = 0;
+    std::uint8_t  stall_ticks               = 0;
 
     // Per-route peak meters, indexed by route-internal channel
     // (0..channels_count-1). Source is updated by the input IOProc on
@@ -327,6 +352,31 @@ public:
     void recoverFromWake();
     void tickWakeRetries(std::chrono::steady_clock::time_point now);
 
+    // Phase 7.6.6: stall watchdog. Driven by the engine's hot-plug
+    // tick at 10 Hz alongside tickHotPlug / tickPower. When a RUNNING
+    // route's frames_produced and frames_consumed have both stayed
+    // unchanged for kStallTickThreshold (5 = 500 ms) consecutive
+    // calls, the route is torn down and transitions to WAITING +
+    // DEVICE_STALLED. `now` is unused today but parameterized to
+    // match the cadence of tickWakeRetries(now); future tightening
+    // (per-route deadline arithmetic) won't break the engine wiring.
+    void tickStallWatchdog(std::chrono::steady_clock::time_point now);
+
+    // Phase 7.6.6 (post-acceptance): periodic WAITING-route retry.
+    // Refreshes dm_ once and calls attemptStart on every WAITING route.
+    // Intended to be driven from the engine's 10 Hz hot-plug consumer
+    // at ~1 Hz cadence. Generalises recovery so routes recover from
+    // DEVICE_GONE / DEVICE_STALLED / initial-WAITING regardless of
+    // whether the HAL fires a kDeviceListChanged or kAggregateMembers
+    // Changed event when the underlying device returns — Apple's HAL
+    // is unreliable for "device powered off and back on" because the
+    // audio object often isn't torn down at the HAL layer; only the
+    // sample flow stops and resumes. tickWakeRetries' bounded retry
+    // schedule for SYSTEM_SUSPENDED routes still runs in parallel;
+    // they race for the same routes via attemptStart's idempotent
+    // promotion path, no coordination needed. Control-thread only.
+    void retryWaitingRoutes();
+
     // Phase 7.6.4 device-loss / hot-plug reaction. Apply each event:
     //   - kDeviceIsNotAlive: any running route whose source_uid or
     //     dest_uid matches transitions to WAITING with last_error
@@ -372,12 +422,37 @@ private:
 
     // Internal helpers.
     jbox_error_code_t attemptStart(RouteRecord& r);
+    // 7.6.7: park `r` in WAITING with the given recoverable error
+    // code, push a kLogRouteWaiting event (with 0/0 source/dest flags
+    // — the missing-device path retains its own tryPushLog with the
+    // src/dst flags it actually populates), and return JBOX_OK.
+    // Centralises the device-side-transient handling for attemptStart's
+    // five reclassified failure paths.
+    jbox_error_code_t parkInWaitingTransient(RouteRecord&      r,
+                                             jbox_error_code_t code);
     void              teardown(RouteRecord& r);
     // Release all runtime allocations and mux attachments on r without
     // touching r.state or r.last_error. Called by teardown (which then sets
     // state = STOPPED / last_error = JBOX_OK) and by the ERROR-return paths
     // in attemptStart (which set their own state / error afterward).
     void              releaseRouteResources(RouteRecord& r);
+    // Phase 7.6.6: rebuild r.watched_uids = {source_uid, dest_uid} ∪
+    // (aggregate members of source_uid) ∪ (aggregate members of
+    // dest_uid). Called at attemptStart's RUNNING transition and from
+    // handleDeviceChanges on kAggregateMembersChanged for an aggregate
+    // referenced by this route.
+    void              rebuildWatchedUids(RouteRecord& r);
+    // 7.6.7 watched-UID set published to the backend. Union of
+    // {source_uid, dest_uid} ∪ (aggregate members of each, when the
+    // device is currently in dm_) over every route NOT in STOPPED or
+    // ERROR. Empty for a freshly-constructed manager. Returned sorted
+    // for stable test-comparison.
+    std::vector<std::string> computeWatchedUidSet() const;
+    // 7.6.7: push the current set into the backend. Backend dedupes
+    // against its previous set, so calling this liberally is cheap.
+    void                     publishWatchedUids();
+    // Re-prime the stall-watchdog snapshot on transitions into RUNNING.
+    void              resetStallWatchdog(RouteRecord& r);
     DeviceIOMux&      getOrCreateMux(const std::string& uid,
                                      std::uint32_t input_channel_count,
                                      std::uint32_t output_channel_count);

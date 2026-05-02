@@ -33,6 +33,7 @@
 #include <shared_mutex>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace jbox::control {
@@ -66,6 +67,7 @@ public:
                             std::uint32_t frames) override;
     void setDeviceChangeListener(DeviceChangeListener cb,
                                  void* user_data) override;
+    void setWatchedUids(std::vector<std::string> uids) override;
 
     // Forward declaration kept public so the .cpp-local trampoline
     // and helper functions can reference it without becoming friends.
@@ -128,6 +130,16 @@ private:
 
     bool                          system_listener_installed_ = false;
     std::vector<HalListenerEntry> per_device_listeners_;
+
+    // 7.6.7: UIDs the host has asked us to monitor — only these get
+    // per-device kAudioDevicePropertyDeviceIsAlive (and aggregate
+    // sub-device-list) listeners. Empty set means "no host filter
+    // yet": we behave as a no-op (no per-device listeners installed)
+    // until the host publishes a set, since pre-7.6.7 we used to
+    // listen on every device which was the cost the host wants us
+    // to stop paying. Single-control-thread state, no lock — same
+    // discipline as per_device_listeners_.
+    std::unordered_set<std::string> watched_uids_;
 
     // Static thunk for AudioObjectAddPropertyListener. Apple invokes
     // it with `this` as `inClientData`. Forwards to onHalPropertyEvent.

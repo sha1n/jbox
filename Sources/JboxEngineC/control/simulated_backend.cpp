@@ -32,6 +32,17 @@ void SimulatedBackend::setDeviceChangeListener(DeviceChangeListener cb,
     device_change_user_ = user_data;
 }
 
+void SimulatedBackend::setWatchedUids(std::vector<std::string> uids) {
+    // Stored sorted so tests can compare against a stable order.
+    std::sort(uids.begin(), uids.end());
+    uids.erase(std::unique(uids.begin(), uids.end()), uids.end());
+    watched_uids_ = std::move(uids);
+}
+
+std::vector<std::string> SimulatedBackend::watchedUids() const {
+    return watched_uids_;
+}
+
 namespace {
 inline void fire(DeviceChangeListener cb, void* ud,
                  DeviceChangeEvent::Kind kind,
@@ -162,7 +173,16 @@ std::vector<BackendDeviceInfo> SimulatedBackend::enumerate() {
     std::vector<BackendDeviceInfo> out;
     out.reserve(devices_.size());
     for (const auto& [uid, slot] : devices_) {
-        out.push_back(slot.info);
+        BackendDeviceInfo info = slot.info;
+        // Phase 7.6.6: surface the simulator's stored sub-device list
+        // through the public BackendDeviceInfo fields so DeviceManager
+        // / RouteManager / tests don't have to reach into SlotState
+        // to discover aggregate composition. Mirrors what
+        // CoreAudioBackend::enumerate publishes from
+        // kAudioAggregateDevicePropertyActiveSubDeviceList.
+        info.is_aggregate = !slot.sub_device_uids.empty();
+        info.aggregate_member_uids = slot.sub_device_uids;
+        out.push_back(std::move(info));
     }
     return out;
 }
