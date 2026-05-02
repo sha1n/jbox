@@ -32,7 +32,7 @@ Three coordinated changes, smallest surface that closes the user-visible gap:
 
 1. **(Engine, C++)** Expand each route's tracked-UID set at `attemptStart` time to include any aggregate's active sub-device UIDs. The matcher in `handleDeviceChanges` checks the set instead of just `source_uid` / `dest_uid`. Refresh the set on every `kAggregateMembersChanged` event for that route's aggregate UIDs.
 
-2. **(Engine, C++)** Add a per-route stall watchdog on the existing 10 Hz hot-plug consumer thread. If a `RUNNING` route's `framesProduced` AND `framesConsumed` both fail to advance for ≥ `kStallTicks = 15` (1.5 s at 10 Hz), tear down the route, transition to `WAITING`, set `last_error = JBOX_ERR_DEVICE_STALLED`. ABI v13 → v14 additive (new error variant only).
+2. **(Engine, C++)** Add a per-route stall watchdog on the existing 10 Hz hot-plug consumer thread. If a `RUNNING` route's `framesProduced` AND `framesConsumed` both fail to advance for ≥ `kStallTicks = 15` (1.5 s at 10 Hz), tear down the route, transition to `WAITING`, set `last_error = JBOX_ERR_DEVICE_STALLED`. ABI v14 → v15 additive (new error variant only).
 
 3. **(Swift UI)** Show a per-route error message on `WAITING` rows whose `lastError != JBOX_OK` — currently the row only reads `lastError` when `state == .error`. Match the orange-clock visual for transient WAITING but render a red secondary line with the human-readable error name.
 
@@ -249,7 +249,7 @@ Recovery in all WAITING-with-error cases rides on the existing `kDeviceListChang
 
 ## ABI
 
-`JBOX_ENGINE_ABI_VERSION`: 13 → **14**, MINOR additive.
+`JBOX_ENGINE_ABI_VERSION`: 14 → **15**, MINOR additive.
 
 ```c
 typedef enum {
@@ -257,11 +257,11 @@ typedef enum {
     ...
     JBOX_ERR_DEVICE_GONE     = 8,
     JBOX_ERR_SYSTEM_SUSPENDED = 9,
-    JBOX_ERR_DEVICE_STALLED  = 10,    /* NEW v14 */
+    JBOX_ERR_DEVICE_STALLED  = 10,    /* NEW v15 */
 } jbox_error_code_t;
 ```
 
-`jbox_error_code_name` gets a new branch returning `"DEVICE_STALLED"`. Header comment is extended to call the variant out under v14.
+`jbox_error_code_name` gets a new branch returning `"device stalled"` (matching the lowercase-with-spaces convention of the surrounding entries). Header comment is extended to call the variant out under v15.
 
 `docs/refactoring-backlog.md` § R1 (the `jbox_error_code_t` naming smell) stays as-is — adding another non-error variant doesn't deepen the smell.
 
