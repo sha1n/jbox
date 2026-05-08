@@ -1,0 +1,38 @@
+# Codecov configuration — see https://docs.codecov.com/docs/codecov-yaml
+#
+# Two lcov reports are uploaded per build, flagged `swift` and `cxx`. The
+# combined coverage is what shows on the badge and in the PR comment.
+
+coverage:
+  precision: 1
+  round: nearest
+  range: "60...90"
+
+  # No failing status checks — the badge + PR comment are signal enough
+  # for now. Tighten later if we want patch-coverage gates.
+  status:
+    project: off
+    patch: off
+
+flags:
+  swift:
+    paths:
+      - Sources/
+    carryforward: true
+  cxx:
+    paths:
+      - Sources/JboxEngineC/
+    carryforward: true
+
+# Only post a PR comment when the diff actually changes coverage. Avoids
+# noise on doc-only or build-config-only changes.
+comment:
+  layout: "diff, flags, files"
+  behavior: default
+  require_changes: true
+
+ignore:
+  - "ThirdParty/**"
+  - "Tests/**"
+  - "scripts/**"
+  - "docs/**"
