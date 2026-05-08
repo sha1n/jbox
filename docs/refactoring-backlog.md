@@ -343,14 +343,14 @@ subscript-write sites are all user-action-driven, not periodic — but
 the asymmetry is non-obvious enough that a future contributor adding
 a new periodic mutation path could regress the drag UX silently.
 
-### The asymmetry
+### The asymmetry (and why we now guard direct setters too)
 
-Apple's `@Observable` macro (Observation framework) is asymmetric
-on equal-value writes:
+Apple's `@Observable` macro (Observation framework) used to look
+asymmetric on equal-value writes:
 
 - **Direct property setter** (`self.meters = next`): equal-value
-  writes are short-circuited at willSet. Verified empirically
-  by `EngineStoreTests.pollMetersIsQuietOnNoChange`.
+  writes appeared to be short-circuited at willSet on Swift 6.3+
+  toolchains.
 - **Subscript-through-collection** (`routes[i].status = …`,
   `latencyComponents[id] = …`, `routes[i].config.name = …`):
   goes through `Array` / `Dictionary`'s `_modify` accessor and
@@ -359,6 +359,17 @@ on equal-value writes:
   by `EngineStoreTests.pollStatusesIsQuietOnNoChange` /
   `refreshStatusIsQuietOnNoChange` (both fail without explicit
   diff guards).
+
+The "direct-setter short-circuit" turned out to be **toolchain-
+dependent**: surfaced 2026-05-08 when the GitHub `macos-15` runner
+(Swift 6.1.2) failed `pollMetersIsQuietOnNoChange` while the dev mac
+(Swift 6.3.1) passed it. Older Observation runtimes fire willSet
+unconditionally on direct setters too. The published behaviour of
+Jbox shouldn't depend on which Swift the host runs, so `pollMeters`
+now uses the same explicit `if meters != next { meters = next }`
+guard the subscript-write paths use. The test was repurposed to pin
+the guard rather than the framework optimisation, so it's
+deterministic on every supported toolchain.
 
 Spurious fires are not just a perf concern — they propagate to
 SwiftUI's `List` which sits on top of `NSTableView`, and

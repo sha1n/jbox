@@ -937,13 +937,17 @@ public final class EngineStore {
                                   channel: i, value: v, now: now)
             }
         }
-        // No diff-before-write needed here: `meters = next` is a direct
-        // property setter, and the `@Observable` macro short-circuits
-        // willSet on equal-value writes for direct setters (verified
-        // empirically — see `pollMetersIsQuietOnNoChange`). The
-        // subscript-through-collection path in `pollStatuses` does NOT
-        // get this short-circuit and needs an explicit guard.
-        meters = next
+        // Diff-before-write so an unchanged snapshot doesn't invalidate
+        // `meters` observers (the menu-bar status and any future meter
+        // bindings). The `@Observable` macro's notification on direct
+        // assignment is unconditional under Swift 6.1's Observation
+        // runtime — equal-value short-circuiting is only observed under
+        // newer toolchains and we don't want the published behaviour to
+        // depend on which Swift the host is running. Same pattern as
+        // `pollStatuses` / `refreshStatus`, which also guard.
+        if meters != next {
+            meters = next
+        }
     }
 
     /// Current decayed peak-hold value for one channel on one side of

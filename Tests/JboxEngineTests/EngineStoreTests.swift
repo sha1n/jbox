@@ -1177,15 +1177,19 @@ struct EngineStoreTests {
     }
 
     /// `pollMeters` writes the `meters` dictionary via a *direct* property
-    /// setter (`self.meters = next`). Apple's `@Observable` macro
-    /// short-circuits willSet on equal-value direct-setter writes — so
-    /// even without an `if meters != next` guard, an unchanged snapshot
-    /// does not fire onChange. This test pins that framework contract:
-    /// if Apple ever changes Observation to fire on every assignment
-    /// regardless of equality, this test fails and we'd need to add an
-    /// explicit guard at `pollMeters` (matching the `pollStatuses` /
-    /// `refreshStatus` subscript-write paths, which DO need guards
-    /// because the `_modify` accessor doesn't get the same short-circuit).
+    /// setter (`self.meters = next`) wrapped in an explicit
+    /// `if meters != next` guard. The guard exists because the
+    /// `@Observable` macro's notification on assignment is unconditional
+    /// under Swift 6.1's Observation runtime — equal-value
+    /// short-circuiting is only present on newer toolchains, and we
+    /// don't want the published behaviour to depend on which Swift the
+    /// host is running. This test pins that the guard is in place: if
+    /// it's removed, an unchanged snapshot would re-fire `meters`
+    /// observers on every poll and this test catches that on every
+    /// supported Swift version (matches the `pollStatuses` /
+    /// `refreshStatus` subscript-write paths, which guard for the same
+    /// reason — there the `_modify` accessor never short-circuits at
+    /// any toolchain version).
     @Test("pollMeters does not invalidate meters observers when the snapshot is unchanged")
     func pollMetersIsQuietOnNoChange() throws {
         let (store, a, b, c) = try makeStoreWithThreeRoutes()
