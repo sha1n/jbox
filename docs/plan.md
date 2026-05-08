@@ -490,9 +490,7 @@ Phase 6 first-slice summary of deviations:
   automated UI-test infrastructure per CLAUDE.md). *Diff:* +171 LOC
   tests + 34 LOC engine-store + 3 LOC view + doc updates. Shipped as a single squashed commit on
   `feature/route-reorder` (squashed from per-task TDD slices during
-  the post-review amend pass). See
-  [`docs/2026-05-01-route-reorder-design.md`](./2026-05-01-route-reorder-design.md)
-  + [`docs/2026-05-01-route-reorder-plan.md`](./2026-05-01-route-reorder-plan.md).
+  the post-review amend pass).
 
 - **`@Observable` × `List.onMove` drag cancellation (2026-05-01,
   surfaced during the drag-to-reorder smoke pass).** *Symptom:* a
@@ -825,7 +823,7 @@ Phase 7.5 summary of deviations:
 
 #### Sub-phase 7.6.6 — Aggregate-loss detection + stall watchdog ✅ (engine; UI)
 
-- [x] **Aggregate-aware UID matching.** `BackendDeviceInfo` gains `is_aggregate` + `aggregate_member_uids`, populated by both backends during `enumerate()`. `RouteRecord::watched_uids` carries `source_uid` + `dest_uid` + each aggregate's active sub-device UIDs; `attemptStart` populates it on RUNNING transition; `RouteManager::handleDeviceChanges` walks the set on `kDeviceIsNotAlive`. Closes the real-world bug where a USB interface that was a member of an aggregate was unplugged and the route stayed RUNNING. Multi-day app sessions surfaced this; the simulator path 7.6.4 originally shipped didn't exercise aggregate composition. See `docs/2026-05-02-device-monitoring-{design,plan}.md`.
+- [x] **Aggregate-aware UID matching.** `BackendDeviceInfo` gains `is_aggregate` + `aggregate_member_uids`, populated by both backends during `enumerate()`. `RouteRecord::watched_uids` carries `source_uid` + `dest_uid` + each aggregate's active sub-device UIDs; `attemptStart` populates it on RUNNING transition; `RouteManager::handleDeviceChanges` walks the set on `kDeviceIsNotAlive`. Closes the real-world bug where a USB interface that was a member of an aggregate was unplugged and the route stayed RUNNING. Multi-day app sessions surfaced this; the simulator path 7.6.4 originally shipped didn't exercise aggregate composition.
 - [x] **`kAggregateMembersChanged` re-expansion.** When the aggregate that backs a running route loses one of its active sub-devices and macOS only fires the aggregate-level signal (no per-member `kDeviceIsNotAlive`), `handleDeviceChanges` re-expands `watched_uids` against the refreshed `dm_` and tears the route down when a previously-watched member is gone. Aggregates that grow or reshape without losing a member don't disturb running routes.
 - [x] **Stall watchdog (`JBOX_ERR_DEVICE_STALLED`, ABI v14 → v15 additive).** Per-route counters `last_seen_frames_produced` / `last_seen_frames_consumed` / `stall_ticks`; `RouteManager::tickStallWatchdog(now)` increments `stall_ticks` while both counters stay frozen and the route is `RUNNING`. At 5 ticks (500 ms on the 10 Hz hot-plug cadence) the route is torn down and transitions to `WAITING + JBOX_ERR_DEVICE_STALLED`. Independent safety net for any "silent death" failure mode the HAL listeners didn't surface (another app preempts the device, an aggregate IOProc freezes without an IsAlive=0).
 - [x] **Periodic WAITING-route retry.** `RouteManager::retryWaitingRoutes()` driven from `Engine::hotPlugThreadLoop` at 1 Hz (every 10th hot-plug tick). Refreshes `dm_` and calls `attemptStart` on each `WAITING` route. Generalises recovery so routes come back automatically when devices return, regardless of whether the HAL fires `kDeviceListChanged` / `kAggregateMembersChanged` — Apple's HAL is unreliable for "device powered off and back on" because the audio object often persists at the HAL layer; only the sample flow stops and resumes. `attemptStart` fast-fails on still-missing devices so the cost is trivial. Coexists with `tickWakeRetries`'s bounded retry schedule for `SYSTEM_SUSPENDED` routes (both call `attemptStart`, which is idempotent).
@@ -834,7 +832,7 @@ Phase 7.5 summary of deviations:
 
 - [x] **UI: chevron icon reflects effective expand state.** `RouteRow`'s disclosure chevron now uses `(expanded && canExpand) ? "chevron.down" : "chevron.right"` — when the route flips to a non-RUNNING state and the meter view disappears, the chevron flips to `right` to match. The user's `expanded` intent is preserved underneath: when the route returns to RUNNING the chevron flips back to `down` and meters reappear without an extra click.
 
-**Manual hardware acceptance (user's gate, mirrors F1).** Build an aggregate in AMS containing two physical interfaces, start a route on the aggregate, yank one interface. Within ~1 s the route should flip to orange-clock + "Device disconnected — waiting for it to return." Re-plug → orange clock disappears, route returns to RUNNING. See `docs/2026-05-02-device-monitoring-design.md § Manual hardware acceptance` for the three-test set.
+**Manual hardware acceptance (user's gate, mirrors F1).** Build an aggregate in AMS containing two physical interfaces, start a route on the aggregate, yank one interface. Within ~1 s the route should flip to orange-clock + "Device disconnected — waiting for it to return." Re-plug → orange clock disappears, route returns to RUNNING. (Two further hardware acceptance scenarios — `kAggregateMembersChanged`-only sub-device removal where macOS doesn't fire a per-member `IsNotAlive`, and an aggregate sample-rate cascade — are exercised by simulator regression tests; the user's hardware gate is the yank-and-replug pass above.)
 
 #### Sub-phase 7.6.7 — Targeted listeners + ERROR-trap fix ✅ (engine)
 
@@ -925,7 +923,7 @@ Phase 7.6 summary of deviations:
 
 ## Phase 7.7 — Per-route gain + mixer-strip UI ✅
 
-**Goal.** Add a per-route VCA-style fader, per-channel trims, route-wide and per-channel mute, and a console-style mixer-strip UI with DAW-standard meter scale and driver-published channel labels. Detail: [`docs/2026-04-28-route-gain-mixer-strip-design.md`](./2026-04-28-route-gain-mixer-strip-design.md).
+**Goal.** Add a per-route VCA-style fader, per-channel trims, route-wide and per-channel mute, and a console-style mixer-strip UI with DAW-standard meter scale and driver-published channel labels. See `docs/spec.md` § 2.14 (engine) and § 4.5 (UI).
 
 **Status.** ✅ Complete. ABI v14 (per-route master gain, per-channel trims, mute), `MixerStripColumn` UI, and persistence shipped on `master` (commits including `82924cf`, `6f6e3a4`, `7333d7d`, `00e3c56`).
 

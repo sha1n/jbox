@@ -5,9 +5,9 @@ import Testing
 /// Pure-function tests for `FaderTaper`: the dB ↔ slider-position taper
 /// and dB → linear amplitude conversion used by the mixer-strip fader.
 ///
-/// See docs/2026-04-28-route-gain-mixer-strip-design.md §§ 4.4, 7.3 for
-/// the contract; the "Non-finite-input policy" comment in
-/// `FaderTaper.swift` is the source of truth for NaN / ±infinity handling.
+/// See `docs/spec.md` § 4.5 for the contract; the "Non-finite-input
+/// policy" comment in `FaderTaper.swift` is the source of truth for
+/// NaN / ±infinity handling.
 @Suite("FaderTaper")
 struct FaderTaperTests {
 

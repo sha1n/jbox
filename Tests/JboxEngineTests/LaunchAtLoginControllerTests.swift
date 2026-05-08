@@ -18,8 +18,6 @@ import Testing
 //   G. Idempotent enables
 //   H. lastError lifecycle
 //   I. onPersistableChange callback
-//
-// See docs/2026-04-30-launch-at-login-design.md for the full design.
 
 // MARK: - Helpers
 

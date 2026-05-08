@@ -66,7 +66,7 @@ public struct MixerStripDimensions: Equatable, Sendable {
 /// equally with the destination section receiving exactly one
 /// VCA-strip's worth of extra width.
 ///
-/// See `docs/spec.md § 4.5` and `docs/2026-04-28-route-gain-mixer-strip-design.md`.
+/// See `docs/spec.md` § 4.5.
 public enum MixerPanelLayout {
     public static let headerBandHeight:  CGFloat = 16
     public static let capBandHeight:     CGFloat = 10

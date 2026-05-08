@@ -15,8 +15,7 @@ import Foundation
 ///   * `[unityPosition, 1]` → linear in dB from `0 dB` to `+12 dB`.
 ///
 /// Lives in `JboxEngineSwift` (not `JboxApp`) so it is unit-testable
-/// without SwiftUI. See
-/// `docs/2026-04-28-route-gain-mixer-strip-design.md §§ 4.4, 7.3`.
+/// without SwiftUI. See `docs/spec.md` § 4.5.
 ///
 /// ## Non-finite-input policy
 ///

@@ -1,7 +1,6 @@
 import Foundation
 
 // Phase 7 closeout — user-facing "Launch at login" toggle.
-// Design: docs/2026-04-30-launch-at-login-design.md.
 //
 // The types here intentionally stay framework-free: the production
 // SMAppService.mainApp wrapper lives in its own file

@@ -434,7 +434,7 @@ The phase checklist, sub-phase breakdown, and deviations live in [plan.md § Pha
 
 ### 2.14 Per-route gain (ABI v14)
 
-Each route carries a route-wide VCA-style fader (in dB), an optional per-channel trim array (also in dB), a route-wide mute boolean, AND a per-channel mute boolean array. The VCA and trims are multiplied together and applied per output sample inside `outputIOProcCallback` / `duplexIOProcCallback`. dB → linear conversion runs on the control thread; the RT path is alloc-free, lock-free, and `pow`-free. A 10 ms one-pole IIR (`rt/gain_smoother.hpp`) smooths slider drags and mute toggles to silence zipper noise / clicks. Source meter stays pre-fader; dest meter reads post-fader. Detail: `docs/2026-04-28-route-gain-mixer-strip-design.md`.
+Each route carries a route-wide VCA-style fader (in dB), an optional per-channel trim array (also in dB), a route-wide mute boolean, AND a per-channel mute boolean array. The VCA and trims are multiplied together and applied per output sample inside `outputIOProcCallback` / `duplexIOProcCallback`. dB → linear conversion runs on the control thread; the RT path is alloc-free, lock-free, and `pow`-free. A 10 ms one-pole IIR (`rt/gain_smoother.hpp`) smooths slider drags and mute toggles to silence zipper noise / clicks. Source meter stays pre-fader; dest meter reads post-fader.
 
 The UI labels the route-wide fader **VCA**, not "master" — it does not sum a bus, it uniformly scales every mapped channel of the route, which is the control behavior of a console VCA group fader. The engine ABI keeps the historical field name `master_gain_db` to avoid a v14 → v15 rename for a label-only change.
 
@@ -715,7 +715,7 @@ The expanded route panel uses a **mixer-strip layout** (introduced with the per-
 
 **Mirror layout** — SOURCE meters render in the slot where the DESTINATION strip's *fader* sits (leading position) — the destination's meter slot becomes a phantom spacer on source strips. Source meters therefore sit on the left of each strip and destination meters on the right, like two halves of a mixer facing each other across the panel center. Each section pins its own dBFS scale column (`DbScale`, marks from `MeterLevel.dawScaleMarks`: `0, -3, -6, -12, -18, -24, -36, -48, -60`) on the left of its bars; the VCA strip pins to the far right of the destination section.
 
-**Other strip details** — the fader cap is rendered console-style (rectangular, taller than wide, horizontal grip line, metallic gradient) and tracks the cursor 1:1. Compact tier (≥6 channels) shrinks the strip width and falls back to numeric strip headers; tooltips carry the full source → destination channel-name pair via `EngineStore.channelNames` + `ChannelLabel.format`. Detail: `docs/2026-04-28-route-gain-mixer-strip-design.md` § 4.
+**Other strip details** — the fader cap is rendered console-style (rectangular, taller than wide, horizontal grip line, metallic gradient) and tracks the cursor 1:1. Compact tier (≥6 channels) shrinks the strip width and falls back to numeric strip headers; tooltips carry the full source → destination channel-name pair via `EngineStore.channelNames` + `ChannelLabel.format`.
 
 **Default window size** — the main `Window` scene defaults to `MixerPanelLayout.defaultWindowSize` (920 × 680) so a single stereo route's expanded panel fills the visible area without cropping. `MixerPanelLayout.minWindowSize` (760 × 540) is the hard floor — below this strips clip and scroll doesn't help.
 

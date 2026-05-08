@@ -29,8 +29,6 @@ import JboxEngineSwift
 /// The drag gesture is attached to the cap, not the full track frame,
 /// so clicking on bare track does not jump the cap. Click-to-jump is a
 /// future polish item; for v1 the cap is the only drag handle.
-///
-/// See docs/2026-04-28-route-gain-mixer-strip-design.md § 4.4.
 struct FaderSlider: View {
 
     /// Style is retained for any future visual differentiation between
