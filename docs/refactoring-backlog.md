@@ -183,9 +183,14 @@ deliberate later sprint, not a side-effect of feature work.
 
 ## R2 — Live-Core-Audio test "skip" pattern actually fails on no-device CI
 
-**Status:** open. Surfaced 2026-05-01 during the drag-to-reorder
-review; deferred because the pattern is suite-wide (predates the
-feature) and a fix is broader than that slice.
+**Status:** resolved 2026-05-08. Surfaced 2026-05-01 during the
+drag-to-reorder review and confirmed in CI on 2026-05-08 when the
+suite finally ran end-to-end on a GitHub `macos-15` runner — both
+`pollMetersIsQuietOnNoChange` and
+`pollStatusesIsQuietOnRoutesWhenRunningCountersTick` failed because
+the `Issue.record + return / throw CancellationError()` shape never
+actually skipped. Fix landed alongside the coverage CI work; see the
+**Resolution** section at the end of this entry.
 
 ### Symptom
 
@@ -263,6 +268,44 @@ CancellationError()` in `makeStoreWithThreeRoutes` (matching the
 existing pattern). The "real" fix is suite-wide, not a one-helper
 patch, so it belongs in a focused refactoring pass rather than the
 feature commit.
+
+### Resolution (2026-05-08)
+
+Suite-level `.enabled(if: hasIOCapableDevices())` trait. The
+predicate is a `nonisolated` free function in
+`Tests/JboxEngineTests/EngineStoreTests.swift` that walks Core Audio
+directly via `kAudioHardwarePropertyDevices` +
+`kAudioDevicePropertyStreamConfiguration` (no `EngineStore`
+involvement, so the autoclosure stays `@Sendable`). Returns true on
+every Mac that has at least one input-stream and one output-stream
+capable device.
+
+With the trait in place, ~22 environmental `guard … else
+{ Issue.record(…); return }` blocks (and 3 `throw
+CancellationError()` variants in `makeStoreWithThreeRoutes` and two
+test bodies) collapsed to direct force-unwraps:
+
+```swift
+let src = store.devices.first(where: { $0.inputChannelCount  >= 1 })!
+let dst = store.devices.first(where: { $0.outputChannelCount >= 1 })!
+```
+
+**Runtime IOProc condition (one test only).**
+`pollStatusesIsQuietOnRoutesWhenRunningCountersTick` additionally
+needs the host to actually drive the IOProc — true on dev machines,
+not on sandboxed CI runners that enumerate devices but never
+schedule the audio engine. The suite-level trait can't predict that,
+so the test keeps its two runtime `guard … else { return }` checks
+but drops `Issue.record` from each body. On hosts where IOProc
+doesn't tick the test passes vacuously; the dev-machine run still
+exercises the regression. Pure-logic
+`statusFieldsAreObservablyEqual…` tests pin the diff predicate
+itself deterministically and run everywhere.
+
+**What stays.** `Issue.record(...)` calls that mark a *real*
+expectation failure (e.g., `addRoute` was supposed to throw
+`MAPPING_INVALID` and didn't) — those are correct uses and keep the
+test failed when the engine breaks its contract.
 
 ---
 
