@@ -23,9 +23,9 @@ Unlike macOS Aggregate Devices — the built-in mechanism for combining multiple
 
 ## Who this is for
 
-Anyone on macOS who wants to send audio from one device's outputs into another device's inputs (or virtual inputs), without building a macOS Aggregate Device.
+Anyone on macOS who wants to route audio between two Core Audio devices — picking exact source and destination channels, including the destination interface's virtual / DSP-routable channels — without building a macOS Aggregate Device.
 
-A typical example: routing a hardware instrument or external sound module into specific virtual inputs on an audio interface, so the interface's DSP / console software can apply inserts, sends, or effects to that signal.
+A typical example: routing a hardware instrument or external sound module into specific channels on an audio interface — often the interface's virtual / DSP-routable channels (vendor labelling varies: "virtual inputs", "virtual outputs", "monitor returns", console-bus channels, etc.) — so the interface's DSP / console software can apply inserts, sends, or effects to that signal.
 
 ---
 
@@ -91,7 +91,8 @@ Useful for testing the engine without the GUI:
 
 ```sh
 swift run JboxEngineCLI --list-devices
-swift run JboxEngineCLI --route <src-uid>:<src-channels> -> <dst-uid>:<dst-channels>
+swift run JboxEngineCLI --route '<src-uid>@<src-channels>-><dst-uid>@<dst-channels>'
+# Example: --route 'AppleHDA:0@1,2->com.apple.audio.CoreAudio:7@3,4'
 ```
 
 See `Sources/JboxEngineCLI/main.swift` for full options.
@@ -101,19 +102,23 @@ See `Sources/JboxEngineCLI/main.swift` for full options.
 Common commands are wrapped in a [`Makefile`](./Makefile) at the repo root:
 
 ```sh
-make            # show all targets (default)
-make clean      # wipe .build/ build/ test-results/ .swiftpm/
-make build      # produce the distributable DMG (JBox-<version>.dmg)
-make test       # run the full test pipeline (same as CI)
-make all        # clean + build + test
+make                # show all targets (default)
+make clean          # wipe .build/ build/ test-results/ .swiftpm/
+make build          # produce the distributable DMG (Jbox-<version>.dmg)
+make test           # run the full test pipeline (same as CI)
+make all            # clean + build + test
 
 # Fine-grained:
-make app        # build Jbox.app only (no DMG)
-make run        # build, bundle, and launch
-make cli        # build just JboxEngineCLI
-make swift-test # Swift tests only (fast iteration)
-make cxx-test   # C++ tests only (with per-test timings)
-make rt-scan    # RT-safety static scanner only
+make app            # build Jbox.app only (no DMG)
+make dmg            # build the distribution DMG (same as `make build`)
+make run            # build, bundle, and launch
+make cli            # build just JboxEngineCLI
+make verify         # run the full verification pipeline (same as `make test`)
+make swift-test     # Swift Testing only (fast iteration)
+make cxx-test       # C++ tests only (with per-test timings)
+make cxx-test-tsan  # C++ tests under ThreadSanitizer
+make rt-scan        # RT-safety static scanner only
+make coverage       # generate Swift + C++ lcov reports under test-results/
 ```
 
 The version used for `make build` defaults to `git describe`; override with `make VERSION=X.Y.Z build`. All output lands in git-ignored directories (`.build/`, `build/`, `test-results/`).

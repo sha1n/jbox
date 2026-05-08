@@ -181,7 +181,7 @@ deliberate later sprint, not a side-effect of feature work.
 
 ---
 
-## R2 — Live-Core-Audio test "skip" pattern actually fails on no-device CI
+## R2 — Live-Core-Audio test "skip" pattern actually fails on no-device CI ✅ RESOLVED
 
 **Status:** resolved 2026-05-08. Surfaced 2026-05-01 during the
 drag-to-reorder review and confirmed in CI on 2026-05-08 when the

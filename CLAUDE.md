@@ -37,12 +37,16 @@ Phase 7.6 ripped out hog mode + aggressive buffer-shrink after they stalled IOPr
 Always prefer `make` over invoking scripts or `swift` directly — the Makefile wraps the canonical pipeline.
 
 ```sh
-make                 # list targets
+make                 # list targets (same as `make help`)
+make build           # alias for `make dmg` — produce the distributable DMG
+make test            # alias for `make verify` — full test pipeline
+make all             # clean + build + test
 make verify          # full pipeline (same as CI): RT-scan + Release build + Swift tests + C++ tests + TSan
 make swift-test      # Swift Testing only
 make cxx-test        # C++ tests only, with per-test durations
 make cxx-test-tsan   # C++ tests under ThreadSanitizer
 make rt-scan         # RT-safety static scanner on Sources/JboxEngineC/rt/
+make coverage        # generate Swift + C++ lcov reports under test-results/
 make app             # build Jbox.app (no DMG)
 make run             # build + bundle + open build/Jbox.app
 make dmg             # build the distributable DMG
