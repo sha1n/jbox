@@ -1,7 +1,12 @@
 # JBox
 
-[![CI](https://github.com/sha1n/jbox/actions/workflows/ci.yml/badge.svg?branch=master)](https://github.com/sha1n/jbox/actions/workflows/ci.yml)
-[![codecov](https://codecov.io/gh/sha1n/jbox/branch/master/graph/badge.svg)](https://codecov.io/gh/sha1n/jbox)
+<p align="center">
+  <a href="https://github.com/sha1n/jbox/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/sha1n/jbox/actions/workflows/ci.yml/badge.svg?branch=master"></a>
+  <a href="https://codecov.io/gh/sha1n/jbox"><img alt="Coverage" src="https://codecov.io/gh/sha1n/jbox/branch/master/graph/badge.svg"></a>
+  <a href="./LICENSE"><img alt="License: Apache 2.0" src="https://img.shields.io/badge/license-Apache%202.0-blue"></a>
+  <img alt="Platform: macOS 15+" src="https://img.shields.io/badge/platform-macOS%2015%2B-lightgrey?logo=apple&logoColor=white">
+  <img alt="Status: pre-1.0" src="https://img.shields.io/badge/status-pre--1.0-yellow">
+</p>
 
 **A native macOS audio routing utility.** JBox routes selected channels from one Core Audio device to selected channels on another, in real time, with low latency and robust drift correction between independent clocks.
 
