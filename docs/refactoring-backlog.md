@@ -183,9 +183,14 @@ deliberate later sprint, not a side-effect of feature work.
 
 ## R2 — Live-Core-Audio test "skip" pattern actually fails on no-device CI
 
-**Status:** open. Surfaced 2026-05-01 during the drag-to-reorder
-review; deferred because the pattern is suite-wide (predates the
-feature) and a fix is broader than that slice.
+**Status:** resolved 2026-05-08. Surfaced 2026-05-01 during the
+drag-to-reorder review and confirmed in CI on 2026-05-08 when the
+suite finally ran end-to-end on a GitHub `macos-15` runner — both
+`pollMetersIsQuietOnNoChange` and
+`pollStatusesIsQuietOnRoutesWhenRunningCountersTick` failed because
+the `Issue.record + return / throw CancellationError()` shape never
+actually skipped. Fix landed alongside the coverage CI work; see the
+**Resolution** section at the end of this entry.
 
 ### Symptom
 
@@ -264,6 +269,52 @@ existing pattern). The "real" fix is suite-wide, not a one-helper
 patch, so it belongs in a focused refactoring pass rather than the
 feature commit.
 
+### Resolution (2026-05-08)
+
+Suite-level `.enabled(if: hasIOCapableDevices())` trait. The
+predicate is a `nonisolated` free function in
+`Tests/JboxEngineTests/EngineStoreTests.swift` that walks Core Audio
+directly via `kAudioHardwarePropertyDevices` +
+`kAudioDevicePropertyStreamConfiguration` (no `EngineStore`
+involvement, so the autoclosure stays `@Sendable`). Returns true on
+every Mac that has at least one input-stream and one output-stream
+capable device.
+
+With the trait in place, ~22 environmental `guard … else
+{ Issue.record(…); return }` blocks (and 3 `throw
+CancellationError()` variants in `makeStoreWithThreeRoutes` and two
+test bodies) collapsed to `try #require(...)` lookups:
+
+```swift
+let src = try #require(store.devices.first(where: { $0.inputChannelCount  >= 1 }))
+let dst = try #require(store.devices.first(where: { $0.outputChannelCount >= 1 }))
+```
+
+`try #require` rather than force-unwrap (`!`) because the suite trait
+walks Core Audio directly while test bodies enumerate via
+`JboxEngineC`. The two paths agree in practice, but if the engine's
+filtering ever diverges from raw enumeration, `try #require` surfaces
+a Swift Testing failure with the source location instead of a runtime
+crash. The 6 pre-existing force-unwraps on `directionInput` /
+`directionOutput` were converted to the same idiom for consistency.
+
+**Runtime IOProc condition (one test only).**
+`pollStatusesIsQuietOnRoutesWhenRunningCountersTick` additionally
+needs the host to actually drive the IOProc — true on dev machines,
+not on sandboxed CI runners that enumerate devices but never
+schedule the audio engine. The suite-level trait can't predict that,
+so the test keeps its two runtime `guard … else { return }` checks
+but drops `Issue.record` from each body. On hosts where IOProc
+doesn't tick the test passes vacuously; the dev-machine run still
+exercises the regression. Pure-logic
+`statusFieldsAreObservablyEqual…` tests pin the diff predicate
+itself deterministically and run everywhere.
+
+**What stays.** `Issue.record(...)` calls that mark a *real*
+expectation failure (e.g., `addRoute` was supposed to throw
+`MAPPING_INVALID` and didn't) — those are correct uses and keep the
+test failed when the engine breaks its contract.
+
 ---
 
 ## R3 — `@Observable` × subscript-write asymmetry: latent risk in `EngineStore`
@@ -292,14 +343,14 @@ subscript-write sites are all user-action-driven, not periodic — but
 the asymmetry is non-obvious enough that a future contributor adding
 a new periodic mutation path could regress the drag UX silently.
 
-### The asymmetry
+### The asymmetry (and why we now guard direct setters too)
 
-Apple's `@Observable` macro (Observation framework) is asymmetric
-on equal-value writes:
+Apple's `@Observable` macro (Observation framework) used to look
+asymmetric on equal-value writes:
 
 - **Direct property setter** (`self.meters = next`): equal-value
-  writes are short-circuited at willSet. Verified empirically
-  by `EngineStoreTests.pollMetersIsQuietOnNoChange`.
+  writes appeared to be short-circuited at willSet on Swift 6.3+
+  toolchains.
 - **Subscript-through-collection** (`routes[i].status = …`,
   `latencyComponents[id] = …`, `routes[i].config.name = …`):
   goes through `Array` / `Dictionary`'s `_modify` accessor and
@@ -308,6 +359,17 @@ on equal-value writes:
   by `EngineStoreTests.pollStatusesIsQuietOnNoChange` /
   `refreshStatusIsQuietOnNoChange` (both fail without explicit
   diff guards).
+
+The "direct-setter short-circuit" turned out to be **toolchain-
+dependent**: surfaced 2026-05-08 when the GitHub `macos-15` runner
+(Swift 6.1.2) failed `pollMetersIsQuietOnNoChange` while the dev mac
+(Swift 6.3.1) passed it. Older Observation runtimes fire willSet
+unconditionally on direct setters too. The published behaviour of
+Jbox shouldn't depend on which Swift the host runs, so `pollMeters`
+now uses the same explicit `if meters != next { meters = next }`
+guard the subscript-write paths use. The test was repurposed to pin
+the guard rather than the framework optimisation, so it's
+deterministic on every supported toolchain.
 
 Spurious fires are not just a perf concern — they propagate to
 SwiftUI's `List` which sits on top of `NSTableView`, and
