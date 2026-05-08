@@ -27,7 +27,7 @@ export JBOX_VERSION := $(VERSION)
 
 .PHONY: help all clean build test \
         app dmg run cli verify \
-        swift-test cxx-test cxx-test-tsan rt-scan
+        swift-test cxx-test cxx-test-tsan rt-scan coverage
 
 # -----------------------------------------------------------------------------
 # Default target — help.
@@ -54,6 +54,7 @@ help:
 	@echo "  make cxx-test       Run C++ engine tests only (with per-test durations)"
 	@echo "  make cxx-test-tsan  Run C++ engine tests under ThreadSanitizer"
 	@echo "  make rt-scan        Run the RT-safety static scanner"
+	@echo "  make coverage       Generate Swift + C++ lcov reports under test-results/"
 	@echo ""
 	@echo "Version: JBOX_VERSION=$(VERSION)"
 	@echo "   Override with:  make VERSION=X.Y.Z <target>"
@@ -107,6 +108,9 @@ cxx-test-tsan:
 
 rt-scan:
 	./scripts/rt_safety_scan.sh
+
+coverage:
+	./scripts/coverage.sh
 
 # -----------------------------------------------------------------------------
 # All

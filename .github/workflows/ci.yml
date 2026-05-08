@@ -13,6 +13,7 @@ permissions:
   contents: read
   checks: write
   pull-requests: write
+  id-token: write   # for Codecov OIDC upload (no token secret needed)
 
 jobs:
   build-and-test:
@@ -36,23 +37,16 @@ jobs:
       - name: Build (release)
         run: swift build -c release
 
-      - name: Swift tests (debug) — emit xunit XML
-        run: |
-          mkdir -p test-results
-          # --parallel is required for --xunit-output to take effect.
-          # Swift 6 emits two files: test-results/swift-junit.xml (empty
-          # unless XCTest targets exist) and
-          # test-results/swift-junit-swift-testing.xml (Swift Testing).
-          swift test --parallel --xunit-output test-results/swift-junit.xml
-
-      - name: C++ engine tests (debug) — emit JUnit XML
-        run: |
-          mkdir -p test-results
-          swift run JboxEngineCxxTests \
-            --reporter console \
-            --reporter 'junit::out=test-results/cxx-junit.xml'
+      - name: Swift + C++ tests with coverage
+        # Runs `swift test --enable-code-coverage` (covers Swift + bridge-
+        # reachable C++) and rebuilds JboxEngineCxxTests with profile flags
+        # to capture engine internals. Emits xunit XML for the test report
+        # and lcov files for Codecov. See scripts/coverage.sh.
+        run: ./scripts/coverage.sh
 
       - name: C++ engine tests under ThreadSanitizer
+        # TSan runs separately — coverage instrumentation interferes with
+        # the sanitizer's shadow memory layout, so we keep this pass clean.
         run: swift run --sanitize=thread JboxEngineCxxTests
 
       - name: Upload test results as artifact
@@ -70,3 +64,12 @@ jobs:
           files: test-results/*.xml
           check_name: Test report
           comment_mode: always
+
+      - name: Upload coverage to Codecov (OIDC)
+        if: always()
+        uses: codecov/codecov-action@v5
+        with:
+          use_oidc: true
+          files: test-results/swift-coverage.lcov,test-results/cxx-coverage.lcov
+          flags: swift,cxx
+          fail_ci_if_error: false
