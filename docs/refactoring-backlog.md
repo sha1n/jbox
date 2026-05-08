@@ -283,12 +283,20 @@ capable device.
 With the trait in place, ~22 environmental `guard … else
 { Issue.record(…); return }` blocks (and 3 `throw
 CancellationError()` variants in `makeStoreWithThreeRoutes` and two
-test bodies) collapsed to direct force-unwraps:
+test bodies) collapsed to `try #require(...)` lookups:
 
 ```swift
-let src = store.devices.first(where: { $0.inputChannelCount  >= 1 })!
-let dst = store.devices.first(where: { $0.outputChannelCount >= 1 })!
+let src = try #require(store.devices.first(where: { $0.inputChannelCount  >= 1 }))
+let dst = try #require(store.devices.first(where: { $0.outputChannelCount >= 1 }))
 ```
+
+`try #require` rather than force-unwrap (`!`) because the suite trait
+walks Core Audio directly while test bodies enumerate via
+`JboxEngineC`. The two paths agree in practice, but if the engine's
+filtering ever diverges from raw enumeration, `try #require` surfaces
+a Swift Testing failure with the source location instead of a runtime
+crash. The 6 pre-existing force-unwraps on `directionInput` /
+`directionOutput` were converted to the same idiom for consistency.
 
 **Runtime IOProc condition (one test only).**
 `pollStatusesIsQuietOnRoutesWhenRunningCountersTick` additionally

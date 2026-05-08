@@ -100,7 +100,7 @@ struct EngineStoreTests {
     func deviceByUidLookup() throws {
         let store = try makeStore()
         store.refreshDevices()
-        let first = store.devices.first!
+        let first = try #require(store.devices.first)
         let looked = store.device(uid: first.uid)
         #expect(looked == first)
         #expect(store.device(uid: "no-such-uid") == nil)
@@ -110,8 +110,8 @@ struct EngineStoreTests {
     func addRouteInvalidMapping() throws {
         let store = try makeStore()
         store.refreshDevices()
-        let src = store.devices.first(where: { $0.directionInput })!
-        let dst = store.devices.first(where: { $0.directionOutput })!
+        let src = try #require(store.devices.first(where: { $0.directionInput }))
+        let dst = try #require(store.devices.first(where: { $0.directionOutput }))
 
         // Empty mapping — v1 invariant violation.
         let cfg = RouteConfig(
@@ -138,8 +138,8 @@ struct EngineStoreTests {
     func clearLastErrorDropsRecordedError() throws {
         let store = try makeStore()
         store.refreshDevices()
-        let src = store.devices.first(where: { $0.directionInput })!
-        let dst = store.devices.first(where: { $0.directionOutput })!
+        let src = try #require(store.devices.first(where: { $0.directionInput }))
+        let dst = try #require(store.devices.first(where: { $0.directionOutput }))
 
         // Drive lastError non-nil via the existing failure path.
         do {
@@ -168,8 +168,8 @@ struct EngineStoreTests {
         // remaining validator rejection.
         let store = try makeStore()
         store.refreshDevices()
-        let src = store.devices.first(where: { $0.directionInput })!
-        let dst = store.devices.first(where: { $0.directionOutput })!
+        let src = try #require(store.devices.first(where: { $0.directionInput }))
+        let dst = try #require(store.devices.first(where: { $0.directionOutput }))
 
         // Need both a second input channel and a shared dst to
         // isolate the dst-duplication case. Skip if the CI runner
@@ -196,8 +196,8 @@ struct EngineStoreTests {
     func addRouteLatencyMode() throws {
         let store = try makeStore()
         store.refreshDevices()
-        let src = store.devices.first(where: { $0.inputChannelCount  >= 1 })!
-        let dst = store.devices.first(where: { $0.outputChannelCount >= 1 })!
+        let src = try #require(store.devices.first(where: { $0.inputChannelCount  >= 1 }))
+        let dst = try #require(store.devices.first(where: { $0.outputChannelCount >= 1 }))
 
         // Baseline: three routes, one per tier. We don't start them —
         // the ring-sizing / setpoint effects are covered by C++
@@ -244,8 +244,8 @@ struct EngineStoreTests {
 
         // Pick devices with at least one input channel on one side and
         // one output channel on the other.
-        let src = store.devices.first(where: { $0.inputChannelCount  >= 1 })!
-        let dst = store.devices.first(where: { $0.outputChannelCount >= 1 })!
+        let src = try #require(store.devices.first(where: { $0.inputChannelCount  >= 1 }))
+        let dst = try #require(store.devices.first(where: { $0.outputChannelCount >= 1 }))
 
         let cfg = RouteConfig(
             source: DeviceReference(device: src),
@@ -267,7 +267,7 @@ struct EngineStoreTests {
     func channelNamesSizedToDevice() throws {
         let store = try makeStore()
         store.refreshDevices()
-        let src = store.devices.first(where: { $0.inputChannelCount >= 1 })!
+        let src = try #require(store.devices.first(where: { $0.inputChannelCount >= 1 }))
         let names = store.channelNames(uid: src.uid, direction: .input)
         #expect(names.count == Int(src.inputChannelCount))
         // Labels may be empty strings (simple built-in devices often
@@ -279,7 +279,7 @@ struct EngineStoreTests {
     func channelNamesCaching() throws {
         let store = try makeStore()
         store.refreshDevices()
-        let src = store.devices.first(where: { $0.inputChannelCount >= 1 })!
+        let src = try #require(store.devices.first(where: { $0.inputChannelCount >= 1 }))
         // Prime the cache.
         let first = store.channelNames(uid: src.uid, direction: .input)
         // Same call returns the same payload (cache hit; we're not
@@ -316,8 +316,8 @@ struct EngineStoreTests {
     func pollMetersNoRunningRoutes() throws {
         let store = try makeStore()
         store.refreshDevices()
-        let src = store.devices.first(where: { $0.inputChannelCount  >= 1 })!
-        let dst = store.devices.first(where: { $0.outputChannelCount >= 1 })!
+        let src = try #require(store.devices.first(where: { $0.inputChannelCount  >= 1 }))
+        let dst = try #require(store.devices.first(where: { $0.outputChannelCount >= 1 }))
         // Add a route but don't start it.
         _ = try store.addRoute(RouteConfig(
             source: DeviceReference(device: src),
@@ -332,8 +332,8 @@ struct EngineStoreTests {
     func pollMetersStoppedRoute() throws {
         let store = try makeStore()
         store.refreshDevices()
-        let src = store.devices.first(where: { $0.inputChannelCount  >= 1 })!
-        let dst = store.devices.first(where: { $0.outputChannelCount >= 1 })!
+        let src = try #require(store.devices.first(where: { $0.inputChannelCount  >= 1 }))
+        let dst = try #require(store.devices.first(where: { $0.outputChannelCount >= 1 }))
         let cfg = RouteConfig(
             source: DeviceReference(device: src),
             destination: DeviceReference(device: dst),
@@ -361,8 +361,8 @@ struct EngineStoreTests {
     func pollMetersPromotesHolds() throws {
         let store = try makeStore()
         store.refreshDevices()
-        let src = store.devices.first(where: { $0.inputChannelCount  >= 1 })!
-        let dst = store.devices.first(where: { $0.outputChannelCount >= 1 })!
+        let src = try #require(store.devices.first(where: { $0.inputChannelCount  >= 1 }))
+        let dst = try #require(store.devices.first(where: { $0.outputChannelCount >= 1 }))
         let cfg = RouteConfig(
             source: DeviceReference(device: src),
             destination: DeviceReference(device: dst),
@@ -385,8 +385,8 @@ struct EngineStoreTests {
     func removeRouteClearsHolds() throws {
         let store = try makeStore()
         store.refreshDevices()
-        let src = store.devices.first(where: { $0.inputChannelCount  >= 1 })!
-        let dst = store.devices.first(where: { $0.outputChannelCount >= 1 })!
+        let src = try #require(store.devices.first(where: { $0.inputChannelCount  >= 1 }))
+        let dst = try #require(store.devices.first(where: { $0.outputChannelCount >= 1 }))
         let cfg = RouteConfig(
             source: DeviceReference(device: src),
             destination: DeviceReference(device: dst),
@@ -423,8 +423,8 @@ struct EngineStoreTests {
     func renameRoutePreservesIdAndLocalName() throws {
         let store = try makeStore()
         store.refreshDevices()
-        let src = store.devices.first(where: { $0.inputChannelCount  >= 1 })!
-        let dst = store.devices.first(where: { $0.outputChannelCount >= 1 })!
+        let src = try #require(store.devices.first(where: { $0.inputChannelCount  >= 1 }))
+        let dst = try #require(store.devices.first(where: { $0.outputChannelCount >= 1 }))
         let cfg = RouteConfig(
             source: DeviceReference(device: src),
             destination: DeviceReference(device: dst),
@@ -456,8 +456,8 @@ struct EngineStoreTests {
     func replaceRouteRenameFastPath() throws {
         let store = try makeStore()
         store.refreshDevices()
-        let src = store.devices.first(where: { $0.inputChannelCount  >= 1 })!
-        let dst = store.devices.first(where: { $0.outputChannelCount >= 1 })!
+        let src = try #require(store.devices.first(where: { $0.inputChannelCount  >= 1 }))
+        let dst = try #require(store.devices.first(where: { $0.outputChannelCount >= 1 }))
         let original = RouteConfig(
             source: DeviceReference(device: src),
             destination: DeviceReference(device: dst),
@@ -480,8 +480,8 @@ struct EngineStoreTests {
     func replaceRouteUnknownId() throws {
         let store = try makeStore()
         store.refreshDevices()
-        let src = store.devices.first(where: { $0.inputChannelCount  >= 1 })!
-        let dst = store.devices.first(where: { $0.outputChannelCount >= 1 })!
+        let src = try #require(store.devices.first(where: { $0.inputChannelCount  >= 1 }))
+        let dst = try #require(store.devices.first(where: { $0.outputChannelCount >= 1 }))
         let anchor = try store.addRoute(RouteConfig(
             source: DeviceReference(device: src),
             destination: DeviceReference(device: dst),
@@ -510,8 +510,8 @@ struct EngineStoreTests {
     func replaceRouteRollbackKeepsOriginalRoute() throws {
         let store = try makeStore()
         store.refreshDevices()
-        let src = store.devices.first(where: { $0.inputChannelCount  >= 1 })!
-        let dst = store.devices.first(where: { $0.outputChannelCount >= 1 })!
+        let src = try #require(store.devices.first(where: { $0.inputChannelCount  >= 1 }))
+        let dst = try #require(store.devices.first(where: { $0.outputChannelCount >= 1 }))
 
         let originalConfig = RouteConfig(
             source: DeviceReference(device: src),
@@ -622,8 +622,8 @@ struct EngineStoreTests {
     func runningRouteCountOnlyRunning() throws {
         let store = try makeStore()
         store.refreshDevices()
-        let src = store.devices.first(where: { $0.inputChannelCount  >= 1 })!
-        let dst = store.devices.first(where: { $0.outputChannelCount >= 1 })!
+        let src = try #require(store.devices.first(where: { $0.inputChannelCount  >= 1 }))
+        let dst = try #require(store.devices.first(where: { $0.outputChannelCount >= 1 }))
         // Three routes; we'll start only the middle one.
         let a = try store.addRoute(RouteConfig(
             source: DeviceReference(device: src),
@@ -682,8 +682,8 @@ struct EngineStoreTests {
         // route states are whatever they were before the call.
         let store = try makeStore()
         store.refreshDevices()
-        let src = store.devices.first(where: { $0.inputChannelCount  >= 1 })!
-        let dst = store.devices.first(where: { $0.outputChannelCount >= 1 })!
+        let src = try #require(store.devices.first(where: { $0.inputChannelCount  >= 1 }))
+        let dst = try #require(store.devices.first(where: { $0.outputChannelCount >= 1 }))
         let a = try store.addRoute(RouteConfig(
             source: DeviceReference(device: src),
             destination: DeviceReference(device: dst),
@@ -719,8 +719,8 @@ struct EngineStoreTests {
         // immediately before.
         let store = try makeStore()
         store.refreshDevices()
-        let src = store.devices.first(where: { $0.inputChannelCount  >= 1 })!
-        let dst = store.devices.first(where: { $0.outputChannelCount >= 1 })!
+        let src = try #require(store.devices.first(where: { $0.inputChannelCount  >= 1 }))
+        let dst = try #require(store.devices.first(where: { $0.outputChannelCount >= 1 }))
         let a = try store.addRoute(RouteConfig(
             source: DeviceReference(device: src),
             destination: DeviceReference(device: dst),
@@ -758,8 +758,8 @@ struct EngineStoreTests {
     func replaceRouteMappingEditAssignsNewId() throws {
         let store = try makeStore()
         store.refreshDevices()
-        let src = store.devices.first(where: { $0.inputChannelCount  >= 1 })!
-        let dst = store.devices.first(where: { $0.outputChannelCount >= 1 })!
+        let src = try #require(store.devices.first(where: { $0.inputChannelCount  >= 1 }))
+        let dst = try #require(store.devices.first(where: { $0.outputChannelCount >= 1 }))
         // Only meaningful when we have at least one spare src or dst
         // channel to swap into the mapping. Skip otherwise.
         guard src.inputChannelCount >= 2 || dst.outputChannelCount >= 2 else {
@@ -815,8 +815,8 @@ struct EngineStoreTests {
     {
         let store = try makeStore()
         store.refreshDevices()
-        let src = store.devices.first(where: { $0.inputChannelCount  >= 1 })!
-        let dst = store.devices.first(where: { $0.outputChannelCount >= 1 })!
+        let src = try #require(store.devices.first(where: { $0.inputChannelCount  >= 1 }))
+        let dst = try #require(store.devices.first(where: { $0.outputChannelCount >= 1 }))
         func cfg(_ name: String) -> RouteConfig {
             RouteConfig(
                 source: DeviceReference(device: src),
@@ -985,8 +985,8 @@ struct EngineStoreTests {
         // preserving their relative order, with b and c staying.
         let store = try makeStore()
         store.refreshDevices()
-        let src = store.devices.first(where: { $0.inputChannelCount  >= 1 })!
-        let dst = store.devices.first(where: { $0.outputChannelCount >= 1 })!
+        let src = try #require(store.devices.first(where: { $0.inputChannelCount  >= 1 }))
+        let dst = try #require(store.devices.first(where: { $0.outputChannelCount >= 1 }))
         func cfg(_ name: String) -> RouteConfig {
             RouteConfig(
                 source: DeviceReference(device: src),
@@ -1017,8 +1017,8 @@ struct EngineStoreTests {
     func moveRouteSingleRowList() throws {
         let store = try makeStore()
         store.refreshDevices()
-        let src = store.devices.first(where: { $0.inputChannelCount  >= 1 })!
-        let dst = store.devices.first(where: { $0.outputChannelCount >= 1 })!
+        let src = try #require(store.devices.first(where: { $0.inputChannelCount  >= 1 }))
+        let dst = try #require(store.devices.first(where: { $0.outputChannelCount >= 1 }))
         let route = try store.addRoute(RouteConfig(
             source: DeviceReference(device: src),
             destination: DeviceReference(device: dst),
@@ -1153,8 +1153,8 @@ struct EngineStoreTests {
     func refreshStatusPublishesRouteCounters() throws {
         let store = try makeStore()
         store.refreshDevices()
-        let src = store.devices.first(where: { $0.inputChannelCount  >= 1 })!
-        let dst = store.devices.first(where: { $0.outputChannelCount >= 1 })!
+        let src = try #require(store.devices.first(where: { $0.inputChannelCount  >= 1 }))
+        let dst = try #require(store.devices.first(where: { $0.outputChannelCount >= 1 }))
         let route = try store.addRoute(RouteConfig(
             source: DeviceReference(device: src),
             destination: DeviceReference(device: dst),
@@ -1369,8 +1369,8 @@ struct EngineStoreTests {
     func pollStatusesIsQuietOnRoutesWhenRunningCountersTick() throws {
         let store = try makeStore()
         store.refreshDevices()
-        let src = store.devices.first(where: { $0.inputChannelCount  >= 1 })!
-        let dst = store.devices.first(where: { $0.outputChannelCount >= 1 })!
+        let src = try #require(store.devices.first(where: { $0.inputChannelCount  >= 1 }))
+        let dst = try #require(store.devices.first(where: { $0.outputChannelCount >= 1 }))
         let route = try store.addRoute(RouteConfig(
             source: DeviceReference(device: src),
             destination: DeviceReference(device: dst),
