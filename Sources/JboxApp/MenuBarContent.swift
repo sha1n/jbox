@@ -86,7 +86,7 @@ struct MenuBarContent: View {
             Image(systemName: headerIconName(for: store.overallState))
                 .foregroundStyle(headerIconColor(for: store.overallState))
             VStack(alignment: .leading, spacing: 0) {
-                Text("Jbox")
+                Text("JBox")
                     .font(.headline)
                 Text(summary)
                     .font(.caption)
@@ -175,7 +175,7 @@ struct MenuBarContent: View {
             Button {
                 openOrRaiseMainWindow()
             } label: {
-                menuRowLabel("Open Jbox")
+                menuRowLabel("Open JBox")
             }
             .buttonStyle(.plain)
 
@@ -190,7 +190,7 @@ struct MenuBarContent: View {
             Button {
                 NSApp.terminate(nil)
             } label: {
-                menuRowLabel("Quit Jbox")
+                menuRowLabel("Quit JBox")
             }
             .buttonStyle(.plain)
         }
@@ -203,7 +203,7 @@ struct MenuBarContent: View {
     /// item — but we still walk `NSApp.windows` here to deminiaturize
     /// a hidden-but-existing window cleanly without round-tripping
     /// through `openWindow(id:)`. Filters out `NSPanel` (the menu bar
-    /// popover) and matches the "Jbox" title so the Settings window
+    /// popover) and matches the "JBox" title so the Settings window
     /// is skipped.
     private func openOrRaiseMainWindow() {
         NSApp.activate(ignoringOtherApps: true)
@@ -221,10 +221,10 @@ struct MenuBarContent: View {
         // Skip panels — the menu bar extra's popover is one, as are
         // various AppKit utility windows we don't want to target.
         guard !(window is NSPanel) else { return false }
-        // `Window("Jbox", id: "main")` titles its instance "Jbox".
+        // `Window("JBox", id: "main")` titles its instance "JBox".
         // Settings window carries its own title; status popovers have
         // empty titles.
-        return window.title == "Jbox"
+        return window.title == "JBox"
     }
 
     private func menuRowLabel(_ title: String) -> some View {

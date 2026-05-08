@@ -12,7 +12,7 @@
 
 ## 1. Motivation
 
-Today a Jbox route passes audio through with no level control — input level into the source device is the only knob the user has. Use cases for a per-route fader:
+Today a JBox route passes audio through with no level control — input level into the source device is the only knob the user has. Use cases for a per-route fader:
 
 - Trim a route that's hot enough to clip the destination's preamp / converter.
 - Bring a quiet route up by a few dB to match peers.
@@ -105,7 +105,7 @@ Faders, trims, and mute state persist via `StateStore` / `StoredRoute` (additive
 
 Today's `MeterPanel` uses purely numeric labels (`1`, `2`, …). The new mixer strip wires up the existing — but currently unused — `EngineStore.channelNames(uid:direction:)` + `ChannelLabel.format(index:names:)` infrastructure to show the driver-published name when one exists.
 
-**Per-strip header.** Each strip's header shows the **source channel** name (the `mapping[i].src` side), formatted via `ChannelLabel.format` so it falls back to `"Ch N"` when the device publishes nothing for that channel. Source side wins because in a typical Jbox topology the destination is the user's predictable interface (main outs, monitor pair) while the source varies (different mics, different software outputs) — the more informative side.
+**Per-strip header.** Each strip's header shows the **source channel** name (the `mapping[i].src` side), formatted via `ChannelLabel.format` so it falls back to `"Ch N"` when the device publishes nothing for that channel. Source side wins because in a typical JBox topology the destination is the user's predictable interface (main outs, monitor pair) while the source varies (different mics, different software outputs) — the more informative side.
 
 **Width handling.** Long names (`"ADAT In 7 (Talkback)"`) truncate with `...` at the strip width. Full text and the full `src → dst` pair are exposed via the SwiftUI `.help(...)` tooltip on the strip header — accessible to both pointer hover and VoiceOver.
 

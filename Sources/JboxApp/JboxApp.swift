@@ -34,7 +34,7 @@ struct JboxApp: App {
         // spawning a duplicate. `WindowGroup` would allow multiple
         // copies, which the spec § 4.2 ("a single main window") and the
         // Phase 6 follow-up (docs/plan.md:358) explicitly rule out.
-        Window("Jbox", id: Self.mainWindowId) {
+        Window("JBox", id: Self.mainWindowId) {
             AppRootView(appState: appState)
                 .preferredColorScheme(colorScheme)
                 .onChange(of: scenePhase) { _, phase in
@@ -138,9 +138,9 @@ struct GeneralPreferencesView: View {
         + "menu-bar icon currently shows a static state."
 
     private static let firstTimeNoteMessage =
-        "Jbox will start automatically when you log in. Routes restored "
+        "JBox will start automatically when you log in. Routes restored "
         + "from your saved configuration stay stopped until you start "
-        + "them — Jbox does not auto-start audio on login."
+        + "them — JBox does not auto-start audio on login."
 
     var body: some View {
         Form {
@@ -285,7 +285,7 @@ struct AudioPreferencesView: View {
         + "re-build its converter."
 
     private static let bufferHintFooter =
-        "Jbox has no global HAL buffer-size setting. Per-route, the "
+        "JBox has no global HAL buffer-size setting. Per-route, the "
         + "Performance latency tier exposes a Buffer size preference "
         + "(written via kAudioDevicePropertyBufferFrameSize, no hog "
         + "mode); macOS resolves the actual buffer as the max across "
@@ -818,14 +818,14 @@ struct MenuBarIconLabel: View {
     }
 
     private var accessibilityLabel: String {
-        guard let store else { return "Jbox, starting" }
+        guard let store else { return "JBox, starting" }
         switch store.overallState {
-        case .idle:      return "Jbox, all routes stopped"
+        case .idle:      return "JBox, all routes stopped"
         case .running:
             let n = store.runningRouteCount
-            if n == 0 { return "Jbox, routes starting" }
-            return n == 1 ? "Jbox, 1 route running" : "Jbox, \(n) routes running"
-        case .attention: return "Jbox, attention needed"
+            if n == 0 { return "JBox, routes starting" }
+            return n == 1 ? "JBox, 1 route running" : "JBox, \(n) routes running"
+        case .attention: return "JBox, attention needed"
         }
     }
 }

@@ -1,8 +1,8 @@
-# Jbox — Technical Specification
+# JBox — Technical Specification
 
 **Status:** Draft v1 — design locked, ready for implementation.
 **Target platform:** macOS 15 (Sequoia) and later.
-**Scope:** this document is the authoritative technical specification for Jbox v1. It is a living document; as implementation decisions refine the design, updates are committed here.
+**Scope:** this document is the authoritative technical specification for JBox v1. It is a living document; as implementation decisions refine the design, updates are committed here.
 
 ---
 
@@ -20,17 +20,17 @@
 
 ## Preamble — Product Goals and Non-Goals
 
-### What Jbox is
+### What JBox is
 
-Jbox is a **native macOS audio routing utility** that takes selected channels from one Core Audio device and routes them — in real time, with minimal latency — to selected channels on another Core Audio device. The app supports an arbitrary number of simultaneous routes, handles devices with independent clocks through drift compensation, and recovers gracefully from device disconnect / reconnect events.
+JBox is a **native macOS audio routing utility** that takes selected channels from one Core Audio device and routes them — in real time, with minimal latency — to selected channels on another Core Audio device. The app supports an arbitrary number of simultaneous routes, handles devices with independent clocks through drift compensation, and recovers gracefully from device disconnect / reconnect events.
 
 The motivating workflow is routing two output channels of a Roland V31 USB sound module into two virtual output channels of a Universal Audio Apollo so that UA Console can apply inserts and sends. But nothing in the design is specific to those devices — any Core Audio input-capable device can feed any Core Audio output-capable device.
 
-### What Jbox is not
+### What JBox is not
 
-- **Not a fan-in / summing mixer.** Jbox does 1:N channel mapping (fan-out allowed) but never sums multiple sources into one destination. Per-route VCA, per-channel trim, route + per-channel mute have shipped — see § 2.14.
+- **Not a fan-in / summing mixer.** JBox does 1:N channel mapping (fan-out allowed) but never sums multiple sources into one destination. Per-route VCA, per-channel trim, route + per-channel mute have shipped — see § 2.14.
 - **Not a DAW.** No recording, no plugins, no timeline, no MIDI.
-- **Does not ship its own audio driver.** Jbox does not create or install a virtual audio device. The recommended topology for combining a live hardware source with media-app audio at the same physical destination uses macOS's native **aggregate device** mechanism plus the destination interface's hardware mixer (§ 2.13) — no third-party install, no virtual driver. Users who do not have a hardware-mixer-equipped interface can substitute a third-party loopback driver such as [BlackHole](https://github.com/ExistentialAudio/BlackHole) for the aggregate device; Jbox treats it as an ordinary Core Audio device and needs no driver-specific code. An in-house `AudioServerPlugIn` was prototyped (archive branch `archive/phase7.6-own-driver`) and abandoned on 2026-04-23 when ad-hoc-signed bundles failed the macOS 13+ HAL-sandbox codesign check; the project's "no paid Apple Developer Program" constraint rules out Developer-ID signing that would have unblocked the own-driver path. DriverKit kernel extensions remain permanently out of scope.
+- **Does not ship its own audio driver.** JBox does not create or install a virtual audio device. The recommended topology for combining a live hardware source with media-app audio at the same physical destination uses macOS's native **aggregate device** mechanism plus the destination interface's hardware mixer (§ 2.13) — no third-party install, no virtual driver. Users who do not have a hardware-mixer-equipped interface can substitute a third-party loopback driver such as [BlackHole](https://github.com/ExistentialAudio/BlackHole) for the aggregate device; JBox treats it as an ordinary Core Audio device and needs no driver-specific code. An in-house `AudioServerPlugIn` was prototyped (archive branch `archive/phase7.6-own-driver`) and abandoned on 2026-04-23 when ad-hoc-signed bundles failed the macOS 13+ HAL-sandbox codesign check; the project's "no paid Apple Developer Program" constraint rules out Developer-ID signing that would have unblocked the own-driver path. DriverKit kernel extensions remain permanently out of scope.
 - **Not a broadcast router.** No network audio (Dante, AVB, NDI), no IP streaming.
 
 ### Core design principles
@@ -38,7 +38,7 @@ The motivating workflow is routing two output channels of a Roland V31 USB sound
 1. **Pro-audio routing semantics.** Channel numbering, device identity, and per-route lifecycle match how pro-audio practitioners think about routing. Channels are 1-indexed in the UI (0-indexed internally). Devices are identified by their Core Audio UID, which is stable across reboots and reconnects.
 2. **Top-performance real-time engine.** The audio-processing path is written in C++ with strict real-time discipline: no allocations, no locks, no syscalls on the audio thread.
 3. **UI is replaceable.** The engine is an independent library with a stable public C API. The entire v1 SwiftUI UI could be replaced by a CLI, a web UI, an AppKit UI, or anything else, without touching the engine.
-4. **Do not step on other apps.** Jbox does not create aggregate devices, does not change device sample rates, and does not change device buffer sizes without explicit user opt-in. Other apps sharing the same hardware are unaffected by Jbox's presence.
+4. **Do not step on other apps.** JBox does not create aggregate devices, does not change device sample rates, and does not change device buffer sizes without explicit user opt-in. Other apps sharing the same hardware are unaffected by JBox's presence.
 5. **Personal use first.** v1 does not require a paid Apple Developer Program subscription, does not require anyone to use the Xcode IDE, and does not require Mac App Store distribution. Xcode.app must be installed for its frameworks (see § 5.2 for details), but development can happen entirely from the command line in any editor. The build produces an ad-hoc-signed `.app` that runs on the user's Mac, and optionally packages an unsigned `.dmg` for sharing with a small audience (with right-click → Open Gatekeeper instructions).
 
 ---
@@ -95,7 +95,7 @@ destination device IOProc (RT thread)
 - **App Sandbox:** **off.** Sandbox restrictions conflict with HAL-level device control. This is the standard choice for pro-audio utilities (Loopback, Audio Hijack, SoundSource, etc. are all unsandboxed).
 - **Hardened Runtime:** **on.** Compatible with all app behavior; required for notarization if that ever becomes relevant.
 - **Entitlement `com.apple.security.device.audio-input`:** **on.** Required for Core Audio device access — macOS treats any input-capable device as "microphone-class."
-- **`NSMicrophoneUsageDescription` key in Info.plist:** required. Populated with a clear user-facing explanation: "Jbox needs access to your audio devices to route audio between them."
+- **`NSMicrophoneUsageDescription` key in Info.plist:** required. Populated with a clear user-facing explanation: "JBox needs access to your audio devices to route audio between them."
 - **No Mac App Store distribution ever.** Sandboxing would force architectural compromises incompatible with the near-zero-latency goal.
 
 ### 1.6 Versioning of the bridge API
@@ -111,7 +111,7 @@ destination device IOProc (RT thread)
 
 ## Section 2 — Audio Engine Internals (C++)
 
-This is the most performance-critical section of the system. Design choices here determine whether Jbox meets its latency and reliability goals.
+This is the most performance-critical section of the system. Design choices here determine whether JBox meets its latency and reliability goals.
 
 ### 2.1 Why per-device HAL IOProcs (not aggregate devices)
 
@@ -120,7 +120,7 @@ macOS offers two broad approaches to cross-device routing:
 - **Aggregate Device approach:** create a composite device that contains both source and destination, rely on macOS's built-in drift correction. Used by pro DAWs (Logic, Cubase, Pro Tools, Ableton Live) when they need multi-device support — but DAWs only need to see "one device" once audio enters their internal graph.
 - **Per-device HAL IOProc approach:** register an IOProc on each device, bridge them with lock-free ring buffers, implement drift correction ourselves. Used by pro routing tools (Loopback, Audio Hijack, Dante Via).
 
-Jbox uses the **per-device HAL IOProc approach** because Jbox is a routing tool, not a DAW. Specifically:
+JBox uses the **per-device HAL IOProc approach** because JBox is a routing tool, not a DAW. Specifically:
 
 - Aggregate devices are a **global system resource**; creating or modifying one disrupts other apps using those devices (e.g., Logic or UA Console would lose connection mid-session).
 - Aggregate devices have a single primary clock; all drift correction is relative to it, limiting quality for many-to-many routing.
@@ -273,7 +273,7 @@ The `activeInputRoutes` pointer is swapped atomically (RCU-style) when a route i
 
 Exclusivity is structural, not via hog mode: the duplex registration fails if any other IOProc (input, output, or another duplex) is already open on the same device, and the attach path refuses to start if a mux exists for the UID. Performance-mode same-device routes own the device's IOProc surface while they run. Cross-device Performance routes (different UIDs) continue to use the mux + ring + SRC path.
 
-**HAL buffer-frame-size: user-driven default, optional per-route preference.** Phase 7.6 removed hog-mode acquisition entirely (ABI v9 → v10 MAJOR), then re-introduced a single no-hog `kAudioDevicePropertyBufferFrameSize` write as a per-route preference (ABI v10 → v11 MINOR additive — see "Per-route HAL buffer-frame-size preference" below for the full mechanism). When a route carries no preference (`bufferFrames == nil`), Jbox reads `currentBufferFrameSize` for the latency pill estimate and otherwise leaves the device alone — the buffer is whatever the user has configured in their interface software (UA Console, RME TotalMix, MOTU CueMix, Audio MIDI Setup, etc.). The earlier hog-mode + exclusive-claim path was the source of two reproducible failure modes on real-hardware aggregates — silent IOProc-scheduler stalls when buffer-size writes fanned out to sub-devices Jbox didn't fully own under hog, and `HALS_PlugIn::HostInterface_PropertiesChanged: the object is not valid` cascades that destabilised co-resident clients (notably crashed a running DAW sharing the aggregate). The v11 walk-back is empirically safe because the cascade was hog-eviction-side, not property-write-side: Superior Drummer (and other low-latency apps) write `kAudioDevicePropertyBufferFrameSize` on shared devices every day without disturbing co-resident clients. See plan.md § Phase 7.6 deviations for the full chain.
+**HAL buffer-frame-size: user-driven default, optional per-route preference.** Phase 7.6 removed hog-mode acquisition entirely (ABI v9 → v10 MAJOR), then re-introduced a single no-hog `kAudioDevicePropertyBufferFrameSize` write as a per-route preference (ABI v10 → v11 MINOR additive — see "Per-route HAL buffer-frame-size preference" below for the full mechanism). When a route carries no preference (`bufferFrames == nil`), JBox reads `currentBufferFrameSize` for the latency pill estimate and otherwise leaves the device alone — the buffer is whatever the user has configured in their interface software (UA Console, RME TotalMix, MOTU CueMix, Audio MIDI Setup, etc.). The earlier hog-mode + exclusive-claim path was the source of two reproducible failure modes on real-hardware aggregates — silent IOProc-scheduler stalls when buffer-size writes fanned out to sub-devices JBox didn't fully own under hog, and `HALS_PlugIn::HostInterface_PropertiesChanged: the object is not valid` cascades that destabilised co-resident clients (notably crashed a running DAW sharing the aggregate). The v11 walk-back is empirically safe because the cascade was hog-eviction-side, not property-write-side: Superior Drummer (and other low-latency apps) write `kAudioDevicePropertyBufferFrameSize` on shared devices every day without disturbing co-resident clients. See plan.md § Phase 7.6 deviations for the full chain.
 
 **Latency across co-sourced routes.** When two routes share a source but target different destinations, each destination has its own HAL latency (`kAudioDevicePropertyLatency` + `kAudioDevicePropertySafetyOffset`) and its own drift-correction PI loop locking to its own clock. The two outputs therefore carry a fixed delay difference equal to the difference of the two pills (§ 2.12) — small on similarly-buffered destinations, large when one destination is HDMI / AirPlay and the other is a low-latency USB interface. Users who need phase coherence across destinations should route through an aggregate device; users who only need the relative delay below the chorus threshold should pick a tighter latency tier on both routes.
 
@@ -292,7 +292,7 @@ The Performance vs Low vs Off distinction lives entirely in *ring sizing* now: e
 - **No `kAudioDevicePropertyHogMode`.** No hog claim, no hog release, no `claimExclusive` / `releaseExclusive` on `IDeviceBackend`. The cascade that destabilised co-resident clients was hog-eviction-side, not property-write-side; the v11 walk-back is contingent on staying out of the eviction path.
 - **No additional HAL property writes.** No sample-rate write, no `IOMode` write, no `kAudioHardwarePropertyDefaultOutputDevice` write, no stream-format write. Reading any HAL property is fine; writing is opt-in per Preamble Core Design Principle #4 ("Do not step on other apps").
 - **No buffer-coordination state on `DeviceIOMux`.** The mux is strictly an IOProc multiplexer (`(key, callback, user_data)` + `this`). `non_sharing_attached_`, `last_requested_frames_`, `exclusive_claimed_`, `requested_buffer_frames`, `updateBufferRequest`, `currentMinBufferRequest` are gone and stay gone.
-- **No "share device" toggle, `BufferSizePolicy` enum, "Routing defaults" preference, or `SharingPill` view.** Each fronted hog-mode behaviour. Jbox is share-only by construction.
+- **No "share device" toggle, `BufferSizePolicy` enum, "Routing defaults" preference, or `SharingPill` view.** Each fronted hog-mode behaviour. JBox is share-only by construction.
 - **No engine-driven hog or buffer fan-out from device hot-plug, sleep/wake, or teardown reactions** (sub-phases 7.6.3 / 7.6.4 / 7.6.5 / 7.6.6). Reactions are: stop affected routes, transition to WAITING, retry on reappearance / wake.
 
 The grounding evidence — silent IOProc-scheduler stalls under partial hog, and HAL `PropertiesChanged: the object is not valid` cascades that crashed co-resident DAWs — is preserved in `plan.md § Phase 7.6` deviations.
@@ -393,21 +393,21 @@ The engine computes this once at `startRoute` (no RT-thread cost) and surfaces i
 
 ### 2.13 Multi-source low-latency monitoring topology
 
-**Purpose.** Document the recommended topology for combining a live hardware source (an instrument, a synth module, a hardware preamp) with media-app audio (a browser, a DAW's playback bus, a video-call client) at the same physical monitor outputs, with the live source running at the lowest latency the destination interface can sustain and the media apps running at whatever buffer size they prefer — without one constraining the other. macOS Core Audio's per-device "max across clients" buffer policy makes this impossible on a single shared real device (see § 2.7). The reconciliation Jbox supports in v1 builds on two primitives the platform already provides: macOS aggregate devices and the destination interface's own hardware mixer.
+**Purpose.** Document the recommended topology for combining a live hardware source (an instrument, a synth module, a hardware preamp) with media-app audio (a browser, a DAW's playback bus, a video-call client) at the same physical monitor outputs, with the live source running at the lowest latency the destination interface can sustain and the media apps running at whatever buffer size they prefer — without one constraining the other. macOS Core Audio's per-device "max across clients" buffer policy makes this impossible on a single shared real device (see § 2.7). The reconciliation JBox supports in v1 builds on two primitives the platform already provides: macOS aggregate devices and the destination interface's own hardware mixer.
 
-**Recommended setup.** Three pieces, none of which Jbox has to ship:
+**Recommended setup.** Three pieces, none of which JBox has to ship:
 
 1. **Aggregate device** combining the user's hardware source(s) and destination interface, configured once in **Audio MIDI Setup**. The aggregate is set as the macOS system output, so all media apps render to it.
-2. **A single Jbox route** whose source UID and destination UID are the aggregate device's UID (a "self-route" through the aggregate, in Performance tier). The mapping picks specific source channels — typically the live instrument's input pair — and routes them to specific output channels of the destination interface that the interface treats as a separate playback feed (e.g., a virtual-playback pair distinct from the pair the system output is feeding).
+2. **A single JBox route** whose source UID and destination UID are the aggregate device's UID (a "self-route" through the aggregate, in Performance tier). The mapping picks specific source channels — typically the live instrument's input pair — and routes them to specific output channels of the destination interface that the interface treats as a separate playback feed (e.g., a virtual-playback pair distinct from the pair the system output is feeding).
 3. **A hardware mixer on the destination interface** (Universal Audio Console, RME TotalMix, MOTU CueMix, Native Instruments KKAudio, similar) configured to sum both playback feeds onto the physical monitor outputs.
 
-The aggregate output isolates media apps from the live route at the IOProc dispatch level — apps render into the aggregate, Jbox runs its own duplex IOProc on the aggregate, the hardware mixer at the destination interface sums everything onto the physical monitor outputs.
+The aggregate output isolates media apps from the live route at the IOProc dispatch level — apps render into the aggregate, JBox runs its own duplex IOProc on the aggregate, the hardware mixer at the destination interface sums everything onto the physical monitor outputs.
 
-**Buffer size: user-managed, with an optional per-route preference.** Phase 7.6 removed Jbox's hog-mode and aggressive buffer-shrink negotiation. The user dials their interface buffer in their interface software once (UA Console / RME TotalMix / MOTU CueMix / Audio MIDI Setup); Jbox respects whatever it finds, and the latency pill reflects the honest end-to-end estimate. Anyone running a DAW already manages their interface buffer the same way. For the rare case the interface software does not expose a buffer control or does not go small enough, an optional per-route `RouteConfig.bufferFrames` preference (ABI v11, see § 2.7 "Per-route HAL buffer-frame-size preference") issues a single no-hog `setBufferFrameSize` write per device at route start; macOS still resolves `max-across-clients`, so co-resident apps remain unaffected.
+**Buffer size: user-managed, with an optional per-route preference.** Phase 7.6 removed JBox's hog-mode and aggressive buffer-shrink negotiation. The user dials their interface buffer in their interface software once (UA Console / RME TotalMix / MOTU CueMix / Audio MIDI Setup); JBox respects whatever it finds, and the latency pill reflects the honest end-to-end estimate. Anyone running a DAW already manages their interface buffer the same way. For the rare case the interface software does not expose a buffer control or does not go small enough, an optional per-route `RouteConfig.bufferFrames` preference (ABI v11, see § 2.7 "Per-route HAL buffer-frame-size preference") issues a single no-hog `setBufferFrameSize` write per device at route start; macOS still resolves `max-across-clients`, so co-resident apps remain unaffected.
 
 **Engine contract.** Self-routes (source UID == destination UID) on the duplex fast path are first-class — see § 2.3 (Route lifecycle) and § 2.7 (Per-device coordination). The duplex IOProc copies mapped source channels into mapped destination channels in one RT callback; latency collapses to HAL round-trip + one buffer period at whatever buffer the device is at.
 
-**Reliability surface.** Self-routing reliability requires Jbox to react to device topology and power-state changes that no longer permit the route to run safely (sub-phases 7.6.4 / 7.6.5 / 7.6.6 / 7.6.7 — engine halves shipped; production HAL listener wiring (`docs/followups.md` § F1) and `MacosPowerEventSource` (`§ F2`) are tracked as hardware-gated follow-ups):
+**Reliability surface.** Self-routing reliability requires JBox to react to device topology and power-state changes that no longer permit the route to run safely (sub-phases 7.6.4 / 7.6.5 / 7.6.6 / 7.6.7 — engine halves shipped; production HAL listener wiring (`docs/followups.md` § F1) and `MacosPowerEventSource` (`§ F2`) are tracked as hardware-gated follow-ups):
 
 - **Device hot-plug / hot-unplug.** Per-device `kAudioDevicePropertyDeviceIsAlive` and `kAudioHardwarePropertyDevices` listeners transition affected routes to WAITING the moment the device disappears. Reappearance auto-recovers via the existing WAITING → RUNNING tick. `last_error = JBOX_ERR_DEVICE_GONE` (ABI v12) on the WAITING transition so the UI can differentiate "yanked, recovering" from "first plug-in pending" (`JBOX_OK`).
 - **Aggregate sub-device topology.** `BackendDeviceInfo::is_aggregate` + `aggregate_member_uids` (populated during `enumerate()`) feed each route's `RouteRecord::watched_uids` set so a `kDeviceIsNotAlive` event on any active sub-device of a route's aggregate matches the route. `kAudioAggregateDevicePropertyActiveSubDeviceList` events trigger a `dm_.refresh()` + per-affected-route re-expansion + member-loss check inside `RouteManager::handleDeviceChanges`. Reactions are idempotent (multiple cascade events in a single drain collapse to one refresh + one retry pass); a future watcher-side debounce refinement is tracked as `docs/followups.md` § F3.
@@ -422,13 +422,13 @@ The aggregate output isolates media apps from the live route at the IOProc dispa
 
 **Packaging.** The existing ad-hoc-signed `.dmg` lane (§ 1.5) is the only distribution lane. No third-party install, no privileged installer helper, no privileged `SMAppService` registration (no `loginItem(_:)`, `agent(_:)`, or `daemon(_:)` registrations — those would require notarization and Developer ID), no notarization. The "no paid Apple Developer Program" constraint stays intact end to end. *(Note: the user-facing Launch-at-login toggle in § 4.6 General uses `SMAppService.mainApp.register()`, which is a different API — it works ad-hoc-signed and requires no Developer ID.)*
 
-**Alternative transport (BlackHole).** Users without a hardware-mixer-equipped destination interface can substitute a third-party loopback driver such as [BlackHole](https://github.com/ExistentialAudio/BlackHole) for the aggregate device's "media-app target" role — apps target the loopback device, Jbox routes the loopback's input back out to the real destination. From Jbox's perspective the loopback is an ordinary Core Audio device; no loopback-specific code is needed.
+**Alternative transport (BlackHole).** Users without a hardware-mixer-equipped destination interface can substitute a third-party loopback driver such as [BlackHole](https://github.com/ExistentialAudio/BlackHole) for the aggregate device's "media-app target" role — apps target the loopback device, JBox routes the loopback's input back out to the real destination. From JBox's perspective the loopback is an ordinary Core Audio device; no loopback-specific code is needed.
 
 **Non-goals.**
 
-- **Shipping our own HAL plugin or DriverKit DEXT.** Archived — see § 1's "What Jbox is not".
-- **Fan-in / summing inside Jbox.** v1 explicitly does not sum (§ 2.15 Deferred). The destination interface's hardware mixer is the summing point; users without one can layer in a third-party loopback driver as above but Jbox still does not sum.
-- **Auto-creating aggregate devices.** Aggregate devices are user-managed in Audio MIDI Setup; Jbox neither creates nor modifies them.
+- **Shipping our own HAL plugin or DriverKit DEXT.** Archived — see § 1's "What JBox is not".
+- **Fan-in / summing inside JBox.** v1 explicitly does not sum (§ 2.15 Deferred). The destination interface's hardware mixer is the summing point; users without one can layer in a third-party loopback driver as above but JBox still does not sum.
+- **Auto-creating aggregate devices.** Aggregate devices are user-managed in Audio MIDI Setup; JBox neither creates nor modifies them.
 
 The phase checklist, sub-phase breakdown, and deviations live in [plan.md § Phase 7.6](./plan.md#phase-76--self-routing-reliability).
 
@@ -553,7 +553,7 @@ struct StoredAppState: Codable, Equatable {
 
 ### 3.2 Persistence
 
-**Location.** `~/Library/Application Support/Jbox/state.json`. The directory is created on first launch with mode 0755. The path is identical whether Jbox runs from `build/Jbox.app` (`make run`) or `/Applications/Jbox.app` — it is resolved from `FileManager`'s user Application Support scope, independent of install location. A `JBOX_STATE_DIR` environment variable overrides the directory for development isolation.
+**Location.** `~/Library/Application Support/Jbox/state.json`. The directory is created on first launch with mode 0755. The path is identical whether JBox runs from `build/Jbox.app` (`make run`) or `/Applications/Jbox.app` — it is resolved from `FileManager`'s user Application Support scope, independent of install location. A `JBOX_STATE_DIR` environment variable overrides the directory for development isolation.
 
 **Format.** JSON via `Codable`. Pretty-printed (2-space indent) so diffs are readable when the user backs up or commits the file.
 
@@ -607,7 +607,7 @@ Single-pane layout — a route list under a standard macOS toolbar.
 
 ```
 ┌────────────────────────────────────────────────────────────────┐
-│ Jbox                              [ + Add Route ] [ ↻ ]  [ ⚙ ] │
+│ JBox                              [ + Add Route ] [ ↻ ]  [ ⚙ ] │
 ├────────────────────────────────────────────────────────────────┤
 │                                                                │
 │  ● Keys to Console                                             │
@@ -648,7 +648,7 @@ The glyph is drawn in `NSColor.labelColor` — a dynamic color that resolves to 
 Clicking opens a window-style popover (SwiftUI `MenuBarExtra` with the `.menuBarExtraStyle(.window)` modifier):
 
 ```
-  Jbox
+  JBox
   2 routes running
 
   ●  Keys to Console                 Stop
@@ -657,16 +657,16 @@ Clicking opens a window-style popover (SwiftUI `MenuBarExtra` with the `.menuBar
   ─────────────────────────────────
   [  Start All  ]  [  Stop All  ]
   ─────────────────────────────────
-  Open Jbox
+  Open JBox
   Preferences…
-  Quit Jbox
+  Quit JBox
 ```
 
 No deep editing from the menu bar — just toggles and opening the main window. The menu bar is for "what's running" awareness and quick actions.
 
 A 2 Hz `.task` on the popover root keeps route statuses live so the icon tracks state even when the main window is closed (the window-style `MenuBarExtra` keeps the content view alive for the app's lifetime). The main window's own 4 Hz `.task` continues to drive row-level updates when it is visible.
 
-The **Open Jbox** action looks for an existing main-window instance in `NSApp.windows` (skipping `NSPanel` subclasses like the menu bar popover, and matching the "Jbox" window title) and brings it key-and-front via `makeKeyAndOrderFront(_:)`, deminiaturizing first if needed. Only when no existing window is found does it fall through to SwiftUI's `openWindow(id: "main")`. The main scene itself is declared with SwiftUI's single-instance `Window("Jbox", id: "main")` (macOS 13+) rather than `WindowGroup`, so the framework enforces window uniqueness directly: `Cmd+N` is suppressed (the "New Window" command does not appear in the File menu) and programmatic `openWindow(id:)` raises the live instance instead of spawning a duplicate. **Preferences…** routes through `openSettings`. **Quit Jbox** calls `NSApp.terminate(nil)`.
+The **Open JBox** action looks for an existing main-window instance in `NSApp.windows` (skipping `NSPanel` subclasses like the menu bar popover, and matching the "JBox" window title) and brings it key-and-front via `makeKeyAndOrderFront(_:)`, deminiaturizing first if needed. Only when no existing window is found does it fall through to SwiftUI's `openWindow(id: "main")`. The main scene itself is declared with SwiftUI's single-instance `Window("JBox", id: "main")` (macOS 13+) rather than `WindowGroup`, so the framework enforces window uniqueness directly: `Cmd+N` is suppressed (the "New Window" command does not appear in the File menu) and programmatic `openWindow(id:)` raises the live instance instead of spawning a duplicate. **Preferences…** routes through `openSettings`. **Quit JBox** calls `NSApp.terminate(nil)`.
 
 ### 4.3 Route editor
 
@@ -723,13 +723,13 @@ The expanded route panel uses a **mixer-strip layout** (introduced with the per-
 
 Standard macOS settings window (`SwiftUI.Settings` scene) with three tabs, implemented in `Sources/JboxApp/JboxApp.swift` as `PreferencesView` + three subviews (`GeneralPreferencesView`, `AudioPreferencesView`, `AdvancedPreferencesView`). Keys and defaults are centralised in `JboxPreferences`; typed value types (`AppearanceMode`) live in `JboxEngineSwift/Preferences.swift` so they are unit-testable without SwiftUI. Views continue to bind through `@AppStorage` for the two-way SwiftUI ergonomics; the Phase 7 persistence slice keeps `StoredPreferences` in lockstep by observing `UserDefaults.didChangeNotification` and snapshotting the `com.jbox.*` keys into `state.json` via `StateStore` (see § 3.2). On launch the loaded preferences are written back into `UserDefaults` so the `@AppStorage` bindings observe them on first paint.
 
-- **General** — appearance picker (System / Light / Dark; wired to every scene via `.preferredColorScheme(...)`, where System returns `nil` and lets SwiftUI inherit the OS appearance). **Launch at login** toggle wired to `LaunchAtLoginController` over `SMAppService.mainApp` — synchronous register/unregister, one-time explanatory alert on the first successful enable (latched via `StoredPreferences.hasShownLaunchAtLoginNote`, persisted in `state.json`), inline `requiresApproval` callout with an "Open Login Items…" deep link (`x-apple.systempreferences:com.apple.LoginItems-Settings.extension`) when macOS marks the registration as awaiting user confirmation, inline error callout when register/unregister surfaces a system error (e.g., bundle not in `/Applications`). The controller reconciles with the live system status on every launch and on every Preferences-window appear so an out-of-band toggle (the user disabling Jbox in System Settings) is picked up. Routes restored from `state.json` always start stopped — Jbox does not auto-start audio on login. **"Show meters in menu bar"** stays a disabled placeholder until the menu-bar icon renderer can animate between states.
+- **General** — appearance picker (System / Light / Dark; wired to every scene via `.preferredColorScheme(...)`, where System returns `nil` and lets SwiftUI inherit the OS appearance). **Launch at login** toggle wired to `LaunchAtLoginController` over `SMAppService.mainApp` — synchronous register/unregister, one-time explanatory alert on the first successful enable (latched via `StoredPreferences.hasShownLaunchAtLoginNote`, persisted in `state.json`), inline `requiresApproval` callout with an "Open Login Items…" deep link (`x-apple.systempreferences:com.apple.LoginItems-Settings.extension`) when macOS marks the registration as awaiting user confirmation, inline error callout when register/unregister surfaces a system error (e.g., bundle not in `/Applications`). The controller reconciles with the live system status on every launch and on every Preferences-window appear so an out-of-band toggle (the user disabling JBox in System Settings) is picked up. Routes restored from `state.json` always start stopped — JBox does not auto-start audio on login. **"Show meters in menu bar"** stays a disabled placeholder until the menu-bar icon renderer can animate between states.
 - **Audio** —
     - **Resampler quality**: Mastering (default) / High Quality. Pushed through the engine via ABI v8 (`jbox_engine_set_resampler_quality`) and applied to newly-started routes only — already-running routes keep the preset their converter was built with until stopped and started again. Footer copy states this explicitly. See § 2.5.
-    - **Buffer size** (informational footer only): copy explaining that Jbox has no *global* HAL buffer-size setting — the per-route Performance-tier Buffer size picker (§ 2.7 v11 mechanism) is the only buffer-size knob, and macOS resolves the device buffer as `max` across all active clients. The user sets the device default in their interface software (UA Console, RME TotalMix, MOTU CueMix, Audio MIDI Setup); routes without a per-route preference respect whatever the device is at. No interactive control on this tab. (Earlier Phase 6 / 7.5 builds shipped a "Buffer-size policy" picker here as a global setting; that global picker is gone in Phase 7.6, replaced by the per-route preference.)
+    - **Buffer size** (informational footer only): copy explaining that JBox has no *global* HAL buffer-size setting — the per-route Performance-tier Buffer size picker (§ 2.7 v11 mechanism) is the only buffer-size knob, and macOS resolves the device buffer as `max` across all active clients. The user sets the device default in their interface software (UA Console, RME TotalMix, MOTU CueMix, Audio MIDI Setup); routes without a per-route preference respect whatever the device is at. No interactive control on this tab. (Earlier Phase 6 / 7.5 builds shipped a "Buffer-size policy" picker here as a global setting; that global picker is gone in Phase 7.6, replaced by the per-route preference.)
 - **Advanced** —
     - **Show engine diagnostics** toggle (off by default; when on, the expanded meter panel surfaces the `frames_produced / frames_consumed · u<K>` counters and the per-side estimated-latency breakdown). Already landed pre-Preferences; key preserved.
-    - **Open Logs Folder** button — reveals `~/Library/Logs/Jbox` in Finder, creating the directory on demand. The rotating file sink itself lands with Phase 8 packaging; until then `Console.app` / `log stream --predicate 'subsystem == "com.jbox.app"'` is the authoritative source and this button exists primarily to point users at where the files will live.
+    - **Open Logs Folder** button — reveals `~/Library/Logs/JBox` in Finder, creating the directory on demand. The rotating file sink itself lands with Phase 8 packaging; until then `Console.app` / `log stream --predicate 'subsystem == "com.jbox.app"'` is the authoritative source and this button exists primarily to point users at where the files will live.
     - **Export / Import / Reset Configuration** — disabled placeholders. The backing `state.json` store landed in the Phase 7 persistence slice; the UI is waiting on a wider review of the import/export surface (file-format opt-ins, partial-import semantics) before going live.
 
 ### 4.7 Key flows
@@ -792,7 +792,7 @@ Activation runs in the application layer, not the engine: given a scene, compute
 
 ```
 ┌────────────────────────────────────────────────────────────────┐
-│ [≡] Jbox                                              [ ⚙ ]    │
+│ [≡] JBox                                              [ ⚙ ]    │
 ├──────────────┬─────────────────────────────────────────────────┤
 │  SIDEBAR     │  ROUTE LIST                                      │
 │              │                                                  │
@@ -1002,7 +1002,7 @@ No CI secrets for code signing / notarization are required — v1 does not use D
   - `Applications` symlink (drag-to-install target)
   - `Uninstall Jbox.command` (double-click to remove deployed files)
   - `READ-THIS-FIRST.txt` with Gatekeeper + CLI-usage instructions:
-    > To open Jbox for the first time on your Mac:
+    > To open JBox for the first time on your Mac:
     > 1. Mount the DMG and drag Jbox.app into the Applications symlink.
     > 2. Right-click (or ⌃-click) Jbox.app in /Applications and choose **Open**.
     > 3. Click **Open** in the Gatekeeper confirmation dialog.
@@ -1058,7 +1058,7 @@ Consolidated list of items explicitly deferred from v1, for easy cross-reference
 - `.pkg` installer.
 
 **Virtual devices.**
-- Shipping our own HAL plugin that publishes Jbox as a Core Audio device. **Archived out of scope** — see § 2.13 for the macOS-aggregate-device-based topology Jbox supports instead, and the `archive/phase7.6-own-driver` branch for the in-house HAL-plugin prototype that hit the macOS 13+ code-signing wall.
+- Shipping our own HAL plugin that publishes JBox as a Core Audio device. **Archived out of scope** — see § 2.13 for the macOS-aggregate-device-based topology JBox supports instead, and the `archive/phase7.6-own-driver` branch for the in-house HAL-plugin prototype that hit the macOS 13+ code-signing wall.
 - DriverKit kernel extensions. Permanently out of scope — same signing wall as the HAL plugin approach, larger rewrite, no escape.
 
 **UI scope extensions.**
@@ -1084,18 +1084,18 @@ Consolidated list of items explicitly deferred from v1, for easy cross-reference
 ## Appendix B — Glossary
 
 **ABI** — Application Binary Interface; the binary-level contract of the engine's C API.
-**Aggregate Device** — a macOS-level composite audio device combining multiple physical devices, with built-in clock drift correction. Used by DAWs for multi-device setups; **not** used by Jbox.
-**AudioConverter** — Apple's built-in sample-rate converter / format converter. Supports variable-ratio resampling, used in Jbox for both sample-rate matching and drift correction.
+**Aggregate Device** — a macOS-level composite audio device combining multiple physical devices, with built-in clock drift correction. Used by DAWs for multi-device setups; **not** used by JBox.
+**AudioConverter** — Apple's built-in sample-rate converter / format converter. Supports variable-ratio resampling, used in JBox for both sample-rate matching and drift correction.
 **AudioDeviceID** — a `UInt32` used by Core Audio to identify a device within a session. **Not** stable across reboots; for persistent identification, use the device UID.
 **Bridge (C API)** — the stable C-level interface between the C++ engine and its clients (Swift UI layer, CLI, any future client). The product's public contract.
-**Core Audio HAL** — the Hardware Abstraction Layer of Apple's Core Audio stack; low-level APIs like `AudioDeviceCreateIOProcIDWithBlock` that Jbox uses for direct device I/O.
+**Core Audio HAL** — the Hardware Abstraction Layer of Apple's Core Audio stack; low-level APIs like `AudioDeviceCreateIOProcIDWithBlock` that JBox uses for direct device I/O.
 **Drift (clock drift)** — the slow divergence in effective sample rate between two independent device clocks. Uncorrected, causes buffer underrun or overrun over time.
-**IOProc** — an audio input / output procedure; a callback Core Audio invokes on a real-time thread to deliver input samples and request output samples. Jbox registers one per device per direction.
-**Lock-free SPSC** — single-producer / single-consumer, using atomics rather than locks. Jbox's ring buffers between IOProcs are lock-free SPSC.
-**PI controller** — Proportional-Integral controller; the feedback-control algorithm used by Jbox's drift tracker.
+**IOProc** — an audio input / output procedure; a callback Core Audio invokes on a real-time thread to deliver input samples and request output samples. JBox registers one per device per direction.
+**Lock-free SPSC** — single-producer / single-consumer, using atomics rather than locks. JBox's ring buffers between IOProcs are lock-free SPSC.
+**PI controller** — Proportional-Integral controller; the feedback-control algorithm used by JBox's drift tracker.
 **ppm** — parts per million. Crystal oscillators in consumer and pro audio gear typically deviate from nominal by ±25–100 ppm.
-**RCU (Read-Copy-Update)** — a concurrency pattern where readers see a consistent snapshot via an atomic pointer, and writers publish new versions with deferred reclamation of the old. Jbox uses an RCU-style pattern for per-device active-route lists.
-**Ring buffer** — a fixed-size circular queue. Jbox uses lock-free ring buffers to bridge source and destination IOProcs for each route.
-**RT-safe** — real-time-safe; code that can execute on an audio callback without allocating, locking, or syscalling. All Jbox code reachable from an IOProc must be RT-safe.
-**SPM** — Swift Package Manager; Jbox's build system.
-**UID (Audio Device UID)** — a stable string identifier for a Core Audio device. Survives reboots, disconnects, and reconnects. Used by Jbox as the persistent primary key for device references.
+**RCU (Read-Copy-Update)** — a concurrency pattern where readers see a consistent snapshot via an atomic pointer, and writers publish new versions with deferred reclamation of the old. JBox uses an RCU-style pattern for per-device active-route lists.
+**Ring buffer** — a fixed-size circular queue. JBox uses lock-free ring buffers to bridge source and destination IOProcs for each route.
+**RT-safe** — real-time-safe; code that can execute on an audio callback without allocating, locking, or syscalling. All JBox code reachable from an IOProc must be RT-safe.
+**SPM** — Swift Package Manager; JBox's build system.
+**UID (Audio Device UID)** — a stable string identifier for a Core Audio device. Survives reboots, disconnects, and reconnects. Used by JBox as the persistent primary key for device references.

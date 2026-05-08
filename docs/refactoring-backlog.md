@@ -365,7 +365,7 @@ dependent**: surfaced 2026-05-08 when the GitHub `macos-15` runner
 (Swift 6.1.2) failed `pollMetersIsQuietOnNoChange` while the dev mac
 (Swift 6.3.1) passed it. Older Observation runtimes fire willSet
 unconditionally on direct setters too. The published behaviour of
-Jbox shouldn't depend on which Swift the host runs, so `pollMeters`
+JBox shouldn't depend on which Swift the host runs, so `pollMeters`
 now uses the same explicit `if meters != next { meters = next }`
 guard the subscript-write paths use. The test was repurposed to pin
 the guard rather than the framework optimisation, so it's

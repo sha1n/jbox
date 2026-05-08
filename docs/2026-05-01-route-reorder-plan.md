@@ -369,7 +369,7 @@ Then exercise the gesture in the running app:
 1. Add three routes through the UI (any source/destination combination — they don't need to start successfully; reorder works regardless of state).
 2. Hover over the third route's strip on a non-button area (e.g. the source → destination summary text). Cursor should change to the macOS reorder hand.
 3. Drag the third strip above the first. A horizontal drop-line indicator should follow the pointer; release. The strip should land at the top.
-4. Quit Jbox (`⌘Q`).
+4. Quit JBox (`⌘Q`).
 5. Relaunch (`make run` again).
 6. Confirm the route order persisted: the strip you moved is still at the top.
 7. Try a same-position drag (drag a strip and drop it where it started). Expected: silent no-op, no visible flicker, no extra `state.json` write.

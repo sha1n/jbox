@@ -92,9 +92,9 @@ Additive Codable field, default `false`. Lets the explanatory note fire only on 
 
 `Sources/JboxApp/JboxApp.swift` — `GeneralPreferencesView`:
 - Replace the `Toggle("Launch at login", isOn: .constant(false)).disabled(true)` with a real binding driven by `appState.launchAtLogin?.isEnabled` (read) + `setEnabled(_:)` (write).
-- Add `.alert(...)` modifier on the form bound to `pendingFirstTimeNote`. Alert copy explains: "Jbox will start automatically when you log in. Routes restored from your saved configuration stay stopped until you start them — Jbox does not auto-start audio on login." Dismissal calls `acknowledgeFirstTimeNote()`.
+- Add `.alert(...)` modifier on the form bound to `pendingFirstTimeNote`. Alert copy explains: "JBox will start automatically when you log in. Routes restored from your saved configuration stay stopped until you start them — JBox does not auto-start audio on login." Dismissal calls `acknowledgeFirstTimeNote()`.
 - Add a yellow `requiresApproval` callout inline in the menu-bar section when status is `.requiresApproval`: "Waiting for approval in System Settings." with an "Open Login Items…" button that invokes `NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.LoginItems-Settings.extension")!)`.
-- Add `.task { appState.launchAtLogin?.refresh() }` on the form so the controller reconciles with the live system status every time the General tab becomes visible. Closes the requiresApproval round-trip: the user clicks "Open Login Items…", flips the switch in System Settings, returns to Jbox — without this `.task`, the controller would keep reporting the stale pre-approval state until the next app launch.
+- Add `.task { appState.launchAtLogin?.refresh() }` on the form so the controller reconciles with the live system status every time the General tab becomes visible. Closes the requiresApproval round-trip: the user clicks "Open Login Items…", flips the switch in System Settings, returns to JBox — without this `.task`, the controller would keep reporting the stale pre-approval state until the next app launch.
 - Also remove the existing menu-bar footer's "Both land with Phase 7…" copy since launch-at-login no longer lands later.
 
 `Sources/JboxApp/JboxApp.swift` — `AppState`:
@@ -249,7 +249,7 @@ Grouped:
 - E4: idempotent when not armed AND latch is false — must NOT silently consume the first-time-note allowance (regression for a guard-logic bug where `pendingFirstTimeNote || !hasShownFirstTimeNote` proceeded incorrectly).
 
 **F. refresh() reconciliation (6)**
-- F1: external `.notRegistered → .enabled` (user enabled outside Jbox) → `isEnabled` becomes true.
+- F1: external `.notRegistered → .enabled` (user enabled outside JBox) → `isEnabled` becomes true.
 - F2: external `.enabled → .notRegistered` → `isEnabled` becomes false.
 - F3: external `→ .requiresApproval` → `requiresApproval=true`; persistence callback NOT fired (requiresApproval isn't persisted).
 - F3a: external `.requiresApproval → .enabled` (user approves in System Settings) → `isEnabled` flips true, `requiresApproval` clears.

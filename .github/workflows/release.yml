@@ -53,14 +53,14 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.version.outputs.tag }}
-          name: Jbox ${{ steps.version.outputs.version }}
+          name: JBox ${{ steps.version.outputs.version }}
           draft: true
           prerelease: true
           generate_release_notes: true
           files: |
             build/Jbox-${{ steps.version.outputs.version }}.dmg
           body: |
-            Jbox ${{ steps.version.outputs.version }} — ad-hoc signed build.
+            JBox ${{ steps.version.outputs.version }} — ad-hoc signed build.
 
             **What's in the DMG:**
 

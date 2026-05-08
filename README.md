@@ -1,15 +1,15 @@
-# Jbox
+# JBox
 
 [![CI](https://github.com/sha1n/jbox/actions/workflows/ci.yml/badge.svg?branch=master)](https://github.com/sha1n/jbox/actions/workflows/ci.yml)
 [![codecov](https://codecov.io/gh/sha1n/jbox/branch/master/graph/badge.svg)](https://codecov.io/gh/sha1n/jbox)
 
-**A native macOS audio routing utility.** Jbox routes selected channels from one Core Audio device to selected channels on another, in real time, with low latency and robust drift correction between independent clocks.
+**A native macOS audio routing utility.** JBox routes selected channels from one Core Audio device to selected channels on another, in real time, with low latency and robust drift correction between independent clocks.
 
 ---
 
-## What Jbox does
+## What JBox does
 
-Jbox is a **generic Core Audio routing tool**. It bridges any input-capable device to any output-capable device, with:
+JBox is a **generic Core Audio routing tool**. It bridges any input-capable device to any output-capable device, with:
 
 - **Arbitrary 1:N channel mapping** — pick any source channels, any destination channels, map them in any order. A single source channel may feed multiple destination channels (fan-out); multi-source summing (fan-in) is out of scope.
 - **Multiple simultaneous routes** — more like a patchbay than a single-pair bridge.
@@ -17,7 +17,7 @@ Jbox is a **generic Core Audio routing tool**. It bridges any input-capable devi
 - **Automatic sample-rate conversion** when source and destination rates differ.
 - **Graceful handling** of device disconnect / reconnect and missing-on-launch cases.
 
-Unlike macOS Aggregate Devices — the built-in mechanism for combining multiple audio interfaces — Jbox does not create a system-wide composite device. Routes are per-app, isolated, and dynamic. Other apps sharing the same hardware are unaffected.
+Unlike macOS Aggregate Devices — the built-in mechanism for combining multiple audio interfaces — JBox does not create a system-wide composite device. Routes are per-app, isolated, and dynamic. Other apps sharing the same hardware are unaffected.
 
 ---
 
@@ -29,11 +29,11 @@ A typical example: routing a hardware instrument or external sound module into s
 
 ---
 
-## What Jbox is not
+## What JBox is not
 
 - **Not a mixer.** No summing, no gain, no mute. 1:N routing only — a source channel can feed many destinations (fan-out), but two sources cannot combine into one destination (fan-in / summing stays out of scope).
 - **Not a DAW.** No timeline, no plugins, no recording, no MIDI.
-- **Not a virtual audio driver.** Jbox does not ship its own audio device. For the multi-source live-monitoring case (a hardware source + media apps reaching the same physical monitor outs), the recommended topology uses a macOS aggregate device plus the destination interface's hardware mixer — see [docs/spec.md § 2.13](./docs/spec.md#213-multi-source-low-latency-monitoring-topology). Users without a hardware-mixer-equipped interface can substitute a third-party loopback driver such as [BlackHole](https://github.com/ExistentialAudio/BlackHole) for the aggregate; Jbox treats it as an ordinary Core Audio device and needs no driver-specific code.
+- **Not a virtual audio driver.** JBox does not ship its own audio device. For the multi-source live-monitoring case (a hardware source + media apps reaching the same physical monitor outs), the recommended topology uses a macOS aggregate device plus the destination interface's hardware mixer — see [docs/spec.md § 2.13](./docs/spec.md#213-multi-source-low-latency-monitoring-topology). Users without a hardware-mixer-equipped interface can substitute a third-party loopback driver such as [BlackHole](https://github.com/ExistentialAudio/BlackHole) for the aggregate; JBox treats it as an ordinary Core Audio device and needs no driver-specific code.
 - **Not a network audio tool.** No Dante, no AVB, no NDI, no IP streaming.
 
 ---
@@ -43,7 +43,7 @@ A typical example: routing a hardware instrument or external sound module into s
 1. **Pro-audio routing semantics.** Channel numbering is 1-indexed in the UI (0-indexed internally). Devices are identified by Core Audio UID (stable across reboots). Each route is independent; lifecycle and errors are per-route.
 2. **Top-performance real-time engine.** The audio-processing path is written in C++ with strict real-time discipline: no allocations, no locks, no syscalls on the audio thread. Engineered for near-zero added latency.
 3. **UI is replaceable.** The engine is an independent C++ library exposed via a stable public C API. Today's SwiftUI UI is one implementation of that API; it can be rewritten or replaced without touching the engine.
-4. **Do not step on other apps.** Jbox runs as a shared Core Audio client on every route — it never claims hog mode and never evicts other clients. When a route asks for a smaller HAL buffer than the device is currently running at, Jbox writes `kAudioDevicePropertyBufferFrameSize` once per affected device — exactly the way Superior Drummer and other low-latency apps do — and lets the macOS HAL resolve the actual buffer as the **max across all active clients** (so a co-resident DAW asking for a bigger buffer pulls the buffer up while it's running, and Jbox's preference takes effect once that DAW lets go). The user can also dial the buffer in their interface software (UA Console, RME TotalMix, Audio MIDI Setup, etc.) and Jbox respects whatever it finds. An earlier design tried to also claim hog mode and shrink the buffer aggressively from inside Jbox — that path caused IOProc-scheduler stalls on aggregate devices and crashes in co-resident DAWs and was removed (see Phase 7.6 in `docs/plan.md`).
+4. **Do not step on other apps.** JBox runs as a shared Core Audio client on every route — it never claims hog mode and never evicts other clients. When a route asks for a smaller HAL buffer than the device is currently running at, JBox writes `kAudioDevicePropertyBufferFrameSize` once per affected device — exactly the way Superior Drummer and other low-latency apps do — and lets the macOS HAL resolve the actual buffer as the **max across all active clients** (so a co-resident DAW asking for a bigger buffer pulls the buffer up while it's running, and JBox's preference takes effect once that DAW lets go). The user can also dial the buffer in their interface software (UA Console, RME TotalMix, Audio MIDI Setup, etc.) and JBox respects whatever it finds. An earlier design tried to also claim hog mode and shrink the buffer aggressively from inside JBox — that path caused IOProc-scheduler stalls on aggregate devices and crashes in co-resident DAWs and was removed (see Phase 7.6 in `docs/plan.md`).
 5. **Personal use first.** v1 runs with free Apple tooling and ad-hoc code signing. No paid Apple Developer Program required. Development works entirely from the command line — the Xcode IDE is never required (though Xcode.app must be installed for its frameworks; see Prerequisites). Distribution to others is possible via an unsigned `.dmg` lane with clear Gatekeeper instructions.
 
 ---
@@ -103,7 +103,7 @@ Common commands are wrapped in a [`Makefile`](./Makefile) at the repo root:
 ```sh
 make            # show all targets (default)
 make clean      # wipe .build/ build/ test-results/ .swiftpm/
-make build      # produce the distributable DMG (Jbox-<version>.dmg)
+make build      # produce the distributable DMG (JBox-<version>.dmg)
 make test       # run the full test pipeline (same as CI)
 make all        # clean + build + test
 
@@ -149,17 +149,17 @@ Device-level integration tests (soak, latency measurement) require real hardware
 
 ### First launch
 
-On first launch, macOS prompts for audio-device access. Grant it — Jbox needs this to route audio between any device with a microphone-class designation (which includes every input-capable audio interface).
+On first launch, macOS prompts for audio-device access. Grant it — JBox needs this to route audio between any device with a microphone-class designation (which includes every input-capable audio interface).
 
 ---
 
 ## Debugging and logs
 
-Jbox emits structured log events through the unified logging system (`os_log`) and additionally appends every event to a rotating per-process file under `~/Library/Logs/Jbox/` (`Jbox.log` for the .app, `JboxEngineCLI.log` for the headless CLI). The file is size-rotated at 5 MiB with up to 3 files retained (live + 2 rotated), and falls back to os_log-only on I/O errors (permission denied, disk full) rather than dropping the whole pipeline. The `log` command and Console.app still show everything in real time.
+JBox emits structured log events through the unified logging system (`os_log`) and additionally appends every event to a rotating per-process file under `~/Library/Logs/Jbox/` (`Jbox.log` for the .app, `JboxEngineCLI.log` for the headless CLI). The file is size-rotated at 5 MiB with up to 3 files retained (live + 2 rotated), and falls back to os_log-only on I/O errors (permission denied, disk full) rather than dropping the whole pipeline. The `log` command and Console.app still show everything in real time.
 
 ### Subsystem and categories
 
-All Jbox logging lives under a single subsystem so you can filter with one predicate:
+All JBox logging lives under a single subsystem so you can filter with one predicate:
 
 ```
 subsystem: com.jbox.app
@@ -173,10 +173,10 @@ categories: app | engine | ui | bridge
 
 ### Live stream
 
-Run Jbox in one terminal, then tail its output in another:
+Run JBox in one terminal, then tail its output in another:
 
 ```sh
-# Everything Jbox emits, live
+# Everything JBox emits, live
 log stream --predicate 'subsystem == "com.jbox.app"'
 
 # Just the RT / engine channel
@@ -192,7 +192,7 @@ log stream --level debug --predicate 'subsystem == "com.jbox.app"'
 ### Post-hoc queries
 
 ```sh
-# Last five minutes of Jbox activity
+# Last five minutes of JBox activity
 log show --predicate 'subsystem == "com.jbox.app"' --last 5m
 
 # Same, but include info + debug (defaults hide these)
@@ -204,7 +204,7 @@ log show --predicate 'subsystem == "com.jbox.app"' --last 5m --info --debug
 By default, `info` and `debug` messages are discarded almost immediately even if you request them in `log show`. To make them stick for live investigation:
 
 ```sh
-# Turn persistence on for Jbox
+# Turn persistence on for JBox
 sudo log config --subsystem com.jbox.app --mode "level:debug,persist:debug"
 
 # Verify
@@ -235,7 +235,7 @@ Underrun / overrun / channel-mismatch events are **edge-triggered** — only the
 - **App appears to start but no routes work:** check the log for `engine` events. Startup logs `engine created abi=<N>` from the `bridge` category; absence means the bundle is failing to load or crashing before engine-create.
 - **Route stays in `waiting`:** look for `evt=route_waiting` — `value_a=1` means the source device UID was not found at start time, `value_b=1` means the destination was missing. Refresh devices (or reconnect) and retry.
 - **Route goes silent intermittently:** look for `evt=underrun` or `evt=overrun`. The first occurrence after a start will log; stop and re-start the route to re-arm the edge trigger if you want to confirm the problem is still occurring.
-- **Device shows up in one picker but not the other:** Jbox's source list is Core Audio devices with **input streams** (audio flowing hardware → Mac). A device that only appears in the Mac's output direction — because the Mac *sends* to it but cannot *read* from it — is correctly excluded from the source picker. If you expected a device to be a source but don't see it, verify in **Audio MIDI Setup** that it exposes input streams.
+- **Device shows up in one picker but not the other:** JBox's source list is Core Audio devices with **input streams** (audio flowing hardware → Mac). A device that only appears in the Mac's output direction — because the Mac *sends* to it but cannot *read* from it — is correctly excluded from the source picker. If you expected a device to be a source but don't see it, verify in **Audio MIDI Setup** that it exposes input streams.
 
 ---
 
@@ -266,7 +266,7 @@ Pushing a `v*` tag triggers [`.github/workflows/release.yml`](.github/workflows/
 
 1. Builds release mode (`swift build -c release`).
 2. Runs `scripts/bundle_app.sh` to produce `build/Jbox.app` (ad-hoc signed, Hardened Runtime on, CLI bundled inside at `Contents/MacOS/JboxEngineCLI`).
-3. Runs `scripts/package_unsigned_release.sh` to wrap everything into `build/Jbox-<version>.dmg` (drag-to-install `.app` + uninstaller `.command` + README).
+3. Runs `scripts/package_unsigned_release.sh` to wrap everything into `build/JBox-<version>.dmg` (drag-to-install `.app` + uninstaller `.command` + README).
 4. Creates or updates a GitHub Release for the tag **as a draft, pre-release**, attaching the DMG. Release notes are auto-generated from the commit history since the previous tag.
 
 ### Publishing the draft
@@ -275,7 +275,7 @@ The release is a draft by design — so you can sanity-check the DMG before it g
 
 1. Go to <https://github.com/sha1n/jbox/releases>.
 2. Find the draft release for your tag and click it.
-3. Download the attached `Jbox-<version>.dmg`. Optionally mount it and run it through your usual pre-release checks.
+3. Download the attached `JBox-<version>.dmg`. Optionally mount it and run it through your usual pre-release checks.
 4. Edit the release notes if you want to add anything beyond the auto-generated list.
 5. Click **Publish release** (or **Save draft** to keep it unpublished).
 
@@ -334,9 +334,9 @@ Phase 6 refinements landed:
 - **Computed per-route latency pill** — engine exposes the HAL + buffer + ring + SRC components through the C ABI; UI surfaces the total on the route row and the breakdown in the diagnostics panel.
 - **Tiered latency modes** per route — Off (safe 8× ring, 4096 floor), Low (3× / 512 floor), Performance (2× / 256 floor + `ring/4` drift setpoint). The picker is per-route.
 - **Direct-monitor fast path** for same-device Performance routes — bypasses the ring and SRC entirely, copies input → output in one duplex IOProc, aggregate-device aware.
-- **HAL buffer size** — Jbox respects whatever buffer the user has configured in their interface software; the route's latency pill reflects the honest end-to-end estimate. Tier presets pick ring sizing, not HAL buffer.
+- **HAL buffer size** — JBox respects whatever buffer the user has configured in their interface software; the route's latency pill reflects the honest end-to-end estimate. Tier presets pick ring sizing, not HAL buffer.
 - **Edit existing routes** — non-disruptive inline rename on double-click (engine-side `jbox_engine_rename_route`, ABI v7), plus a pencil button that opens an edit sheet for full reconfigs (device / mapping / tier / buffer). Running routes are stopped, reconfigured, and restarted as a single action; the apply button reads "Apply and restart" when that will happen.
-- **Menu bar extra** — a menu bar icon (a monochrome route glyph derived from the app icon, auto-tinted for light/dark mode) with a small colored status dot in the corner: absent when idle, green when running, red when any route needs attention. Clicking opens a window-style popover with a status summary, per-route Start/Stop toggles, bulk Start All / Stop All, and Open Jbox / Preferences / Quit actions.
+- **Menu bar extra** — a menu bar icon (a monochrome route glyph derived from the app icon, auto-tinted for light/dark mode) with a small colored status dot in the corner: absent when idle, green when running, red when any route needs attention. Clicking opens a window-style popover with a status summary, per-route Start/Stop toggles, bulk Start All / Stop All, and Open JBox / Preferences / Quit actions.
 - **Preferences window (three tabs)** — General / Audio / Advanced. General carries an appearance picker (System / Light / Dark) wired to every scene via `.preferredColorScheme()` and a Launch-at-login toggle wired to `SMAppService.mainApp` (with a one-time explanatory note on first enable, and an "Open Login Items…" deep link when macOS marks the registration as awaiting approval). Audio carries a resampler quality preset (Mastering / High Quality) pushed through the engine via the ABI v8 setter, plus an informational footer reminding the user that the HAL buffer size is set in their interface software (UA Console / RME TotalMix / MOTU CueMix / Audio MIDI Setup). Advanced keeps the engine-diagnostics toggle and picks up an Open Logs Folder button. Menu-bar meters and Export / Import / Reset Configuration remain disabled placeholders.
 
 XCUITest event-injection flows are **deferred under the SPM-only constraint** — see [docs/plan.md Phase 6 deviations](./docs/plan.md#phase-6--swiftui-ui) for the gap write-up and the recommended path when revisited. Real-hardware acceptance tests (soak, latency, sample-rate mismatch, multi-route sanity) from Phases 3–5 are deferred to the owner's rig — the simulated backend covers their logic.
@@ -347,7 +347,7 @@ Phase 7.5 (device-sharing opt-out) landed and was then **superseded and reverted
 
 Phase 7.6 (self-routing reliability) is **in progress**. The big simplification — drop hog mode and exclusive locking entirely — landed and removes ~400 lines of engine code plus the Phase 7.5 share-toggle ABI / UI / persistence surface (ABI v9 → v10 MAJOR break). A targeted walk-back then re-introduced a single no-hog `setBufferFrameSize` write per affected device, modeled on the way Superior Drummer requests low-latency buffers without disturbing co-resident apps; the user-visible Buffer Size picker on the Performance tier is back, and macOS resolves the effective buffer as the max across all active clients (ABI v10 → v11 MINOR additive). The pending follow-ups are device hot-plug listeners (sub-phase 7.6.4), sleep/wake handling (7.6.5), and return-code-aware teardown (7.6.3). See [docs/plan.md Phase 7.6](./docs/plan.md#phase-76--self-routing-reliability) and [docs/spec.md § 2.13](./docs/spec.md#213-multi-source-low-latency-monitoring-topology). The earlier in-house-driver prototype stays archived on branch `archive/phase7.6-own-driver`.
 
-Release engineering is already operational: pushing a `v*` tag triggers `.github/workflows/release.yml`, which builds an ad-hoc-signed `Jbox.app` (with `JboxEngineCLI` bundled inside) and publishes a drag-to-install `Jbox-<version>.dmg` as a draft pre-release. See [docs/releases.md](./docs/releases.md).
+Release engineering is already operational: pushing a `v*` tag triggers `.github/workflows/release.yml`, which builds an ad-hoc-signed `Jbox.app` (with `JboxEngineCLI` bundled inside) and publishes a drag-to-install `JBox-<version>.dmg` as a draft pre-release. See [docs/releases.md](./docs/releases.md).
 
 See [docs/plan.md](./docs/plan.md) for the full phased implementation roadmap.
 
@@ -358,7 +358,7 @@ Scope for **v1.0.0** (what the first release will do):
 - Auto-resampling when source and destination sample rates differ.
 - Drift correction between independent device clocks.
 - Auto-waiting for missing devices; auto-recovery on device return.
-- **Tiered latency modes** per route (Off / Low / Performance) — ring-sizing presets that govern drift-sampler residency; a direct-monitor fast path bypasses the ring + converter entirely for same-device (aggregate) Performance routes. On Performance, the user can also pick a per-route Buffer Size *preference* — Jbox writes it once via `kAudioDevicePropertyBufferFrameSize` (no hog mode), and macOS resolves the actual buffer as the max across all active clients.
+- **Tiered latency modes** per route (Off / Low / Performance) — ring-sizing presets that govern drift-sampler residency; a direct-monitor fast path bypasses the ring + converter entirely for same-device (aggregate) Performance routes. On Performance, the user can also pick a per-route Buffer Size *preference* — JBox writes it once via `kAudioDevicePropertyBufferFrameSize` (no hog mode), and macOS resolves the actual buffer as the max across all active clients.
 - **Per-route latency pill** plus an Advanced-only diagnostics panel with the full component breakdown.
 - SwiftUI main window + menu bar extra + preferences.
 - Ad-hoc signed `.app` for personal use; unsigned `.dmg` lane for small-audience sharing.

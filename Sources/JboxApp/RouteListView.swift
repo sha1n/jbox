@@ -24,7 +24,7 @@ struct RouteListView: View {
 
     var body: some View {
         detailContent
-            .navigationTitle("Jbox")
+            .navigationTitle("JBox")
             .task {
                 while !Task.isCancelled {
                     if !store.routes.isEmpty {

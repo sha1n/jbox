@@ -29,7 +29,7 @@ APP_BUNDLE="${BUILD_DIR}/Jbox.app"
 VERSION="${JBOX_VERSION:-0.0.0-local}"
 DMG_NAME="Jbox-${VERSION}.dmg"
 DMG_PATH="${BUILD_DIR}/${DMG_NAME}"
-VOLUME_NAME="Jbox ${VERSION}"
+VOLUME_NAME="JBox ${VERSION}"
 STAGING="${BUILD_DIR}/dmg-staging"
 
 if [[ ! -d "${APP_BUNDLE}" ]]; then
@@ -65,7 +65,7 @@ cat > "${STAGING}/Uninstall Jbox.command" <<'UNINSTALLER'
 set -eu
 
 cat <<'HEADER'
-Jbox Uninstaller
+JBox Uninstaller
 ================
 HEADER
 echo ""
@@ -85,7 +85,7 @@ for p in "${paths[@]}"; do
 done
 
 if [[ ${#existing[@]} -eq 0 ]]; then
-    echo "Nothing to uninstall — Jbox does not appear to be installed."
+    echo "Nothing to uninstall — JBox does not appear to be installed."
     echo ""
     read -p "Press Enter to close this window..." _
     exit 0
@@ -113,11 +113,11 @@ for p in "${existing[@]}"; do
 done
 
 echo ""
-echo "Done. Jbox has been uninstalled."
+echo "Done. JBox has been uninstalled."
 echo ""
 echo "Note: audio device permissions granted under"
 echo "  System Settings > Privacy & Security > Microphone"
-echo "remain until you remove them manually. Reinstalling Jbox will"
+echo "remain until you remove them manually. Reinstalling JBox will"
 echo "prompt for access again."
 echo ""
 read -p "Press Enter to close this window..." _
@@ -127,10 +127,10 @@ chmod +x "${STAGING}/Uninstall Jbox.command"
 
 # 4. User-facing README.
 cat > "${STAGING}/READ-THIS-FIRST.txt" <<README
-Jbox ${VERSION}
+JBox ${VERSION}
 ==============
 
-Jbox is a native macOS audio routing utility. This disk image contains:
+JBox is a native macOS audio routing utility. This disk image contains:
 
   Jbox.app                     the application bundle
   Applications (shortcut)      drag Jbox.app onto this to install
@@ -150,7 +150,7 @@ FIRST LAUNCH (one-time Gatekeeper workaround)
 This build is ad-hoc signed, not notarized by Apple. On first launch
 macOS will show:
 
-    "Jbox" cannot be opened because Apple cannot check it for
+    "JBox" cannot be opened because Apple cannot check it for
     malicious software.
 
 To proceed:

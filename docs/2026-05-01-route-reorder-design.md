@@ -13,7 +13,7 @@ Let the user drag route strips in the main window's route list to reorder them, 
 - Reordering inside the menu-bar list (the menu-bar `VStack` mirrors the main-window order read-only).
 - A visible grab handle on each strip (additive change for later if discoverability turns out to be a problem; nothing in this design forecloses adding one).
 - Engine-side ordering. `RouteManager`'s IOProc scheduling is per-device; route-list order is purely a UI / persistence concern.
-- Drag-between-windows / multi-window. Jbox ships a single-instance `Window` scene by design.
+- Drag-between-windows / multi-window. JBox ships a single-instance `Window` scene by design.
 - Schema migration. `StoredAppState.routes: [StoredRoute]` is already an ordered array; `currentSchemaVersion` stays at `1`.
 
 ## Source of truth
@@ -131,7 +131,7 @@ UI gestures are not covered by automated tests in this codebase (per `CLAUDE.md`
 1. `make run`.
 2. Add three routes through the UI.
 3. Drag the third strip above the first; confirm visual reorder.
-4. Quit Jbox; relaunch.
+4. Quit JBox; relaunch.
 5. Confirm route order matches what step 3 produced.
 6. Confirm running / stopped routes both reorder cleanly (state is per-route, not per-position).
 

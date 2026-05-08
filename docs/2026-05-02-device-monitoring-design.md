@@ -12,7 +12,7 @@ Routes should auto-detect when a device they depend on stops working — includi
 
 - A new public Swift / C ABI surface beyond one additive error code variant. No new state-machine states, no new tick callback, no new entry point.
 - Active recovery beyond what 7.6.4 already does. The watchdog signals failure; recovery still rides on the existing `kDeviceListChanged` / `kAggregateMembersChanged` retry path or a manual stop+start.
-- Hog-mode opt-in or "exclusive" semantics on Jbox's side. Per `CLAUDE.md` the Phase 7.6 deviation, Jbox is share-only by construction.
+- Hog-mode opt-in or "exclusive" semantics on JBox's side. Per `CLAUDE.md` the Phase 7.6 deviation, JBox is share-only by construction.
 - Rewriting `R1` (`jbox_error_code_t` carrying non-error variants). Adding `JBOX_ERR_DEVICE_STALLED` extends the same shape; the focused rename remains in `docs/refactoring-backlog.md`.
 - Power / sleep / wake (F2) — orthogonal axis already designed.
 
@@ -330,7 +330,7 @@ Mirrors `docs/followups.md` § F1 acceptance, plus three new cases:
 
 ## References
 
-- `docs/spec.md § 2.7` — per-route HAL buffer-frame-size preference (the only HAL property write Jbox issues).
+- `docs/spec.md § 2.7` — per-route HAL buffer-frame-size preference (the only HAL property write JBox issues).
 - `docs/plan.md` Phase 7.6 — full reaction-layer design rationale (idempotent reactions, no debounce, deferred backend wiring).
 - `docs/followups.md § F1` — production HAL listener registration; engine half landed 2026-04-28.
 - `docs/refactoring-backlog.md § R1` — `jbox_error_code_t` / `last_error` naming smell.

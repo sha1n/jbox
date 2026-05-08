@@ -25,7 +25,7 @@ func installSigintHandler() {
 // -----------------------------------------------------------------------------
 
 func printVersion() {
-    print("Jbox Engine ABI version: \(JboxEngine.abiVersion)")
+    print("JBox Engine ABI version: \(JboxEngine.abiVersion)")
 }
 
 func printDevices() throws {
