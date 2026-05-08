@@ -93,7 +93,7 @@ Repository scaffolding:
 - [x] Add `JboxApp.swift` — minimal SwiftUI App struct, single window showing the engine ABI version.
 - [x] Add `main.swift` in `JboxEngineCLI/` that prints the ABI version.
 - [x] Add `.gitignore` covering `.build/`, `.swiftpm/`, `.DS_Store`, `*.xcodeproj` / `*.xcworkspace`, `build/`.
-- [x] Add `LICENSE` placeholder ("all rights reserved; license decision pending"). Per project owner decision, a permissive license will be chosen later; change is a single-file replacement.
+- [x] Add `LICENSE` placeholder ("all rights reserved; license decision pending"). Per project owner decision, a permissive license will be chosen later; change is a single-file replacement. **Resolved 2026-05-08 in `b82e9d1`** — replaced with Apache License, Version 2.0.
 
 Scripts:
 - [x] `scripts/rt_safety_scan.sh` — scans `Sources/JboxEngineC/rt/` for banned symbols (allocators, locks, dispatch calls, non-RT-safe logging, smart pointer construction). Bash-3.2 compatible (macOS default shell). Clean pass on an empty `rt/`.
@@ -1043,7 +1043,7 @@ CI release pipeline:
 Final polish:
 - [ ] Review and update all three docs (`README.md`, `spec.md`, `plan.md`) for anything that changed during implementation.
 - [ ] Scan all source files for stale TODOs / FIXMEs; address or file follow-up issues.
-- [ ] Verify `LICENSE` has been decided and committed.
+- [x] Verify `LICENSE` has been decided and committed. **Done 2026-05-08 in `b82e9d1`** — Apache License, Version 2.0.
 - [ ] Smoke test the release `.dmg` from GitHub on a fresh user account.
 
 Tagging:

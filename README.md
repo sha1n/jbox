@@ -387,7 +387,9 @@ The conversational history behind the v1 design is summarized in [docs/spec.md](
 
 ## License
 
-TBD — to be decided by the project owner before first public release. For private use there is no immediate need.
+Licensed under the [Apache License, Version 2.0](./LICENSE). Copyright © 2026 Shai Nagar.
+
+You may use, modify, and redistribute this software under the terms of that license. The full text is in [`LICENSE`](./LICENSE) at the repository root.
 
 ---
 
