@@ -181,7 +181,7 @@ deliberate later sprint, not a side-effect of feature work.
 
 ---
 
-## R2 — Live-Core-Audio test "skip" pattern actually fails on no-device CI
+## R2 — Live-Core-Audio test "skip" pattern actually fails on no-device CI ✅ RESOLVED
 
 **Status:** resolved 2026-05-08. Surfaced 2026-05-01 during the
 drag-to-reorder review and confirmed in CI on 2026-05-08 when the
@@ -365,7 +365,7 @@ dependent**: surfaced 2026-05-08 when the GitHub `macos-15` runner
 (Swift 6.1.2) failed `pollMetersIsQuietOnNoChange` while the dev mac
 (Swift 6.3.1) passed it. Older Observation runtimes fire willSet
 unconditionally on direct setters too. The published behaviour of
-Jbox shouldn't depend on which Swift the host runs, so `pollMeters`
+JBox shouldn't depend on which Swift the host runs, so `pollMeters`
 now uses the same explicit `if meters != next { meters = next }`
 guard the subscript-write paths use. The test was repurposed to pin
 the guard rather than the framework optimisation, so it's
@@ -472,5 +472,6 @@ is already clear and well-covered).
   (2026-05-01)" and "@Observable × subscript-write asymmetry,
   second order — counter ticks slip past full-equality diff
   (2026-05-01)".
-- Risks discussion: `docs/2026-05-01-route-reorder-design.md` §
-  "Risks not covered by automated tests".
+- Risks discussion: see the Phase 6 deviation entries referenced
+  above; the original brainstorming design doc was retired once the
+  feature shipped.

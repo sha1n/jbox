@@ -29,8 +29,6 @@
 // strictly better failure mode. The control-thread setter that publishes
 // the atomic target already clamps its inputs, so this is a defence-in-
 // depth invariant for the RT thread.
-//
-// See docs/2026-04-28-route-gain-mixer-strip-design.md § 5.2.
 
 #ifndef JBOX_RT_GAIN_SMOOTHER_HPP
 #define JBOX_RT_GAIN_SMOOTHER_HPP

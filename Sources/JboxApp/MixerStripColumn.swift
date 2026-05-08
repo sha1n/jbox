@@ -19,7 +19,7 @@ import JboxEngineSwift
 /// the corresponding bands render as empty space of the same height
 /// for cross-section alignment.
 ///
-/// See docs/spec.md § 4.5 and docs/2026-04-28-route-gain-mixer-strip-design.md §§ 4.1–4.5, 4.7–4.8.
+/// See `docs/spec.md` § 4.5.
 struct MixerStripColumn: View {
 
     typealias Style = MixerStripDimensions.Style

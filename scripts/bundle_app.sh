@@ -14,7 +14,14 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 BUILD_DIR="${ROOT_DIR}/build"
+# APP_NAME is the on-disk filename ("Jbox.app", binary "Jbox" inside
+# Contents/MacOS, icon "Jbox.icns"). It is also the bundle id leaf and
+# the log directory name — all stable identifiers.
 APP_NAME="Jbox"
+# APP_DISPLAY_NAME is what macOS shows the user (Dock, menu bar, About
+# box, Get Info). Stylized capitalization is allowed to diverge from
+# the on-disk filename.
+APP_DISPLAY_NAME="JBox"
 APP_BUNDLE="${BUILD_DIR}/${APP_NAME}.app"
 EXECUTABLE_NAME="JboxApp"
 CLI_NAME="JboxEngineCLI"
@@ -112,9 +119,9 @@ cat > "${APP_BUNDLE}/Contents/Info.plist" <<PLIST
     <key>CFBundleInfoDictionaryVersion</key>
     <string>6.0</string>
     <key>CFBundleName</key>
-    <string>${APP_NAME}</string>
+    <string>${APP_DISPLAY_NAME}</string>
     <key>CFBundleDisplayName</key>
-    <string>${APP_NAME}</string>
+    <string>${APP_DISPLAY_NAME}</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>
@@ -126,9 +133,9 @@ cat > "${APP_BUNDLE}/Contents/Info.plist" <<PLIST
     <key>NSHighResolutionCapable</key>
     <true/>
     <key>NSMicrophoneUsageDescription</key>
-    <string>Jbox needs access to your audio devices to route audio between them.</string>
+    <string>JBox needs access to your audio devices to route audio between them.</string>
     <key>NSHumanReadableCopyright</key>
-    <string>Copyright © 2026 Shai Nagar. All rights reserved.</string>
+    <string>Copyright © 2026 Shai Nagar. Licensed under the Apache License, Version 2.0.</string>
 </dict>
 </plist>
 PLIST

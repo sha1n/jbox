@@ -8,8 +8,7 @@ import Testing
 //
 // The production wrapper SMAppServiceLaunchAtLogin is intentionally
 // untested — it would mutate the runner's real login items. Its trivial
-// 1:1 enum mapping is verified by manual smoke on a real Jbox.app
-// install (see docs/2026-04-30-launch-at-login-design.md § 4).
+// 1:1 enum mapping is verified by manual smoke on a real Jbox.app install.
 
 @MainActor
 @Suite("FakeLaunchAtLoginService")

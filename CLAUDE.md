@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project
 
-Jbox is a macOS-only Core Audio routing utility. C++ engine + C ABI + Swift wrapper + SwiftUI app. See `README.md` for scope and principles, `docs/spec.md` for design, `docs/plan.md` for phased implementation state and deviations.
+JBox is a macOS-only Core Audio routing utility. C++ engine + C ABI + Swift wrapper + SwiftUI app. See `README.md` for scope and principles, `docs/spec.md` for design, `docs/plan.md` for phased implementation state and deviations.
 
 Two companion docs sit alongside `plan.md` and an agent should know they exist:
 
@@ -26,10 +26,10 @@ When you defer something during feature work, file it in the right doc instead o
 Phase 7.6 ripped out hog mode + aggressive buffer-shrink after they stalled IOProc scheduling on aggregates and crashed a co-resident DAW. Re-introducing any of the patterns below requires explicit per-operation user opt-in, recorded as a new `docs/plan.md § Phase 7.6` deviation. "It seemed safe" / "it was easy" / "another fix needed it" are not sufficient — the cascade was hog-eviction-side and we no longer ship the path that triggers it.
 
 - **No `kAudioDevicePropertyHogMode`.** No hog claim, no hog release, no `claimExclusive` / `releaseExclusive` on `IDeviceBackend`. The interface and both backends were stripped of these symbols intentionally.
-- **The only HAL property write Jbox issues is the v11 per-route `IDeviceBackend::setBufferFrameSize(uid, frames)`.** Fired once per device at `RouteManager::attemptStart`, gated on a non-`nil` / non-zero `RouteConfig.bufferFrames`, no hog claim, no exclusive ownership. For aggregate UIDs the call walks `kAudioAggregateDevicePropertyActiveSubDeviceList` and writes to each member directly. macOS resolves `max-across-clients`; the latency pill reports the resolved value, never the preference. See `docs/spec.md § 2.7` ("Per-route HAL buffer-frame-size preference").
+- **The only HAL property write JBox issues is the v11 per-route `IDeviceBackend::setBufferFrameSize(uid, frames)`.** Fired once per device at `RouteManager::attemptStart`, gated on a non-`nil` / non-zero `RouteConfig.bufferFrames`, no hog claim, no exclusive ownership. For aggregate UIDs the call walks `kAudioAggregateDevicePropertyActiveSubDeviceList` and writes to each member directly. macOS resolves `max-across-clients`; the latency pill reports the resolved value, never the preference. See `docs/spec.md § 2.7` ("Per-route HAL buffer-frame-size preference").
 - **Do not add other HAL property writes** — sample rate, IOMode, default device, stream format, hog, anything. Reading is fine. If a feature appears to require a new write, surface the trade-off to the user first; Preamble Core Design Principle #4 in `docs/spec.md` ("Do not step on other apps") is the contract.
 - **`DeviceIOMux` is an IOProc multiplexer, not a buffer coordinator.** `attachInput` / `attachOutput` take `(key, callback, user_data)`. The fields `non_sharing_attached_`, `last_requested_frames_`, `exclusive_claimed_`, `requested_buffer_frames`, `updateBufferRequest`, `currentMinBufferRequest` are gone and stay gone.
-- **Do not re-introduce a "share device" toggle, `BufferSizePolicy` enum, "Routing defaults" preference, or `SharingPill` view.** All four fronted hog-mode behaviour. Jbox is share-only by construction.
+- **Do not re-introduce a "share device" toggle, `BufferSizePolicy` enum, "Routing defaults" preference, or `SharingPill` view.** All four fronted hog-mode behaviour. JBox is share-only by construction.
 - **Reactions to device hot-plug (sub-phase 7.6.4) and sleep/wake (sub-phase 7.6.5) never claim hog or fan out buffer writes.** The reaction is: stop affected routes, transition to WAITING, retry on reappearance / wake. That is sufficient.
 
 ## Commands
@@ -37,12 +37,16 @@ Phase 7.6 ripped out hog mode + aggressive buffer-shrink after they stalled IOPr
 Always prefer `make` over invoking scripts or `swift` directly — the Makefile wraps the canonical pipeline.
 
 ```sh
-make                 # list targets
+make                 # list targets (same as `make help`)
+make build           # alias for `make dmg` — produce the distributable DMG
+make test            # alias for `make verify` — full test pipeline
+make all             # clean + build + test
 make verify          # full pipeline (same as CI): RT-scan + Release build + Swift tests + C++ tests + TSan
 make swift-test      # Swift Testing only
 make cxx-test        # C++ tests only, with per-test durations
 make cxx-test-tsan   # C++ tests under ThreadSanitizer
 make rt-scan         # RT-safety static scanner on Sources/JboxEngineC/rt/
+make coverage        # generate Swift + C++ lcov reports under test-results/
 make app             # build Jbox.app (no DMG)
 make run             # build + bundle + open build/Jbox.app
 make dmg             # build the distributable DMG
