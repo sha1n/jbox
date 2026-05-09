@@ -1,3 +1,7 @@
+<p align="center">
+  <img alt="JBox icon" src="./assets/jbox-icon-transparent.png" width="256">
+</p>
+
 # JBox
 
 <p align="center">
@@ -14,9 +18,9 @@
 
 ## About this project
 
-This app was **vibe-coded by a seasoned professional developer using Claude Code**, working outside their primary tech stack. The engine, app, and tooling were built almost entirely through agentic coding — the human role was design intent, review, and judgement; the agent did the typing.
+This project was developed by a professional developer working outside their primary tech stack and using Claude Code. The engine, app, and tooling were built almost entirely through agentic coding — the human role was design intent, review, and judgment; the agent did the typing.
 
-It started as a personal-use tool. The author wanted to play their Roland V31 drum module live and hear it through computer monitors connected to a UA Apollo Twin's outputs, with the signal processed through Apollo's console for EQ, compression, and reverb. JBox is the routing layer that makes that flow work.
+It started as a personal project out of a need to play a Roland V31 drum module live and hear it through studio monitors connected to a UA Apollo Twin outputs, with the signal processed through Apollo Console for EQ, compression, and reverb. JBox is the routing layer that makes that flow work.
 
 What shipped, though, is a generic Core Audio routing tool — nothing in the engine knows about that hardware.
 
@@ -25,6 +29,10 @@ What shipped, though, is a generic Core Audio routing tool — nothing in the en
 ## What JBox does
 
 JBox routes selected channels of one Core Audio device to selected channels of another, in real time. Source and destination can be the same physical interface (e.g., feeding a hardware input into that interface's DSP-routable channels) or two different devices — JBox does not care which direction the user thinks of as "output" vs "input"; it works at the Core Audio device + channel level.
+
+<p align="center">
+  <img alt="JBox route view" src="./assets/jbox-route-view.png" width="720">
+</p>
 
 - **Arbitrary 1:N channel mapping** — pick any source channels, any destination channels, map them in any order. A single source channel may feed multiple destination channels (fan-out); multi-source summing (fan-in) is out of scope.
 - **Multiple simultaneous routes** — more like a patchbay than a single-pair bridge.
