@@ -3,13 +3,14 @@ name: CI
 on:
   push:
     branches: [master]
-    paths-ignore:
-      - 'README.md'
-      - 'docs/**'
   pull_request:
-    paths-ignore:
-      - 'README.md'
-      - 'docs/**'
+
+# Note: paths-ignore intentionally NOT used. Branch protection requires
+# the "Build & Test (macOS)" check to report a status; paths-ignore
+# would skip the workflow entirely on docs-only diffs and the required
+# check would stay "Expected" forever, blocking merge. Instead, the job
+# always runs and reports, and the heavy steps are gated on a per-step
+# path filter below.
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -30,17 +31,34 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v6
+        with:
+          # paths-filter needs the previous SHA on push events to diff
+          # against; PR events get the merge-base from the action.
+          fetch-depth: 2
+
+      - name: Detect non-docs changes
+        id: filter
+        uses: dorny/paths-filter@v3
+        with:
+          filters: |
+            code:
+              - '**'
+              - '!README.md'
+              - '!docs/**'
 
       - name: Show toolchain versions
+        if: steps.filter.outputs.code == 'true'
         run: |
           swift --version
           clang --version
           sw_vers
 
       - name: RT-safety scan
+        if: steps.filter.outputs.code == 'true'
         run: ./scripts/rt_safety_scan.sh
 
       - name: Build (release)
+        if: steps.filter.outputs.code == 'true'
         run: swift build -c release
 
       - name: Swift + C++ tests with coverage
@@ -48,15 +66,17 @@ jobs:
         # reachable C++) and rebuilds JboxEngineCxxTests with profile flags
         # to capture engine internals. Emits xunit XML for the test report
         # and lcov files for Codecov. See scripts/coverage.sh.
+        if: steps.filter.outputs.code == 'true'
         run: ./scripts/coverage.sh
 
       - name: C++ engine tests under ThreadSanitizer
         # TSan runs separately — coverage instrumentation interferes with
         # the sanitizer's shadow memory layout, so we keep this pass clean.
+        if: steps.filter.outputs.code == 'true'
         run: swift run --sanitize=thread JboxEngineCxxTests
 
       - name: Upload test results as artifact
-        if: always()
+        if: always() && steps.filter.outputs.code == 'true'
         uses: actions/upload-artifact@v7
         with:
           name: test-results
@@ -64,7 +84,7 @@ jobs:
           if-no-files-found: warn
 
       - name: Publish test report
-        if: always()
+        if: always() && steps.filter.outputs.code == 'true'
         uses: EnricoMi/publish-unit-test-result-action/macos@v2
         with:
           files: test-results/*.xml
@@ -72,10 +92,17 @@ jobs:
           comment_mode: always
 
       - name: Upload coverage to Codecov (OIDC)
-        if: always()
+        if: always() && steps.filter.outputs.code == 'true'
         uses: codecov/codecov-action@v5
         with:
           use_oidc: true
           files: test-results/swift-coverage.lcov,test-results/cxx-coverage.lcov
           flags: swift,cxx
           fail_ci_if_error: false
+
+      - name: Docs-only no-op
+        if: steps.filter.outputs.code != 'true'
+        run: |
+          echo "Docs-only change detected — build, tests, and coverage skipped."
+          echo "The required 'Build & Test (macOS)' check still reports success"
+          echo "so branch protection lets the PR through."
