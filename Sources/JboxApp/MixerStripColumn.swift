@@ -81,7 +81,12 @@ struct MixerStripColumn: View {
     }
 
     var body: some View {
-        VStack(spacing: 4) {
+        // The VStack spacing and outer vertical padding flow through
+        // `MixerPanelLayout.bandStack{InnerSpacing,OuterPadding}` so a
+        // change here cascades into `barZoneTopOffset` /
+        // `barZoneBottomOffset` and keeps the section dB scale
+        // aligned with the bar zone (issue #12).
+        VStack(spacing: MixerPanelLayout.bandStackInnerSpacing) {
             // Header band — fixed height keeps the bar zone anchored.
             Text(title)
                 .font(titleFont)
@@ -127,7 +132,7 @@ struct MixerStripColumn: View {
                 .frame(height: MixerPanelLayout.actionBandHeight)
         }
         .padding(.horizontal, style == .vca ? 12 : 8)
-        .padding(.vertical, 6)
+        .padding(.vertical, MixerPanelLayout.bandStackOuterPadding)
         .frame(width: stripWidth)
         .background(
             RoundedRectangle(cornerRadius: 5)
