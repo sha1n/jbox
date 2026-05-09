@@ -105,7 +105,6 @@ Scripts:
 CI:
 - [x] `.github/workflows/ci.yml` configured for GitHub Actions `macos-15` runner.
 - [x] CI runs: `swift build -c release`, `swift test`, `scripts/rt_safety_scan.sh`.
-- [ ] `clang-tidy` and `swiftlint` steps included but permitted to warn without failing on Phase 1 (tighten in later phases). **Deferred to Phase 2** (no engine code yet to lint).
 - [x] CI passes on `master` push. (Initial PR flow skipped for a solo repo; PR triggers are still wired up for future contributions.)
 
 Testing harness:
@@ -136,7 +135,6 @@ Deviations from the original Phase 1 plan worth noting:
 - [x] Each primitive has a dedicated unit-test file with concurrent stress tests where applicable.
 - [x] ThreadSanitizer enabled for test builds; no data races detected.
 - [x] `scripts/rt_safety_scan.sh` clean against `rt/`.
-- [ ] `clang-tidy` warnings in the engine sources cleared or explicitly suppressed with justification. **Deferred to Phase 3** — set up a proper clang-tidy config once we have Core Audio integration code to lint against; lint value on the five synthetic primitives alone is low and would risk over-fitting rules.
 
 **Tasks.**
 
@@ -169,7 +167,6 @@ Deviations from the original Phase 2 plan worth noting:
 - **Sanitizer flag delivery.** The original plan put `.unsafeFlags(["-fsanitize=thread"])` in Package.swift; that doesn't work because the flag is a clang-driver flag, not a linker flag. Resolution: sanitizer is invoked via SPM's `swift run --sanitize=thread` at the CLI (and in CI). Cleaner and the package stays configuration-agnostic.
 - **`rt_safety_scan.sh` comment awareness.** Legitimate comments containing words like "no printf" or "new head" were tripping the scanner. Fixed during the RtLogQueue commit by adding a C++-comment stripper in awk before the banned-symbol grep. Line numbers in reports still reference the original source.
 - **Ring buffer + log queue header-only.** Both live in `.hpp` only (no `.cpp`) because they are templated on capacity (log queue) or template-like in structure (ring buffer takes external storage). Simpler for callers and there was no implementation cost to paying.
-- **`clang-tidy` deferred.** See exit-criteria note above.
 
 ---
 
@@ -195,7 +192,7 @@ Engine — device layer:
   - [x] `SimulatedBackend` (commit #2) — deterministic, zero threads, no sleeps.
   - [x] `CoreAudioBackend` (commit #3) — real implementation via `AudioObjectGetPropertyData(kAudioHardwarePropertyDevices)`, `AudioDeviceCreateIOProcID`, `AudioDeviceStart` / `AudioDeviceStop`. Handles both interleaved and non-interleaved device formats.
 - [x] `DeviceManager` (commit #4) — UID-keyed registry + enumeration cache.
-- [ ] Register a listener for `kAudioHardwarePropertyDevices` changes; post events to the control thread for re-enumeration. **Deferred to Phase 5** (paired with multi-route device sharing).
+- [x] Register a listener for `kAudioHardwarePropertyDevices` changes; post events to the control thread for re-enumeration. **Landed in Phase 7.6.4 + F1 / 7.6.7** — `CoreAudioBackend` registers HAL property listeners against the system object + each enumerated device + each aggregate via `AudioObjectAddPropertyListener` (function-pointer variant + `std::shared_mutex`); see `docs/followups.md` § F1 for the production wiring write-up.
 
 Engine — route layer:
 - [x] `RouteManager` (commit #5) — add / remove / start / stop route operations (control thread).
@@ -203,7 +200,7 @@ Engine — route layer:
 - [x] Route stop sequence: close IOProcs via backend, release ring buffer storage.
 - [x] Input IOProc copies selected channels from device input buffer into the route's ring buffer.
 - [x] Output IOProc reads from ring buffer into selected channels of device output buffer. **No resampling yet** — assume matching sample rates.
-- [ ] RCU-style active-route lists (IOProc multiplexing behind a single registered callback). **Deferred to Phase 5** — Phase 3 enforces one-route-per-direction-per-device via `JBOX_ERR_DEVICE_BUSY`.
+- [x] RCU-style active-route lists (IOProc multiplexing behind a single registered callback). **Landed in Phase 5 commit `a83c4b5`** — `DeviceIOMux` publishes a `std::atomic<const RouteList*>` with sequence-counter-based quiescence on the control thread (sleep-based grace period was replaced with acq/rel sequence counters in commit #4 so ThreadSanitizer sees the synchronisation).
 
 Bridge API:
 - [x] Implemented `jbox_engine_create`, `jbox_engine_destroy` (commit #6; Engine facade owns DeviceManager + RouteManager).
@@ -218,7 +215,7 @@ CLI harness (commit #7):
 Tests:
 - [x] Integration tests via `SimulatedBackend`: `RouteManager` (commit #5) and `Engine` / bridge API (commit #6) with byte-exact sample-flow assertions. Covers mapping validation, waiting-for-device, underrun counting, stop / remove semantics, device-sharing constraint, non-contiguous channel selection.
 - [x] Swift wrapper tests against live Core Audio (commit #7 / #8): create, destroy, enumerate, error propagation.
-- [ ] **Manual hardware acceptance test — deferred.** Procedure (tick boxes as they pass):
+- [~] **Manual hardware acceptance test — deferred to Phase 9 hardware session.** Procedure (tick boxes as they pass):
   - [ ] Connect a source device (ideally Roland V31) and a destination device (ideally UA Apollo).
   - [ ] Run `./scripts/verify.sh` and confirm everything still passes locally.
   - [ ] Run `swift run JboxEngineCLI --list-devices` and confirm both devices appear with the expected channel counts.
@@ -263,8 +260,8 @@ Tuning:
 - [x] Document final gains and the reasoning in `control/drift_tracker.cpp`.
 
 Real-hardware verification:
-- [ ] 30-minute soak test on real devices. Document procedure in a new file `docs/testing/soak.md`.
-- [ ] Sample-rate mismatch test: explicitly set V31 and Apollo to different rates via Audio MIDI Setup, run a route, verify audio is correct.
+- [~] 30-minute soak test on real devices. Procedure drafted in `docs/testing/soak.md` (2026-05-01); execution deferred to Phase 9 hardware session.
+- [~] Sample-rate mismatch test: explicitly set source and destination devices to different rates via Audio MIDI Setup, run a route, verify audio is correct. Deferred to Phase 9 hardware session.
 
 Tests:
 - [~] Simulated clock-drift tests in `JboxEngineCxxTests` covering source-faster-than-dest, dest-faster-than-source, and transient bursts. First two done; the "transient bursts" test is a short-horizon variant of scenario 1 (not a true mid-run rate change) — see TODO in `drift_integration_test.cpp`.
@@ -301,7 +298,7 @@ Engine:
 Tests:
 - [x] Integration tests for add-while-running, remove-while-running scenarios. (`multi_route_test.cpp` "add-while-running keeps the first route flowing" and "remove-while-running stops one without disturbing peers".)
 - [x] Concurrent-route stress test: rapid start / stop of many routes on the same devices; verify no crashes, no leaks, no corrupted output. (`multi_route_stress_test.cpp` — two scenarios exercising both the mux directly and the RouteManager path, both TSan-clean.)
-- [ ] Real-hardware sanity test: three concurrent routes across two or more devices. **Deferred** until the owner's rig is connected.
+- [~] Real-hardware sanity test: three concurrent routes across two or more devices. **Deferred to Phase 9 hardware session.**
 
 Phase 5 summary of deviations:
 - **Quiescence vs. sleep-based grace period.** The initial Phase 5 design used `std::this_thread::sleep_for(1.5 × buffer_period)` to wait for in-flight RT iterations to exit before dropping the old list (as suggested in docs/spec.md § 2.3). That is correct in production but ThreadSanitizer flagged the subsequent delete as racing with the RT trampoline's iterator — TSan does not model time-based synchronisation. Replaced with a pair of `std::atomic<std::uint64_t>` enter/exit sequence counters per direction; the control thread snapshots enter-seq after the atomic store and yield-spins until exit-seq catches up. Same semantics, TSan-visible happens-before, no knob to tune. The `grace_period_seconds` constructor parameter was dropped.
@@ -387,7 +384,7 @@ Meters — split into two slices so the diagnostic dots land first:
    - [x] Engine: `ChannelMapper::validate()` no longer rejects duplicate `src`. The `kDuplicateSource` enum entry was removed outright (internal C++ only; `JBOX_ERR_MAPPING_INVALID` remains the public error code). Duplicate `dst` is still rejected — fan-in / summing stays deferred per [spec.md Appendix A](./spec.md#appendix-a--deferred--out-of-scope). No hot-path change: the scratch-copy / converter / metering loops already iterate per output slot, so a fan-out edge is "just another output channel" whose scratch cell happens to hold the same source sample.
    - [x] Tests: the existing `[channel_mapper]` cases flipped — "duplicate source is rejected" → "duplicate source is allowed (fan-out)"; the mixed-duplicates case now reports `kDuplicateDestination` since src-dup no longer errors; new fan-out shape case (1:3). `[route_manager][fan_out][integration]` asserts end-to-end that one src channel mapped to two dst channels produces the same sample on both. `EngineStoreTests.addRouteDuplicateDst` replaces the old duplicate-src case.
    - [x] UI: `AddRouteSheet`'s client-side validator drops the `seenSrc` check; keeps the `seenDst` rejection with the copy "destination channel … is already in use." Doc comment at the top of the file updated.
-   - [ ] Spec already updated: § 1.1, § 2.5 (converter output slot semantics), § 3.1 mapping invariants, § 4.3 editor validation, Appendix A.
+   - [x] Spec already updated: § 1.1, § 2.5 (converter output slot semantics), § 3.1 mapping invariants, § 4.3 editor validation, Appendix A.
 
 2. **Edit existing routes.** **Landed.**
    - [x] Engine: `jbox_engine_rename_route(engine, id, new_name)` — additive symbol, ABI v6 → v7 (MINOR). Non-disruptive in every state; the call just mutates `RouteRecord::name`, which the RT path never touches. `RouteManager::renameRoute` + a test-only `routeName(id)` C++ getter for round-trip observation. Mapping / device / latency-mode / buffer-frames edits go through the Swift layer — the engine's `RouteRecord::mapping` is immutable after `addRoute`, so `EngineStore.replaceRoute(id:with:)` orchestrates stop → `addRoute` (new id) → `removeRoute` (old) → `startRoute` (if the old route was running), and best-effort restarts the old route if the mid-sequence `addRoute` fails.
@@ -399,7 +396,7 @@ Meters — split into two slices so the diagnostic dots land first:
    - [x] Engine: pure helper `jbox::control::estimateLatencyMicroseconds` (new `control/latency_estimate.{hpp,cpp}`) computes the sum per [spec.md § 2.12](./spec.md#212-estimated-per-route-latency), split at the SRC/DST-rate boundary so routes that bridge different device rates compose correctly. `RouteManager::attemptStart` fills the components once (using `AudioConverterWrapper::primeLeadingFrames` for the SRC prime count and `RingBuffer::usableCapacityFrames() / 2` for the drift-sampler setpoint) and caches the total; `pollStatus` returns it through the new `jbox_route_status_t::estimated_latency_us` field. ABI bump 1 → 2 (MINOR; field is appended).
    - [x] Swift: `RouteStatus.estimatedLatencyUs`. New `LatencyFormatter.pillText(microseconds:)` renders buckets (`<1 ms`, `~N.N ms`, `~N ms`, `~N.N s`) and returns `nil` for 0 so the UI can hide the pill.
    - [x] UI: `RouteRow` shows a faint `LatencyPill` next to the counters whenever the engine reports a non-zero estimate.
-   - [ ] Expanded-panel component breakdown is deferred to land with #4 (diagnostics toggle) — the pill alone is the first slice and doesn't need a separate Advanced view until the breakdown is defensible.
+   - [x] Expanded-panel component breakdown landed alongside #4 — the gridded latency breakdown (src HAL / safety / buffer / ring / SRC prime / dst buffer / safety / HAL, plus total) ships inside `DiagnosticsBlock` at the bottom of `MeterPanel`, visible only when the engine-diagnostics toggle is on.
    - [x] Tests: eight Catch2 cases pinning the estimator (same-rate sum, split rates, zero-rate guard, negative-rate guard, ring-dominates, monotonicity). An end-to-end `[route_manager][latency]` case drives `SimulatedBackend` with known HAL values + asserts the pill is > the HAL-lower-bound, larger on a bigger-buffer route, and zeroed after stop. Six Swift Testing cases cover `LatencyFormatter` bucket transitions. `pollStatus` fill-through is covered by the existing `estimated_latency_us == 0` assertion on STOPPED routes.
 
 4. **Advanced / engine-diagnostics toggle.** **Landed.**
@@ -609,7 +606,7 @@ Phase 6 first-slice summary of deviations:
 
 **Exit criteria.**
 - [x] Relaunching the app restores all configured routes.
-- [ ] Opt-in launch-at-login works: when toggled on, the app registers as a login item; after macOS login, JBox starts automatically and appears in the menu bar (routes remain stopped per the design).
+- [~] Opt-in launch-at-login works: when toggled on, the app registers as a login item; after macOS login, JBox starts automatically and appears in the menu bar (routes remain stopped per the design). **Code complete** (controller + `SMAppService.mainApp` wrapper + persistence latch landed); the real log-out / log-back-in smoke is deferred to Phase 9 hardware session.
 - [x] Schema migration infrastructure in place even though only v1 exists. `StoredAppState.currentSchemaVersion` + `StateStore.LoadError.schemaTooNew` refuse forward-schema files; a future v2 adds a ladder of decode-time migrators.
 - [x] `state.json` is atomically written, debounced, backed up.
 
@@ -727,8 +724,8 @@ Phase 7.5 summary of deviations:
 - [x] **7.6.3.** `closeCallback` and `releaseRouteResources` check return codes; failed teardown leaves the in-memory record alive so the next stop/dispose retries instead of silently leaking. New `[sim_backend][teardown_failure]` + `[route_manager][teardown_failure]` cases. (Strictly about IOProc destruction — the hog-release path is gone.) See the 7.6.3 deviation below for the bool-return contract, the destructor-side best-effort retry on the mux, and the dispose-time retry on `removeRoute`.
 - [x] **7.6.4 (engine).** `DeviceChangeWatcher` + `IDeviceBackend::setDeviceChangeListener` interface land. Engine spawns a 10 Hz consumer thread that drains the watcher and feeds events to `RouteManager::handleDeviceChanges`: kDeviceIsNotAlive on a UID a running route depends on transitions the route to WAITING with `last_error = JBOX_ERR_DEVICE_GONE`; kDeviceListChanged / kAggregateMembersChanged refresh the device manager and retry every WAITING route (auto-recovery on reappearance). New ABI v12 (additive) with `JBOX_ERR_DEVICE_GONE`. CoreAudioBackend's HAL property listener registration is **deferred to a follow-up commit after manual hardware testing** — the simulator path is what CI exercises today. See the 7.6.4 deviation below + `docs/refactoring-backlog.md` § R1 for the open `last_error` naming question.
 - [x] **7.6.5 (engine).** `PowerStateWatcher` + `IPowerEventSource` interface land. `kWillSleep` events fire a synchronous handler (wired by Engine to `RouteManager::prepareForSleep`) and the watcher acks regardless of what the handler does. `kPoweredOn` events queue and drain on the existing 10 Hz consumer thread, which then calls `RouteManager::recoverFromWake` (primes per-route `wake_retries_remaining = 3` + `wake_next_retry_at = now`) followed by `tickWakeRetries(now)` every tick to fire due retries with linear backoff (200ms × attempt index → cumulative +0ms / +200ms / +600ms). After 3 failed attempts the route stays `WAITING + JBOX_ERR_SYSTEM_SUSPENDED`; 7.6.4's device-change watcher remains the long-tail recovery mechanism. New ABI v13 (additive) with `JBOX_ERR_SYSTEM_SUSPENDED`. The production `MacosPowerEventSource` (`IORegisterForSystemPower` wiring) is **deferred to a hardware-tested follow-up**, same model as 7.6.4's CoreAudioBackend HAL listener.
-- [ ] `make verify` green on the combined diff.
-- [ ] Manual hardware acceptance on a real aggregate device confirms (a) first start always produces audio at the user's chosen interface buffer, (b) hot-unplugging a sub-device transitions the route to WAITING and replugging recovers, (c) sleep/wake cycle restarts the route within a few seconds, (d) any engine error popup is dismissed in one click and never re-presents.
+- [x] `make verify` green on the combined diff. Verified throughout 7.6.x landings; the pre-commit checklist enforces it on every commit.
+- [~] Manual hardware acceptance on a real aggregate device confirms (a) first start always produces audio at the user's chosen interface buffer, (b) hot-unplugging a sub-device transitions the route to WAITING and replugging recovers, (c) sleep/wake cycle restarts the route within a few seconds, (d) any engine error popup is dismissed in one click and never re-presents. **Deferred to Phase 9 hardware session.**
 
 ### What the simplification removed
 
@@ -1037,6 +1034,15 @@ CI release pipeline:
   - Run `build_release.sh` and `package_unsigned_release.sh`.
   - Upload `.dmg` as a draft pre-release asset. **(Already landed in `64c6fdd` / `release.yml`.)**
 - [ ] Release checklist in `.github/ISSUE_TEMPLATE/release.md` covering the release-gate items from the spec.
+
+Code quality gates:
+- [ ] **`clang-tidy` + `swiftlint` wired into the build + CI.** Promised in the original Phase 1 / Phase 2 task lists and never landed; the gates that did land (`scripts/rt_safety_scan.sh`, ThreadSanitizer, the Catch2 + Swift Testing suites, compiler warnings) cover most of what they would have, but a real lint pass is conventional for a release gate. Sub-tasks:
+  - [ ] `bear -- swift build` (or equivalent) wired into a Makefile target so `compile_commands.json` is reproducible on a fresh clone and in CI.
+  - [ ] `.clang-tidy` config focused on `Sources/JboxEngineC/control/` (the `rt/` subtree stays under `rt_safety_scan.sh`'s narrower contract). Tuned check set with zero false positives on the current tree before flipping CI to error-level.
+  - [ ] `.swiftlint.yml` config covering `Sources/JboxEngineSwift/` and `Sources/JboxApp/`. Tuned rule set with zero false positives.
+  - [ ] `make lint` Makefile target invoking both linters.
+  - [ ] GitHub Actions step in `ci.yml` that runs `make lint` and fails on warnings.
+  - [ ] Any pre-existing findings either fixed or explicitly suppressed at the call site with justification.
 
 Final polish:
 - [ ] Review and update all three docs (`README.md`, `spec.md`, `plan.md`) for anything that changed during implementation.
