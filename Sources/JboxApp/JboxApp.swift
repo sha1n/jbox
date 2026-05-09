@@ -119,6 +119,22 @@ struct PreferencesView: View {
     }
 }
 
+/// Caption rendered under a `Section`'s control(s) in a Preferences
+/// tab. Wraps the alignment contract so a bare `Text` in a Section's
+/// `footer:` slot doesn't get squashed into the form's right-aligned
+/// label column on macOS `.formStyle(.grouped)` (issue #14). Used by
+/// every footer caption across the three preference tabs so the
+/// rendering quirk is fixed in one place.
+struct PreferencesFootnote: View {
+    let text: String
+
+    var body: some View {
+        Text(text)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .fixedSize(horizontal: false, vertical: true)
+    }
+}
+
 /// General tab: appearance + menu bar toggles. "Show meters in menu
 /// bar icon" still lands with the icon-renderer feature; "Launch at
 /// login" is wired here through `LaunchAtLoginController`
@@ -192,7 +208,7 @@ struct GeneralPreferencesView: View {
         } header: {
             Text("Appearance")
         } footer: {
-            Text(Self.appearanceFooter)
+            PreferencesFootnote(text: Self.appearanceFooter)
         }
     }
 
@@ -204,7 +220,7 @@ struct GeneralPreferencesView: View {
         } header: {
             Text("Menu bar")
         } footer: {
-            Text(Self.menuBarFooter)
+            PreferencesFootnote(text: Self.menuBarFooter)
         }
     }
 
@@ -316,7 +332,7 @@ struct AudioPreferencesView: View {
         } header: {
             Text("Buffer size")
         } footer: {
-            Text(Self.bufferHintFooter)
+            PreferencesFootnote(text: Self.bufferHintFooter)
         }
     }
 
@@ -332,7 +348,7 @@ struct AudioPreferencesView: View {
         } header: {
             Text("Resampler quality")
         } footer: {
-            Text(Self.resamplerFooter)
+            PreferencesFootnote(text: Self.resamplerFooter)
         }
     }
 
@@ -385,7 +401,7 @@ struct AdvancedPreferencesView: View {
         Section {
             Toggle("Show engine diagnostics", isOn: $showDiagnostics)
         } footer: {
-            Text(Self.diagnosticsFooter)
+            PreferencesFootnote(text: Self.diagnosticsFooter)
         }
     }
 
@@ -395,7 +411,7 @@ struct AdvancedPreferencesView: View {
         } header: {
             Text("Logs")
         } footer: {
-            Text(Self.logsFooter)
+            PreferencesFootnote(text: Self.logsFooter)
         }
     }
 
@@ -410,7 +426,7 @@ struct AdvancedPreferencesView: View {
         } header: {
             Text("Configuration")
         } footer: {
-            Text(Self.configFooter)
+            PreferencesFootnote(text: Self.configFooter)
         }
     }
 
