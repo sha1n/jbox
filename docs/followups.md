@@ -597,3 +597,147 @@ the racing pair.
 - Observed on baseline `master` (commit `ae6cf17`) with no F1
   changes applied: stash-and-rerun reproduced the crash at run 4
   of 5.
+
+---
+
+## F5 — `clang-tidy` + `swiftlint` CI gates
+
+**Status:** ⏳ Pending. Promised in the original Phase 1 / Phase 2
+task lists and never landed; deferred from Phase 9 to the
+`v0.2.0+` window when `v0.1.0-alpha` was cut without it.
+
+### Problem
+
+The lint surface JBox actually ships today is `scripts/rt_safety_
+scan.sh` (RT-subtree banned-symbol grep), ThreadSanitizer in
+`make verify`, the Catch2 + Swift Testing suites, and
+compiler warnings at `-Werror`-equivalent strictness. That covers
+the load-bearing real-time invariants and most logic-level bugs,
+but the project ships C++ control-thread code (`Sources/JboxEngine
+C/control/`) and Swift app code (`Sources/JboxEngineSwift/`,
+`Sources/JboxApp/`) without a conventional lint pass against
+either. A real-release gate is conventional; the `v1.0.0` exit
+criteria in `docs/plan.md § Phase 9` list it explicitly.
+
+### What to do
+
+Per `docs/plan.md § Phase 9` (lines 1039–1045):
+
+1. `bear -- swift build` (or equivalent) wired into a Makefile
+   target so `compile_commands.json` is reproducible on a fresh
+   clone and in CI.
+2. `.clang-tidy` config focused on `Sources/JboxEngineC/control/`
+   only. The `rt/` subtree stays under `rt_safety_scan.sh`'s
+   narrower contract — clang-tidy's general-purpose checks would
+   raise too much noise about `noexcept` / containers / etc.
+   that the RT scanner already rules out at a coarser level.
+   Tune the check set to zero false positives on the current
+   tree before flipping CI to error-level.
+3. `.swiftlint.yml` config covering `Sources/JboxEngineSwift/`
+   and `Sources/JboxApp/`. Tune rule set to zero false positives.
+4. `make lint` Makefile target invoking both linters.
+5. GitHub Actions step in `ci.yml` that runs `make lint` and
+   fails on warnings.
+6. Any pre-existing findings either fixed or explicitly
+   suppressed at the call site with justification.
+
+### Pitfalls
+
+- **Flipping CI to error-level before tuning.** A noisy
+  configuration burns one or two PRs on triage churn; pin the
+  ruleset against the current tree first, fix or suppress the
+  baseline, then make CI red.
+- **Letting clang-tidy's RT-equivalent checks duplicate
+  `rt_safety_scan.sh`.** Keep the boundaries clear — RT scanner
+  for the `rt/` subtree, clang-tidy for `control/`. Don't try to
+  fold one into the other.
+- **Adding lint to `make verify` while leaving the F4 stress
+  flake unfixed.** A flaky pre-tag gate is worse than no gate;
+  resolve F4 (or quarantine the case explicitly with rationale)
+  before the gate goes red on transient noise.
+
+### Acceptance / verification
+
+- `make lint` succeeds on `master` with zero warnings.
+- CI's `lint` step runs on every push to `master` and on PRs.
+- A deliberate violation (e.g., introduce an unused variable in
+  a Swift file or a `nullptr`-dereference path in a C++ file)
+  fails CI.
+
+### References
+
+- `docs/plan.md § Phase 9` lines 1039–1045 — original task list.
+- `scripts/rt_safety_scan.sh` — the in-tree static gate the lint
+  pass complements rather than replaces.
+
+---
+
+## F6 — Phase 9 real-hardware acceptance (soak / latency / stress)
+
+**Status:** ⏳ Pending. Procedures documented under `docs/
+testing/`; runs on real hardware are the gate to `v1.0.0`. `v0.1.
+0-alpha` ships without these runs by deliberate decision; the
+limitation is surfaced in the Release body.
+
+### Problem
+
+`docs/testing/soak.md`, `docs/testing/latency.md`, and `docs/
+testing/stress.md` document the three real-hardware acceptance
+procedures that gate the `v1.0.0` tag (Phase 9 exit criteria).
+None of them have been run end-to-end on real hardware and
+recorded against the current `master`. The closest signal we
+have today is the project owner's pre-tag manual smoke pass on
+`v0.1.0-alpha`'s release commit — sufficient for an alpha but
+not for `v1.0.0`.
+
+### What to do
+
+Three independent runs, each producing a recorded artifact:
+
+1. **Soak.** Follow `docs/testing/soak.md`. Run a representative
+   route for ≥ 30 minutes on real hardware (CLI canonical, GUI
+   variant optional). Verify zero dropouts in logs, drift
+   tracker in band, no clipping, plausible meter values. Record
+   in the template at the end of `soak.md`.
+2. **Latency.** Follow `docs/testing/latency.md`. Loopback
+   test: patch a destination output back into a source input
+   via cable; inject a test pulse; measure round-trip latency.
+   Confirm within ±1 ms of theoretical expectation.
+3. **Stress / disconnect.** Follow `docs/testing/stress.md`.
+   Start and stop routes rapidly. Unplug and replug devices.
+   Verify graceful recovery, no crashes, no stuck routes.
+
+This work pairs naturally with closing **F1** (hot-plug
+hardware acceptance) — the stress / disconnect run is the
+acceptance pass for F1. Do not schedule them separately.
+
+### Pitfalls
+
+- **Treating the simulator regression coverage as a substitute.**
+  Simulator passes prove the engine logic; real hardware can
+  expose timing, IOProc-scheduler, and HAL-property-cascade
+  behaviour the simulator cannot reproduce.
+- **Running once and declaring done.** A 30-minute soak that
+  passed once on a calm system may fail on the same system
+  when other audio apps are running. The procedure templates
+  ask for environmental notes for a reason.
+- **Skipping log review.** "No audible problem" is not the
+  acceptance criterion — `~/Library/Logs/Jbox/Jbox.log` (or
+  `JboxEngineCLI.log`) must show zero `evt=underrun` /
+  `evt=overrun` for the soak to pass.
+
+### Acceptance / verification
+
+- All three procedure docs have a recorded run against the
+  same `master` SHA.
+- Recorded artifacts live in `docs/testing/<procedure>-runs/`
+  (or attached to the `v1.0.0` release notes).
+- F1 hot-plug hardware acceptance passes in the same session.
+
+### References
+
+- `docs/plan.md § Phase 9` — exit criteria + task list.
+- `docs/testing/soak.md`, `docs/testing/latency.md`,
+  `docs/testing/stress.md` — the procedures themselves.
+- `docs/followups.md § F1` — pairs with the stress / disconnect
+  run.

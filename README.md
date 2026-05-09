@@ -54,7 +54,7 @@ A typical example: routing a hardware instrument or external sound module into s
 
 ## What JBox is not
 
-- **Not a mixer.** No summing, no gain, no mute. 1:N routing only — a source channel can feed many destinations (fan-out), but two sources cannot combine into one destination (fan-in / summing stays out of scope).
+- **Not a mixer.** No fan-in / summing. 1:N routing only — a source channel can feed many destinations (fan-out), but two sources cannot combine into one destination. Per-route output trim and mute are supported (see scope below).
 - **Not a DAW.** No timeline, no plugins, no recording, no MIDI.
 - **Not a virtual audio driver.** JBox does not ship its own audio device. For the multi-source live-monitoring case (a hardware source + media apps reaching the same physical monitor outs), the recommended topology uses a macOS aggregate device plus the destination interface's hardware mixer — see [`docs/spec.md` § 2.13](./docs/spec.md#213-multi-source-low-latency-monitoring-topology). Users without a hardware-mixer-equipped interface can substitute a third-party loopback driver such as [BlackHole](https://github.com/ExistentialAudio/BlackHole) for the aggregate; JBox treats it as an ordinary Core Audio device and needs no driver-specific code.
 - **Not a network audio tool.** No Dante, no AVB, no NDI, no IP streaming.
@@ -83,7 +83,7 @@ Building from source? See [`docs/development.md`](./docs/development.md).
 
 ## Status
 
-Pre-1.0. The engine and SwiftUI app are feature-complete for the v1.0.0 scope below; release hardening (real-hardware soak, latency measurement, lint setup, and the v1 tag) is the remaining work. See [`docs/plan.md`](./docs/plan.md) for per-phase detail.
+Pre-1.0. **`v0.1.0-alpha` is the first public pre-1.0 release** — see the [Releases page](https://github.com/sha1n/jbox/releases). The engine and SwiftUI app are feature-complete for the v1.0.0 scope below; Phase 9 release hardening (real-hardware soak, latency measurement, lint setup, and the v1 tag) is the remaining work. See [`docs/plan.md`](./docs/plan.md) for per-phase detail.
 
 **Scope for v1.0.0** (what the first release will do):
 
@@ -94,13 +94,14 @@ Pre-1.0. The engine and SwiftUI app are feature-complete for the v1.0.0 scope be
 - Auto-waiting for missing devices; auto-recovery on device return.
 - **Tiered latency modes** per route (Off / Low / Performance) — ring-sizing presets that govern drift-sampler residency; a direct-monitor fast path bypasses the ring + converter entirely for same-device (aggregate) Performance routes. On Performance, the user can also pick a per-route Buffer Size *preference* — JBox writes it once via `kAudioDevicePropertyBufferFrameSize` (no hog mode), and macOS resolves the actual buffer as the max across all active clients.
 - **Per-route latency pill** plus an Advanced-only diagnostics panel with the full component breakdown.
+- **Per-route output trim (gain VCA) and mute**, surfaced as a per-route mixer-strip console view with per-channel meters.
 - SwiftUI main window + menu bar extra + preferences.
 - Ad-hoc signed `.app` for personal use; unsigned `.dmg` lane for small-audience sharing.
 
 Explicitly **deferred** beyond v1 (see [`docs/spec.md` § Appendix A](./docs/spec.md#appendix-a--deferred--out-of-scope) for the full list):
 
 - Fan-in / summing / any mixer features (fan-out shipped in Phase 6).
-- Per-route gain, mute, or pan.
+- Per-route pan.
 - Scenes (named presets that activate groups of routes together) — design preserved at [`docs/spec.md` § 4.10](./docs/spec.md#410-future-feature--scenes-with-sidebar).
 - Global hotkeys.
 - Developer ID signing + notarization.

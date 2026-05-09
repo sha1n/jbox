@@ -1011,6 +1011,8 @@ Phase 8 summary of deviations:
 
 ## Phase 9 — Release hardening and device-level testing
 
+**Status:** 🚧 Partial. **Cut `v0.1.0-alpha` on 2026-05-09 ahead of full Phase 9 completion** — first public pre-1.0 release, see deviations below. CI release pipeline (`release.yml`, `bundle_app.sh`, `package_unsigned_release.sh`) shipped earlier in Phase 8 and is exercised by this tag. Real-hardware acceptance procedures and lint gates remain open and are tracked under `docs/followups.md` § F5–F6 toward `v0.2.0+` and `v1.0.0`.
+
 **Goal.** Prove the release is ready for real use; set up release gates; cut v1.0.0.
 
 **Entry criteria.** Phase 8 complete.
@@ -1051,8 +1053,13 @@ Final polish:
 - [ ] Smoke test the release `.dmg` from GitHub on a fresh user account.
 
 Tagging:
+- [x] Tag `v0.1.0-alpha` on `master` — first public pre-1.0 release. **Done 2026-05-09.** GitHub Releases draft populated by `release.yml`; published after manual smoke-test of the CI-built DMG.
 - [ ] Tag `v1.0.0` on `master`.
 - [ ] Promote the draft release to published on GitHub.
+
+Phase 9 summary of deviations:
+
+- **Cut `v0.1.0-alpha` ahead of full Phase 9 completion (2026-05-09).** Rather than block the first user-visible build on the soak / latency / stress hardware-acceptance pass and the clang-tidy / swiftlint wiring, the first public release ships as an explicit pre-1.0 alpha. Rationale: phases 1–8 are complete (drift-corrected multi-route engine, mixer-strip UI with per-route gain + mute, persistence, launch-at-login, ad-hoc-signed DMG with audio-input entitlement guard); the project owner manually verified routing on real hardware before tagging; and `make verify` is green on the release commit. The two known user-visible limitations — F1 production hot-plug hardware acceptance still pending and F2 sleep/wake recovery not yet implemented — are surfaced verbatim in the GitHub Release body's "Known limitations" section so early users can route around them. Phase 9 items still open: F5 (clang-tidy + swiftlint CI gates), F6 (real-hardware soak / latency / stress procedure runs per `docs/testing/`). When both close, plus F1 hardware acceptance, plus F2 implementation, the gate to `v1.0.0` is met.
 
 ---
 
