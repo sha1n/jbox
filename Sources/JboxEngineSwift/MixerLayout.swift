@@ -76,6 +76,32 @@ public enum MixerPanelLayout {
     /// so SOURCE and DESTINATION bar zones share a baseline inside
     /// their respective section frames.
     public static let actionBandHeight:  CGFloat = 22
+    /// `VStack` spacing between adjacent bands inside a strip column.
+    /// Single source of truth so `MixerStripColumn` and the dB-scale
+    /// column compute the same bar-zone vertical offsets.
+    public static let bandStackInnerSpacing: CGFloat = 4
+    /// Outer vertical padding wrapping the band stack inside a strip
+    /// column — same source-of-truth role as `bandStackInnerSpacing`.
+    public static let bandStackOuterPadding: CGFloat = 6
+    /// Distance from the strip column's top edge to the top of the
+    /// bar zone (the `barZone` view inside `MixerStripColumn`). The
+    /// section's `DbScale` column pads its top by exactly this value
+    /// so the "0" tick lines up with the bar's 0 dBFS top edge.
+    /// Issue #12 — keep the formula in lock-step with the band stack
+    /// in `MixerStripColumn.body`.
+    public static let barZoneTopOffset: CGFloat =
+        bandStackOuterPadding
+        + headerBandHeight   + bandStackInnerSpacing
+        + capBandHeight      + bandStackInnerSpacing
+    /// Distance from the strip column's bottom edge to the bottom of
+    /// the bar zone, mirror of `barZoneTopOffset`. The dB-scale
+    /// column pads its bottom by exactly this value so the "-60" tick
+    /// lines up with the bar's −60 dBFS floor.
+    public static let barZoneBottomOffset: CGFloat =
+        bandStackOuterPadding
+        + actionBandHeight   + bandStackInnerSpacing
+        + readoutBandHeight  + bandStackInnerSpacing
+        + capBandHeight      + bandStackInnerSpacing
     /// Spacing between the SOURCE and DESTINATION section frames.
     public static let sectionSpacing:    CGFloat = 14
     /// Floor on each section's width when the window is too narrow to

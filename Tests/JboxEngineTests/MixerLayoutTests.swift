@@ -243,4 +243,56 @@ struct MixerLayoutTests {
             + MixerPanelLayout.stripSpacing(isCompact: isCompact)
         #expect(MixerPanelLayout.vcaSlotWidth(isCompact: isCompact) == expected)
     }
+
+    // MARK: - Bar-zone vertical offsets (scale ↔ bar alignment)
+
+    // Regression coverage for issue #12: the section dB scale's canvas
+    // must occupy the same vertical span as the bar zone inside a
+    // `MixerStripColumn`, otherwise the "0 / -3 / -6 / … / -60" marks
+    // don't line up with the bar fill or the peak-hold tick. The
+    // offsets below name the gap between the column's top/bottom and
+    // the bar zone, derived from the explicit band-stack composition
+    // in `MixerStripColumn`. `SectionScale` consumes the same
+    // constants for its top/bottom padding so a band-height edit on
+    // either side flows into the other.
+
+    @Test("bandStack inner spacing and outer padding are positive non-zero")
+    func bandStackConstantsPositive() {
+        #expect(MixerPanelLayout.bandStackInnerSpacing > 0)
+        #expect(MixerPanelLayout.bandStackOuterPadding > 0)
+    }
+
+    @Test("barZoneTopOffset = outer pad + header + +12 cap + 2× inner spacing")
+    func barZoneTopOffsetMatchesBandStack() {
+        // Mirrors the cumulative offset above the `barZone` in
+        // `MixerStripColumn`: outer padding, then the header band, an
+        // inner-spacing gap, the "+12" cap band, and one more
+        // inner-spacing gap before the bar zone begins.
+        let expected = MixerPanelLayout.bandStackOuterPadding
+            + MixerPanelLayout.headerBandHeight
+            + MixerPanelLayout.bandStackInnerSpacing
+            + MixerPanelLayout.capBandHeight
+            + MixerPanelLayout.bandStackInnerSpacing
+        #expect(MixerPanelLayout.barZoneTopOffset == expected)
+        // Concrete value pin so a band-stack composition change (e.g.
+        // a band added or removed) is visible at review time.
+        #expect(MixerPanelLayout.barZoneTopOffset == 40)
+    }
+
+    @Test("barZoneBottomOffset = outer pad + action + readout + −∞ cap + 3× inner spacing")
+    func barZoneBottomOffsetMatchesBandStack() {
+        // Mirrors the cumulative offset below the `barZone` in
+        // `MixerStripColumn`: inner-spacing, "−∞" cap, inner-spacing,
+        // readout band, inner-spacing, action band, then outer
+        // padding at the very bottom.
+        let expected = MixerPanelLayout.bandStackOuterPadding
+            + MixerPanelLayout.actionBandHeight
+            + MixerPanelLayout.bandStackInnerSpacing
+            + MixerPanelLayout.readoutBandHeight
+            + MixerPanelLayout.bandStackInnerSpacing
+            + MixerPanelLayout.capBandHeight
+            + MixerPanelLayout.bandStackInnerSpacing
+        #expect(MixerPanelLayout.barZoneBottomOffset == expected)
+        #expect(MixerPanelLayout.barZoneBottomOffset == 66)
+    }
 }

@@ -119,14 +119,18 @@ struct MeterSectionFrame<Content: View>: View {
 
 /// Anchored dB scale rendered inside a section frame. Used identically
 /// in SOURCE and DESTINATION so the scale visually anchors each
-/// section's bar zones at the same vertical extent. Padded top + bottom
-/// by `MixerPanelLayout.capBandHeight` so its tick range matches the
-/// strip columns' bar-zone range.
+/// section's bar zones at the same vertical extent. Padded by
+/// `MixerPanelLayout.barZoneTopOffset` / `barZoneBottomOffset` so its
+/// canvas spans exactly the same y-range as the bar zone in
+/// `MixerStripColumn` — "0" lines up with 0 dBFS at the top of the
+/// bar, "-60" with −60 dBFS at the bottom, every intermediate tick at
+/// the matching fill height. Issue #12.
 private struct SectionScale: View {
     var body: some View {
         DbScale()
             .frame(width: MixerPanelLayout.scaleColumnWidth)
-            .padding(.vertical, MixerPanelLayout.capBandHeight)
+            .padding(.top, MixerPanelLayout.barZoneTopOffset)
+            .padding(.bottom, MixerPanelLayout.barZoneBottomOffset)
     }
 }
 
