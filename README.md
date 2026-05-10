@@ -31,7 +31,7 @@ What shipped, though, is a generic Core Audio routing tool — nothing in the en
 JBox routes selected channels of one Core Audio device to selected channels of another, in real time. Source and destination can be the same physical interface (e.g., feeding a hardware input into that interface's DSP-routable channels) or two different devices — JBox does not care which direction the user thinks of as "output" vs "input"; it works at the Core Audio device + channel level.
 
 <p align="center">
-  <img alt="JBox route view" src="./assets/jbox-route-view.png" width="720">
+  <img alt="JBox route view" src="./assets/jbox-meters-view.png" width="720">
 </p>
 
 - **Arbitrary 1:N channel mapping** — pick any source channels, any destination channels, map them in any order. A single source channel may feed multiple destination channels (fan-out); multi-source summing (fan-in) is out of scope.
