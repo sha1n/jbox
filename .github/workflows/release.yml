@@ -1,28 +1,39 @@
 name: Release
 
+# Fires when a release is created via the GitHub UI (draft or published).
+# The release author writes the notes in the UI; this workflow only builds
+# the DMG and attaches it as an asset. Because the UI creates the tag on
+# the target branch (master), tag-on-master is mechanically enforced — the
+# orphan-tag failure mode from the v0.1.0-alpha cut cannot recur.
+
 on:
-  push:
-    tags:
-      - 'v*'
+  release:
+    types: [created]
 
 permissions:
-  contents: write   # needed to create / update releases
+  contents: write   # needed to upload the DMG as a release asset
+
+concurrency:
+  group: release-${{ github.event.release.tag_name }}
+  cancel-in-progress: false
 
 jobs:
   build-dmg:
-    name: Build DMG & draft release
+    name: Build DMG & upload asset
     runs-on: macos-15
     timeout-minutes: 20
 
     steps:
-      - name: Checkout
+      - name: Checkout at release tag
         uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.release.tag_name }}
 
       - name: Derive version
         id: version
         run: |
           # Strip leading 'v' from the tag (v0.0.1-alpha -> 0.0.1-alpha).
-          tag="${GITHUB_REF_NAME}"
+          tag="${{ github.event.release.tag_name }}"
           version="${tag#v}"
           echo "tag=${tag}"         >> "$GITHUB_OUTPUT"
           echo "version=${version}" >> "$GITHUB_OUTPUT"
@@ -49,27 +60,35 @@ jobs:
         run: |
           ls -lh build/Jbox-${{ steps.version.outputs.version }}.dmg
 
-      - name: Create GitHub Release (draft, pre-release)
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ steps.version.outputs.tag }}
-          name: JBox ${{ steps.version.outputs.version }}
-          draft: true
-          prerelease: true
-          generate_release_notes: true
-          files: |
-            build/Jbox-${{ steps.version.outputs.version }}.dmg
-          body: |
-            JBox ${{ steps.version.outputs.version }} — ad-hoc signed build.
+      - name: Upload DMG to release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # --clobber lets re-runs (e.g. failed first attempt, manual rerun
+          # from the Actions tab) overwrite a partial upload of the same name.
+          gh release upload "${{ steps.version.outputs.tag }}" \
+            "build/Jbox-${{ steps.version.outputs.version }}.dmg" \
+            --clobber
 
-            **What's in the DMG:**
+      - name: Append install instructions to release body
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ steps.version.outputs.version }}
+          TAG: ${{ steps.version.outputs.tag }}
+          ISSUES_URL: ${{ github.server_url }}/${{ github.repository }}/issues
+        run: |
+          set -euo pipefail
 
-            - `Jbox.app` (GUI placeholder until Phase 6)
-            - `JboxEngineCLI` bundled inside the `.app` at `Contents/MacOS/JboxEngineCLI`
-            - Drag-to-Applications symlink
-            - Double-click `Uninstall Jbox.command` to remove all files this install deploys
-            - `READ-THIS-FIRST.txt` with first-launch Gatekeeper steps and CLI usage
+          # Marker line lets us strip a prior auto-appended footer on re-runs
+          # so the workflow is idempotent and the footer never stacks.
+          MARKER='<!-- jbox-install-footer -->'
 
-            **First-run Gatekeeper note:** this build is not notarized. On first launch
-            macOS will block the app; right-click → Open once to approve. Details are in
-            `READ-THIS-FIRST.txt` inside the DMG.
+          curated=$(gh release view "$TAG" --json body --jq '.body // ""')
+          curated_clean=$(printf '%s' "$curated" | awk -v m="$MARKER" '$0 == m {exit} {print}')
+
+          footer=$(sed -e "s|\${VERSION}|${VERSION}|g" \
+                       -e "s|\${ISSUES_URL}|${ISSUES_URL}|g" \
+                       .github/release-install-footer.md.tpl)
+
+          printf '%s\n%s\n' "$curated_clean" "$footer" \
+            | gh release edit "$TAG" --notes-file -
