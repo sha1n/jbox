@@ -1,14 +1,16 @@
 name: Release
 
-# Fires when a release is created via the GitHub UI (draft or published).
-# The release author writes the notes in the UI; this workflow only builds
-# the DMG and attaches it as an asset. Because the UI creates the tag on
-# the target branch (master), tag-on-master is mechanically enforced — the
-# orphan-tag failure mode from the v0.1.0-alpha cut cannot recur.
+# Fires when a release is published via the GitHub UI. GitHub does NOT
+# emit `release` events for drafts, so `published` is the only viable
+# trigger — drafts can't be pre-built. The release author writes the
+# notes in the UI; this workflow builds the DMG and attaches it as an
+# asset. Because the UI creates the tag on the target branch (master),
+# tag-on-master is mechanically enforced — the orphan-tag failure mode
+# from the v0.1.0-alpha cut cannot recur.
 
 on:
   release:
-    types: [created]
+    types: [published]
 
 permissions:
   contents: write   # needed to upload the DMG as a release asset
