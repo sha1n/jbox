@@ -140,4 +140,68 @@ struct MeterLevelTests {
             #expect(mark.dB >= MeterLevel.floorDb)
         }
     }
+
+    // MARK: - dbScaleTickY (dB-scale label-headroom layout)
+    //
+    // `DbScale` draws its Canvas slightly taller than the bar zone so
+    // the top / bottom labels ("0" and "-60") have room to sit
+    // outside the bar zone without being clipped by the Canvas's own
+    // bounds. The bar zone occupies the subrange
+    // `[labelOverflow, canvasHeight - labelOverflow]` inside the
+    // Canvas — `dbScaleTickY` maps a dB mark to its tick y inside
+    // that subrange, so the "0" tick line lands exactly on the bar
+    // zone's top edge and "-60" on the bottom edge regardless of how
+    // much vertical headroom is reserved for labels.
+
+    @Test("0 dBFS tick lands on the bar zone's top edge inside the canvas")
+    func tickYTopEdge() {
+        let y = MeterLevel.dbScaleTickY(forDb: 0,
+                                        canvasHeight: 212,
+                                        labelOverflow: 6)
+        #expect(y == 6)
+    }
+
+    @Test("-60 dBFS tick lands on the bar zone's bottom edge inside the canvas")
+    func tickYBottomEdge() {
+        let y = MeterLevel.dbScaleTickY(forDb: -60,
+                                        canvasHeight: 212,
+                                        labelOverflow: 6)
+        #expect(y == 206)
+    }
+
+    @Test("-30 dBFS tick lands at the midpoint of the bar zone subrange")
+    func tickYMidpoint() {
+        // Bar zone is [6, 206] → midpoint 106.
+        let y = MeterLevel.dbScaleTickY(forDb: -30,
+                                        canvasHeight: 212,
+                                        labelOverflow: 6)
+        #expect(y == 106)
+    }
+
+    @Test("zero labelOverflow collapses to the canvas-edge mapping")
+    func tickYZeroOverflow() {
+        // No headroom → the bar zone fills the whole canvas, matching
+        // the pre-headroom mapping `size.height * (1 - frac)`.
+        #expect(MeterLevel.dbScaleTickY(forDb: 0,
+                                        canvasHeight: 200,
+                                        labelOverflow: 0) == 0)
+        #expect(MeterLevel.dbScaleTickY(forDb: -60,
+                                        canvasHeight: 200,
+                                        labelOverflow: 0) == 200)
+    }
+
+    @Test("canvas smaller than 2x labelOverflow degenerates without negative inner range")
+    func tickYDegenerateCanvas() {
+        // Defensive: avoid a negative inner span when the canvas is
+        // too short to fit the headroom. Both top and bottom ticks
+        // collapse to `labelOverflow`.
+        let yTop = MeterLevel.dbScaleTickY(forDb: 0,
+                                           canvasHeight: 8,
+                                           labelOverflow: 6)
+        let yBot = MeterLevel.dbScaleTickY(forDb: -60,
+                                           canvasHeight: 8,
+                                           labelOverflow: 6)
+        #expect(yTop == 6)
+        #expect(yBot == 6)
+    }
 }

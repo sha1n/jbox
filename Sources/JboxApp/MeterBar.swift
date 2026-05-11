@@ -127,10 +127,17 @@ struct MeterSectionFrame<Content: View>: View {
 /// the matching fill height. Issue #12.
 private struct SectionScale: View {
     var body: some View {
+        // The Canvas grows by `dbScaleLabelOverflow` above and below
+        // the bar zone so the "0" / "-60" labels have room to sit
+        // outside the bar-zone subrange — `DbScale` maps tick lines
+        // back to the bar-zone edges via `MeterLevel.dbScaleTickY`,
+        // so alignment with the adjacent strip column is unchanged.
         DbScale()
             .frame(width: MixerPanelLayout.scaleColumnWidth)
-            .padding(.top, MixerPanelLayout.barZoneTopOffset)
-            .padding(.bottom, MixerPanelLayout.barZoneBottomOffset)
+            .padding(.top, MixerPanelLayout.barZoneTopOffset
+                     - MixerPanelLayout.dbScaleLabelOverflow)
+            .padding(.bottom, MixerPanelLayout.barZoneBottomOffset
+                     - MixerPanelLayout.dbScaleLabelOverflow)
     }
 }
 
@@ -361,24 +368,30 @@ struct DbScale: View {
 
     var body: some View {
         Canvas { ctx, size in
+            let overflow = MixerPanelLayout.dbScaleLabelOverflow
             for mark in Self.marks {
-                let dB = mark.dB
-                let label = mark.label
-                let frac = MeterLevel.fractionFor(dB: dB)
-                let y = size.height * (1 - CGFloat(frac))
+                let y = MeterLevel.dbScaleTickY(
+                    forDb: mark.dB,
+                    canvasHeight: size.height,
+                    labelOverflow: overflow)
                 var line = Path()
                 line.move(to: CGPoint(x: size.width - 2, y: y))
                 line.addLine(to: CGPoint(x: size.width, y: y))
                 ctx.stroke(line,
                            with: .color(.secondary.opacity(0.5)),
                            lineWidth: 0.5)
-                let text = Text(label)
+                let text = Text(mark.label)
                     .font(.system(size: 8).monospaced())
                     .foregroundColor(.secondary)
                 let resolved = ctx.resolve(text)
-                let tSize = resolved.measure(in: size)
+                // Right-anchor every label at the same x so wider
+                // labels ("-12") don't drift left of narrower ones
+                // ("0"). The Canvas's vertical headroom keeps the
+                // top/bottom labels fully visible even though their
+                // text rect is centered on a tick that sits at the
+                // bar-zone edge.
                 ctx.draw(resolved,
-                         at: CGPoint(x: size.width - 4 - tSize.width / 2, y: y),
+                         at: CGPoint(x: size.width - 4, y: y),
                          anchor: .trailing)
             }
         }

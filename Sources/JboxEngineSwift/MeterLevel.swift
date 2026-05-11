@@ -1,3 +1,4 @@
+import CoreGraphics
 import Foundation
 
 /// Pure dB-to-fraction math and color-zone classification for the
@@ -50,6 +51,23 @@ public enum MeterLevel {
     /// inclusive of 0 and `floorDb`). Used by the SwiftUI `DbScale`
     /// view to draw gridlines + labels along the bar zone.
     /// See `docs/spec.md` § 4.5.
+    /// Map a dBFS mark to the y coordinate of its tick line inside a
+    /// `DbScale` Canvas of total height `canvasHeight`. The bar zone
+    /// occupies the inner subrange `[labelOverflow, canvasHeight -
+    /// labelOverflow]`; the extra `labelOverflow` of headroom above
+    /// and below is reserved for the "0" and "-60" labels so they
+    /// don't get clipped by the Canvas's own bounds. The tick line
+    /// for 0 dBFS lands exactly on the bar zone's top edge regardless
+    /// of how much headroom is reserved, and likewise for −60 dBFS at
+    /// the bottom edge.
+    public static func dbScaleTickY(forDb dB: Float,
+                                    canvasHeight: CGFloat,
+                                    labelOverflow: CGFloat) -> CGFloat {
+        let inner = max(0, canvasHeight - 2 * labelOverflow)
+        let frac = fractionFor(dB: dB)
+        return labelOverflow + inner * CGFloat(1 - frac)
+    }
+
     public static let dawScaleMarks: [(dB: Float, label: String)] = [
         (0,   "0"),
         (-3,  "-3"),

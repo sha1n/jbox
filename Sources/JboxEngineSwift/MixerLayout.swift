@@ -115,6 +115,15 @@ public enum MixerPanelLayout {
     /// inside both SOURCE and DESTINATION sections so the bar zones
     /// next to it have the same starting x within their frames.
     public static let scaleColumnWidth: CGFloat = 28
+    /// Vertical headroom the dB scale's Canvas reserves above the bar
+    /// zone's top edge and below its bottom edge. The "0" and "-60"
+    /// labels live inside this headroom — full text rect fits without
+    /// being clipped by Canvas bounds, while the tick line still
+    /// terminates exactly at the bar zone's edge. `SectionScale`
+    /// shrinks its top / bottom padding by this amount so the Canvas
+    /// grows symmetrically; the bar-zone alignment to the strip
+    /// column next to it is preserved.
+    public static let dbScaleLabelOverflow: CGFloat = 6
     /// At-or-above this channel count, the panel switches to compact
     /// tier (narrower strips, numeric strip headers, shorter panel).
     /// Single source of truth for the threshold.
