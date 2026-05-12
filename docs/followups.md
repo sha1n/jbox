@@ -25,11 +25,11 @@ the questions and the pitfalls explicitly.
 
 ## F1 — Production HAL property listener registration in `CoreAudioBackend`
 
-**Status:** 🚧 Engine landed (2026-04-28); awaiting manual hardware
-acceptance per § Acceptance below. The HAL listener wiring + pure
-translator helper + reconciliation path all ship in this commit;
-the simulator path remains the CI-runnable contract test, and the
-real-hardware acceptance pass is the user's gate.
+**Status:** ✅ Closed 2026-05-12 — hardware acceptance pass complete;
+see [`2026-05-12-f1-hardware-acceptance-debug-session.md`](2026-05-12-f1-hardware-acceptance-debug-session.md)
+for the run record. Engine wiring landed 2026-04-28; all three
+acceptance criteria below verified on real hardware against the
+`v0.1.0-alpha` DMG.
 
 ### Problem
 
@@ -208,6 +208,8 @@ Manual hardware tests, since CI can't exercise this path:
    becomes blocking, not optional.)
 
 **2026-05-02 update.** F1's acceptance test #1 (yank a sub-device of a running aggregate) now has simulator-path regression coverage under the `[route_manager][aggregate_loss]` Catch2 tag (6 cases total — direct sub-device IsNotAlive, kAggregateMembersChanged with member loss / without member loss, idempotency on repeats, unrelated-aggregate non-effect, plus the skip-set mechanism that keeps a torn-down route from being silently re-promoted by the same-drain WAITING-retry pass). Landed under sub-phase 7.6.6 (see `docs/plan.md` § Phase 7.6 → sub-phase 7.6.6). Production HAL pass remains the user's gate; F1's status stays "🚧 Engine landed; awaiting manual hardware acceptance."
+
+**2026-05-12 update.** Hardware acceptance pass complete against the `v0.1.0-alpha` DMG. All three criteria above verified on a two-device rig (USB source + Thunderbolt destination, plus an aggregate wrapping both). Test #3 single-passed — F3 stays optional, not promoted to blocker. A side-anomaly on the post-replug latency pill was investigated and ruled out as an engine bug; full run record + investigation chronology at [`2026-05-12-f1-hardware-acceptance-debug-session.md`](2026-05-12-f1-hardware-acceptance-debug-session.md).
 
 ### References
 
